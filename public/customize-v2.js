@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk', 'follow'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk', 'follow'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -52,10 +52,82 @@
     sectionBg: '--section-bg',
     cardBg: '--card-bg', contentBg: '--content-bg', detailBg: '--detail-bg',
     inputBg: '--input-bg', rowStripe: '--row-stripe', rowHover: '--row-hover', selectedBg: '--selected-bg',
+    pathHashWarn: '--path-hash-warn',
+    // #681 M6 — the terrain-profile chart. These live in the theme /
+    // themeDark sections like every other colour, so light and dark are
+    // edited separately and _resetAll strips them with the rest.
+    terrainFill: '--terrain-fill', terrainClutter: '--terrain-clutter',
+    losLine: '--los-line', fresnel100: '--fresnel-100',
+    fresnel60: '--fresnel-60', profileBlocked: '--profile-blocked',
+    // #730 M3 — the surface band by class.
+    terrainBuilding: '--terrain-building', terrainVegetation: '--terrain-vegetation',
+    // #789 M3 — the badge of a height the node's owner set (Path profile and
+    // the node page's antenna section).
+    ownerBadge: '--owner-badge',
+    // #724 M3 — the antenna sites map layer (canvas markers + popup).
+    mastSite: '--mast-site', mastInterference: '--mast-interference',
+    // #914 — the node heat map's five-stop gradient (violet -> magenta).
+    heat1: '--heat-1', heat2: '--heat-2', heat3: '--heat-3', heat4: '--heat-4', heat5: '--heat-5',
+    // #881 M3 — the Live "Moments" cards: the card fill and one icon /
+    // stripe accent per kind.
+    momentCardBg: '--moment-card-bg', momentNewNode: '--moment-new-node',
+    momentBackOnline: '--moment-back-online', momentRecordLink: '--moment-record-link',
+    momentBusiest: '--moment-busiest',
+    // #883 M2 — the Live kiosk big-number tiles: the fill and the numbers.
+    kioskTileBg: '--kiosk-tile-bg', kioskNumber: '--kiosk-number',
+    // #880 M3 — Live "Follow a packet": the rings, relays, observers and
+    // the unreliable-clock flag.
+    followRing: '--follow-ring', followRelay: '--follow-relay',
+    followObserver: '--follow-observer', followFlag: '--follow-flag',
     font: '--font', mono: '--mono'
   };
 
-  var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) { return k !== 'font' && k !== 'mono'; });
+  // #681 M6 — the terrain keys are themeable but no PRESET defines them,
+  // so they must stay out of preset detection: an operator who recolours
+  // the profile chart has not stopped using the preset they picked.
+  var TERRAIN_COLOR_KEYS = ['terrainFill', 'terrainClutter', 'losLine', 'fresnel100', 'fresnel60', 'profileBlocked',
+    'terrainBuilding', 'terrainVegetation', 'ownerBadge'];
+  // #724 M3 — likewise outside preset detection: no preset defines them.
+  var MASTS_COLOR_KEYS = ['mastSite', 'mastInterference'];
+  // #914 — likewise: the heat map gradient; colour-blind presets set it
+  // through --mc-heat-{light,dark}-N, not through these keys.
+  var HEAT_COLOR_KEYS = ['heat1', 'heat2', 'heat3', 'heat4', 'heat5'];
+  // The user's pick goes to its own slot, --heat-user-N, which style.css puts
+  // above the preset's ramp; THEME_CSS_MAP's --heat-N carries server config.
+  function _heatUserVar(key) { return THEME_CSS_MAP[key].replace('--heat-', '--heat-user-'); }
+
+  // #914 — the heat map follows the #1446 cascade: user override > colour-
+  // blind preset > server config > style.css. The value in effect for the
+  // mode is the user's only when the user's layer won the merge (in dark
+  // mode a server themeDark value beats a user light value, as for every
+  // theme key). A key with no value is removed, so a cleared override falls
+  // back to the preset or the stylesheet without a reload.
+  function _applyHeatCSS(root, effectiveConfig, userOverrides, dark) {
+    var eff = effectiveConfig || {}, ov = userOverrides || {};
+    HEAT_COLOR_KEYS.forEach(function (k) {
+      var fromDark = dark && eff.themeDark && eff.themeDark[k];
+      var val = fromDark || (eff.theme && eff.theme[k]) || '';
+      var userSec = fromDark ? ov.themeDark : ov.theme;
+      var user = !!(val && userSec && userSec[k]);
+      if (user) root.setProperty(_heatUserVar(k), val); else root.removeProperty(_heatUserVar(k));
+      if (val && !user) root.setProperty(THEME_CSS_MAP[k], val); else root.removeProperty(THEME_CSS_MAP[k]);
+    });
+  }
+
+  // #881 M3 — likewise: the kind accents follow the colourblind preset
+  // (cb-presets.js momentAccents), not the theme preset.
+  var MOMENTS_COLOR_KEYS = ['momentCardBg', 'momentNewNode', 'momentBackOnline', 'momentRecordLink', 'momentBusiest'];
+  // #883 M2 — likewise outside preset detection: no preset defines them.
+  var KIOSK_COLOR_KEYS = ['kioskTileBg', 'kioskNumber'];
+  // #880 M3 — likewise: the relay and observer colours follow the
+  // colourblind preset (cb-presets.js followAccents), not the theme preset.
+  var FOLLOW_COLOR_KEYS = ['followRing', 'followRelay', 'followObserver', 'followFlag'];
+
+  var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {
+    return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1 && MASTS_COLOR_KEYS.indexOf(k) === -1 &&
+      HEAT_COLOR_KEYS.indexOf(k) === -1 && MOMENTS_COLOR_KEYS.indexOf(k) === -1 && KIOSK_COLOR_KEYS.indexOf(k) === -1 &&
+      FOLLOW_COLOR_KEYS.indexOf(k) === -1;
+  });
 
   // ── Brand logo swap helper (PR #1137) ──
   // The default navbar brand logo is an inline <svg class="brand-logo"> so it
@@ -67,6 +139,8 @@
   function _setBrandLogoUrl(url, alt) {
     var node = document.querySelector('.nav-brand .brand-logo');
     if (!node) return;
+    // #429 — a URL the shared scheme check rejects is treated as cleared.
+    if (url && !_brandUrlOk(url)) url = '';
     if (url) {
       if (node.tagName.toLowerCase() === 'img') {
         node.setAttribute('src', url);
@@ -95,6 +169,17 @@
       node.setAttribute('src', 'img/corescope-logo.svg');
       if (alt != null) node.setAttribute('alt', alt);
     }
+  }
+  // #429 — branding URLs are customization content (server theme, stored
+  // overrides, theme import), so they get the scheme check roles.js exports
+  // for miniMarkdown and Home footer links, in its image-sink form. Fails
+  // closed when roles.js is not loaded.
+  function _brandUrlOk(url) {
+    return typeof window.isSafeImageUrl === 'function' && window.isSafeImageUrl(url);
+  }
+  function _setFaviconUrl(url) {
+    var link = document.querySelector('link[rel="icon"]');
+    if (link && url && _brandUrlOk(url)) link.href = url;
   }
   function _setBrandAlt(alt) {
     var node = document.querySelector('.nav-brand .brand-logo');
@@ -300,7 +385,18 @@
     statusGreen: 'Healthy', statusYellow: 'Warning', statusRed: 'Error',
     surface1: 'Cards', surface2: 'Panels', surface3: 'Tertiary Surface', sectionBg: 'Section Header', cardBg: 'Card Fill', contentBg: 'Content Area',
     detailBg: 'Detail Panels', inputBg: 'Inputs', rowStripe: 'Table Stripe',
-    rowHover: 'Row Hover', selectedBg: 'Selected',
+    rowHover: 'Row Hover', selectedBg: 'Selected', pathHashWarn: '1-byte Path Hash',
+    terrainFill: 'Terrain (DTM)', terrainClutter: 'Trees & Buildings (DSM)',
+    losLine: 'Line of Sight', fresnel100: 'Fresnel Zone', fresnel60: 'Fresnel 60 %',
+    profileBlocked: 'Obstruction',
+    terrainBuilding: 'Buildings (DSM)', terrainVegetation: 'Trees/other (DSM)',
+    ownerBadge: 'Owner Height Badge',
+    mastSite: 'Antenna Site', mastInterference: 'Interference Ring',
+    heat1: 'Heat: low', heat2: 'Heat: low-mid', heat3: 'Heat: mid', heat4: 'Heat: high', heat5: 'Heat: peak',
+    momentCardBg: 'Card Fill', momentNewNode: 'New Node', momentBackOnline: 'Back Online',
+    momentRecordLink: 'Record Link', momentBusiest: 'Busiest Repeater',
+    kioskTileBg: 'Tile Fill', kioskNumber: 'Numbers',
+    followRing: 'Rings and Card', followRelay: 'Relays', followObserver: 'Observers', followFlag: 'Clock Flag',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -318,6 +414,33 @@
     cardBg: 'Detail panels, modals', contentBg: 'Content area behind cards',
     detailBg: 'Modal, packet detail, side panels', inputBg: 'Text inputs, dropdowns',
     rowStripe: 'Alternating table rows', rowHover: 'Table row hover', selectedBg: 'Selected/active rows',
+    pathHashWarn: 'Amber accent recommending a 2/3-byte over a 1-byte path hash (channels, packet detail, node badge)',
+    terrainFill: 'Path profile: the bare ground from the terrain model',
+    terrainClutter: 'Path profile: what the surface model adds over the ground — canopy, rooftops',
+    losLine: 'Path profile: the straight line between the two antennas, and the map line while picking',
+    fresnel100: 'Path profile: the outline of the first Fresnel zone',
+    fresnel60: 'Path profile: the 60 % criterion a link has to clear',
+    profileBlocked: 'Path profile: where terrain rises into the zone',
+    terrainBuilding: 'Path profile: the surface inside a building footprint, where buildings are told from trees',
+    terrainVegetation: 'Path profile: the raised surface with no building footprint — trees or other',
+    ownerBadge: 'Path profile and node page: the badge on an antenna height the node\u2019s owner set',
+    mastSite: 'Map: every Mastedatabasen antenna site (mast, tower or rooftop)',
+    mastInterference: 'Map: the ring around sites with a 700/800/900 MHz transmitter',
+    heat1: 'Map and Live heat map: the faintest areas (violet by default)',
+    heat2: 'Map and Live heat map: low density', heat3: 'Map and Live heat map: medium density',
+    heat4: 'Map and Live heat map: high density',
+    heat5: 'Map and Live heat map: the densest areas (magenta by default)',
+    momentCardBg: 'Live: the background of a Moments card and of its drawer rows',
+    momentNewNode: 'Live: the icon and stripe of a new-node moment',
+    momentBackOnline: 'Live: the icon and stripe of a back-online moment',
+    momentRecordLink: 'Live: the icon and stripe of a record-link moment',
+    momentBusiest: 'Live: the icon and stripe of a busiest-repeater moment',
+    kioskTileBg: 'Live kiosk (TV mode): the background of the big-number tiles',
+    kioskNumber: 'Live kiosk (TV mode): the big numbers in the tiles',
+    followRing: 'Live, Follow a packet: the hop rings, the origin and the follow card accent',
+    followRelay: 'Live, Follow a packet: a relay that retransmitted the packet',
+    followObserver: 'Live, Follow a packet: an observer that heard the packet',
+    followFlag: 'Live, Follow a packet: the flag on an observer with an unreliable clock',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
@@ -379,10 +502,388 @@
   }
 
   var BASIC_KEYS = ['accent', 'navBg', 'navText', 'background', 'text', 'statusGreen', 'statusYellow', 'statusRed'];
-  var ADVANCED_KEYS = ['accentHover', 'navBg2', 'navTextMuted', 'navActiveBg', 'textMuted', 'border', 'surface1', 'surface2', 'cardBg', 'contentBg', 'detailBg', 'inputBg', 'rowStripe', 'rowHover', 'selectedBg'];
+  var ADVANCED_KEYS = ['accentHover', 'navBg2', 'navTextMuted', 'navActiveBg', 'textMuted', 'border', 'surface1', 'surface2', 'cardBg', 'contentBg', 'detailBg', 'inputBg', 'rowStripe', 'rowHover', 'selectedBg', 'pathHashWarn'];
   var FONT_KEYS = ['font', 'mono'];
 
+  // ── #681 M6 — terrain-profile defaults ──
+  // The customizer owns the DEFAULT antenna height per endpoint kind and
+  // the default elevation model. Everything that decides physics or costs
+  // money — the k-factor, the frequency, and the whole map.dhm block with
+  // its Dataforsyningen token — stays in server config and is deliberately
+  // absent here (#681 owner decision on M6).
+  //
+  // Height precedence, most specific first (see public/terrain-profile.js):
+  //   1. the deep link (?ha=/?hb=)            badge "link"
+  //   2. the viewer's own remembered height   badge "yours"
+  //   3. the operator's radio.antennaHeightsM badge "operator"
+  //   4. THIS section                         badge "default"
+  //   5. the server's built-in role defaults  badge "default"
+  // The customizer is a default, so it yields to an operator who named a
+  // real height for a node or a role in config.json, and it is never
+  // written into a shared link.
+  var TERRAIN_HEIGHT_FIELDS = [
+    { key: 'heightRepeater', label: 'Repeater', hint: 'Mast-mounted infrastructure' },
+    { key: 'heightRoom', label: 'Room server', hint: 'Usually indoors, on a shelf or wall' },
+    { key: 'heightCompanion', label: 'Companion', hint: 'Handheld, roughly head height' },
+    { key: 'heightSensor', label: 'Sensor', hint: 'Telemetry nodes' },
+    { key: 'heightPoint', label: 'Map point', hint: 'A spot picked on the map, not a node' }
+  ];
+  var TERRAIN_MODELS = ['dtm', 'both'];
+  /* The heights are read from MCAntennaHeight.ROLE_DEFAULTS (antenna-height.js,
+   * loaded first), the one client copy of terrainRoleAntennaM in
+   * cmd/server/terrain_profile.go: the customizer starts from exactly what
+   * the server would have answered, so an untouched section changes nothing.
+   * The model default mirrors the server's too. */
+  var _roleHeights = (window.MCAntennaHeight && window.MCAntennaHeight.ROLE_DEFAULTS) || {};
+  var TERRAIN_DEFAULTS = {
+    heightRepeater: _roleHeights.repeater, heightRoom: _roleHeights.room,
+    heightCompanion: _roleHeights.companion, heightSensor: _roleHeights.sensor,
+    heightPoint: _roleHeights.point, model: 'both'
+  };
+
+  /* Antenna height above ground, in metres, or null when `val` is not one.
+   * The rule lives in public/antenna-height.js, shared with the Path profile
+   * so the customizer stores exactly the value the profile will use (review
+   * PR#714: a looser parseFloat check here let "0x1F4" through as 500).
+   * Without the rule on the page no height is accepted at all. */
+  function _parseAntennaHeight(val) {
+    return window.MCAntennaHeight ? window.MCAntennaHeight.parse(val) : null;
+  }
+
+  function _maxAntennaHeight() {
+    return window.MCAntennaHeight ? window.MCAntennaHeight.MAX_M : 0;
+  }
+
+  function isValidAntennaHeight(val) { return _parseAntennaHeight(val) !== null; }
+
+  /** The effective terrain settings: this section over the built-ins. */
+  function terrainSettings(effectiveConfig) {
+    var src = (effectiveConfig && effectiveConfig.terrain) || {};
+    var out = {};
+    for (var i = 0; i < TERRAIN_HEIGHT_FIELDS.length; i++) {
+      var k = TERRAIN_HEIGHT_FIELDS[i].key;
+      var h = _parseAntennaHeight(src[k]);
+      out[k] = h !== null ? h : TERRAIN_DEFAULTS[k];
+    }
+    out.model = TERRAIN_MODELS.indexOf(src.model) >= 0 ? src.model : TERRAIN_DEFAULTS.model;
+    return out;
+  }
+
+  // ── #727 M4 — share previews ──
+  // terrain.shareLinks is the viewer's own switch: whether the Path
+  // profile's Copy link hands out the link that previews in a chat (when
+  // the server serves one) or the plain map link. It is not a profile
+  // default, so it stays out of terrainSettings and never re-measures.
+  // The card's theme and names are the operator's: the card is drawn once
+  // on the server for everyone, so this section shows them and stores
+  // nothing for them.
+  var TERRAIN_SHARE_KEY = 'shareLinks';
+
+  /** The effective share switch: on unless this section says false. */
+  function shareSettings(effectiveConfig) {
+    var src = (effectiveConfig && effectiveConfig.terrain) || {};
+    return { shareLinks: src[TERRAIN_SHARE_KEY] !== false };
+  }
+
+  // ── #789 M3 — prefer owner heights ──
+  // terrain.preferOwnerHeights is the viewer's own switch: on (the
+  // default), an antenna height the node's owner proved and this site
+  // approved stands against this section's role heights; off, the role
+  // heights replace it like a server default. It changes which heights the
+  // Path profile asks for, so a change re-measures an open profile.
+  var TERRAIN_OWNER_KEY = 'preferOwnerHeights';
+
+  /** The effective owner switch: on unless this section says false. */
+  function ownerSettings(effectiveConfig) {
+    var src = (effectiveConfig && effectiveConfig.terrain) || {};
+    return { preferOwnerHeights: src[TERRAIN_OWNER_KEY] !== false };
+  }
+
+  // ── #724 M5 — antenna sites settings ──
+  // Whether the sites overlay starts on, the zoom gate, and the profile
+  // hint's distance and strong tier. The rule and the bounds live in
+  // public/masts-layer.js (MastsLayer.validSetting / settings), shared with
+  // the layer and the hint, so the customizer stores exactly what they use;
+  // the operator's own values arrive in the client block (map.masts.*,
+  // bounded by cmd/server/masts_proxy.go) and are the starting point.
+  // Without the layer on the page no value is accepted at all.
+  var MASTS_SETTING_KEYS = ['enabled', 'minZoom', 'hintDistanceM', 'hintStrongM'];
+  var _lastMasts = null;
+
+  function _mastsLayer() {
+    var ML = window.MastsLayer;
+    return ML && typeof ML.settings === 'function' && typeof ML.validSetting === 'function' ? ML : null;
+  }
+
+  function _mastsCfg() { return window.MC_getMastsConfig ? window.MC_getMastsConfig() : null; }
+
+  function isValidMastsSetting(key, val) {
+    var ML = _mastsLayer();
+    return !!ML && MASTS_SETTING_KEYS.indexOf(key) >= 0 && ML.validSetting(key, val);
+  }
+
+  /** The effective antenna sites settings (this section over the
+   *  operator's), or null without the layer module. */
+  function mastsSettings(effectiveConfig) {
+    var ML = _mastsLayer();
+    if (!ML) return null;
+    var sec = effectiveConfig && effectiveConfig.masts;
+    return ML.settings(_mastsCfg(), sec && typeof sec === 'object' ? sec : {});
+  }
+
+  // ── #723 M4 — ancient monuments settings ──
+  // Whether the monuments overlay starts on, its opacity, and whether (and
+  // how far out) the Path profile warns about a monument at an end. The
+  // keys, defaults and bounds are the rule in public/map-tile-providers.js
+  // (MC_HERITAGE_SETTINGS), shared with the overlay and the profile, so the
+  // customizer stores exactly what they use. Without the rule on the page no
+  // value is accepted. The server's map.heritage values stay server-only.
+  var _lastHeritage = null;
+
+  function _heritageRule() {
+    var R = window.MC_HERITAGE_SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function _heritageCfg() { return window.MC_getHeritageConfig ? window.MC_getHeritageConfig() : null; }
+
+  function isValidHeritageSetting(key, val) {
+    var R = _heritageRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective monuments settings (this section over the defaults), or
+   *  null without the rule. */
+  function heritageSettings(effectiveConfig) {
+    var R = _heritageRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.heritage;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
+  // ── #881 M3 — Live Moments viewer settings ──
+  // On/off default, visible cards, dwell and one switch per kind. The keys,
+  // defaults and bounds are the rule in public/live-moments.js
+  // (LiveMoments.SETTINGS), which the Live page reads back, so the
+  // customizer stores exactly what is used. That file loads after this one,
+  // hence the lazy lookup; without it no value is accepted. The operator's
+  // thresholds and rate stay in config.json.
+  var _lastMoments = null;
+
+  function _momentsRule() {
+    var R = window.LiveMoments && window.LiveMoments.SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function isValidMomentsSetting(key, val) {
+    var R = _momentsRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective Moments settings (this section over the defaults), or
+   *  null without the rule. */
+  function momentsSettings(effectiveConfig) {
+    var R = _momentsRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.moments;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
+  /** Stores a viewer's valid Moments value: one equal to the server default
+   *  (the operator's moments.display over the built-ins, #969) is a cleared
+   *  override. Compared against the built-in instead, a viewer picking it
+   *  under another operator default would fall back to the operator's. */
+  function _saveMomentsSetting(key, v) {
+    if (v === momentsSettings(_getServer())[key]) clearOverride('moments', key);
+    else setOverride('moments', key, v);
+  }
+
+  // ── #880 M3 — Live "Follow a packet": the viewer's replay settings ──
+  // follow.speed, follow.targetSeconds and follow.settleSeconds, per
+  // browser. The keys, defaults and bounds are the rule in
+  // public/live-follow.js (LiveFollow.SETTINGS), which live.js reads back
+  // from the effective config when a follow loads, so the customizer stores
+  // exactly what the replay uses. That file loads after this one, hence the
+  // lazy lookup; without it no value is accepted. settleSeconds null is the
+  // server's liveMap.propagationBufferMs.
+  function _followRule() {
+    var R = window.LiveFollow && window.LiveFollow.SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function isValidFollowSetting(key, val) {
+    var R = _followRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective Follow settings (this section over the defaults), or
+   *  null without the rule. */
+  function followSettings(effectiveConfig) {
+    var R = _followRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.follow;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
+  /** The server's settle window in whole seconds (what an empty
+   *  settleSeconds means). */
+  function _serverSettleSeconds() {
+    var ms = Number(window.PROPAGATION_BUFFER_MS);
+    return isFinite(ms) && ms >= 0 ? Math.round(ms / 100) / 10 : 5;
+  }
+
+  /** Stores a viewer's Follow value. null, or the value in effect without
+   *  an override (the built-in default; for settleSeconds the server's
+   *  window), is a cleared override. A bad value is refused (false). */
+  function setFollowSetting(key, val) {
+    var R = _followRule();
+    if (!R) return false;
+    if (val === null && key === 'settleSeconds') { clearOverride('follow', key); return true; }
+    if (!isValidFollowSetting(key, val)) return false;
+    var def = key === 'settleSeconds' ? _serverSettleSeconds() : R.DEFAULTS[key];
+    if (val === def) clearOverride('follow', key);
+    else setOverride('follow', key, val);
+    return true;
+  }
+
+  // ── #968 M2 — Live kiosk: the screen's text size and edge margin ──
+  // kiosk.scale and kiosk.safeInsetVmin, per browser. The keys, steps and
+  // bounds are the kiosk's own rule (public/live-kiosk.js,
+  // LiveKiosk.SETTINGS: VIEWER_KEYS, valid, display), which live.js applies
+  // on a kiosk mount and on theme-changed. The operator's preset
+  // (config.json "kiosk", window.MC_KIOSK_CFG) is this section's default:
+  // the viewer's value wins over it, and a value equal to it is not stored.
+  // That file loads after this one, hence the lazy lookup.
+  function _kioskRule() {
+    var R = window.LiveKiosk && window.LiveKiosk.SETTINGS;
+    return R && R.VIEWER_KEYS && typeof R.valid === 'function' && typeof R.display === 'function' ? R : null;
+  }
+
+  function isValidKioskSetting(key, val) {
+    var R = _kioskRule();
+    return !!R && R.VIEWER_KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective scale and inset (this section over the operator
+   *  preset over auto / 3), or null without the rule. */
+  function kioskSettings(effectiveConfig) {
+    var R = _kioskRule();
+    if (!R) return null;
+    return R.display(effectiveConfig && effectiveConfig.kiosk, window.MC_KIOSK_CFG);
+  }
+
+  /** Store one value; the operator's own value clears the override. false
+   *  for a key or value the rule refuses. */
+  function setKioskSetting(key, val) {
+    if (!isValidKioskSetting(key, val)) return false;
+    if (val === _kioskRule().display(null, window.MC_KIOSK_CFG)[key]) clearOverride('kiosk', key);
+    else setOverride('kiosk', key, val);
+    return true;
+  }
+
+  // ── #968 M3 — Predicted reach: the viewer's default environment loss ──
+  // The key, its default (null: the operator's value) and its validation
+  // are the rule in public/coverage.js (PredictedReach.SETTINGS), and its
+  // bounds are PredictedReach.BOUNDS.env, which a Go test pins to the
+  // server's. The panel reads the effective section back, so the customizer
+  // stores exactly what it uses. coverage.js loads after this file, hence
+  // the lazy lookup; without it no value is accepted.
+  function _reachRule() {
+    var P = window.PredictedReach;
+    var R = P && P.SETTINGS;
+    return R && P.BOUNDS && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function _reachBounds() { return _reachRule() ? window.PredictedReach.BOUNDS.env : null; }
+
+  function isValidReachSetting(key, val) {
+    var R = _reachRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The value typed in the Predicted reach field: null when empty (the
+   *  operator's value), the number when the module rule takes it, undefined
+   *  otherwise. Only the decimal grammar is checked here; the bounds are
+   *  the rule's alone (BOUNDS.env), so the field never caps a value the rule
+   *  allows. */
+  function reachInputValue(key, raw) {
+    var P = window.PredictedReach;
+    raw = String(raw).trim();
+    if (raw === '') return null;
+    if (!P || typeof P.isDecimal !== 'function' || !P.isDecimal(raw)) return undefined;
+    var v = Number(raw);
+    return isValidReachSetting(key, v) ? v : undefined;
+  }
+
+  /** The effective reach settings (this section over the defaults), or
+   *  null without the rule. */
+  function reachSettings(effectiveConfig) {
+    var R = _reachRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.reach;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
+  // ── #737 — the oblique photo (Skråfoto) viewer's defaults ──
+  // The first direction, the first zoom and whether the line of sight is
+  // drawn. The keys, values and defaults are the viewer's own rule
+  // (public/skraafoto.js, Skraafoto.SETTINGS), which the viewer reads from
+  // the effective config when it opens, so the customizer stores exactly
+  // what it uses. The server's map.skraafoto config stays server-only.
+  // Without the viewer on the page no value is accepted.
+  function _skraafotoRule() {
+    var S = window.Skraafoto;
+    var R = S && S.SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function isValidSkraafotoSetting(key, val) {
+    var R = _skraafotoRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective viewer defaults (this section over the built-ins), or
+   *  null without the viewer. */
+  function skraafotoSettings(effectiveConfig) {
+    var R = _skraafotoRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.skraafoto;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
+  // ── #734 — DHM overlay defaults ──
+  // Which hillshade a map starts with, whether the contour lines do, the
+  // contour min-zoom and (#792) the elevation colours' opacity. The rule, the built-ins and the server's bounds
+  // live in public/map-tile-providers.js (MC_DHMOverlays), which the
+  // overlays use, so the customizer stores exactly what they read. The
+  // server's map.dhm config itself stays server-only (#681 M6): this is a
+  // viewer section, never `dhm`. Without the registry no value is accepted.
+  var _lastDHM = null;
+
+  function _dhmOverlays() {
+    var D = window.MC_DHMOverlays;
+    return D && typeof D.settings === 'function' && typeof D.validSetting === 'function' ? D : null;
+  }
+
+  function isValidDHMOverlaySetting(key, val) {
+    var D = _dhmOverlays();
+    return !!D && D.SETTING_KEYS.indexOf(key) >= 0 && D.validSetting(key, val);
+  }
+
+  /** The effective DHM overlay defaults (this section over the built-ins),
+   *  or null without the registry. */
+  function dhmOverlaySettings(effectiveConfig) {
+    var D = _dhmOverlays();
+    if (!D) return null;
+    var sec = effectiveConfig && effectiveConfig.dhmOverlays;
+    return D.settings(sec && typeof sec === 'object' ? sec : {});
+  }
+
   // ── Validation helpers ──
+
+  /* An imported file is plain JSON, so a key may well be "hasOwnProperty";
+   * never call the method off the object itself (review PR#714). */
+  function _own(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
 
   var COLOR_RE = /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
   var CSS_FUNC_RE = /^(?:rgb|rgba|hsl|hsla)\s*\(.*\)$/i;
@@ -445,12 +946,21 @@
   var _initDone = false;
   var _saveStatus = 'saved'; // 'saved' | 'saving' | 'error'
   var _writeTimer = null;
+  // #681 M6 — the terrain settings the last pipeline run produced, so the
+  // next one can tell whether they actually moved. null = never run.
+  var _lastTerrain = null;
 
   function readOverrides() {
     try {
       var raw = localStorage.getItem(STORAGE_KEY);
       var parsed = (raw != null) ? JSON.parse(raw) : {};
       if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) parsed = {};
+      // Overrides saved before unknown sections were dropped on write can
+      // still hold one (a `map` section, say). They are filtered here too,
+      // so they never reach SITE_CONFIG or an export (#681 M6).
+      for (var pk in parsed) {
+        if (_own(parsed, pk) && VALID_SECTIONS.indexOf(pk) === -1) delete parsed[pk];
+      }
       // Include favorites and claimed nodes from their own localStorage keys
       try {
         var favs = JSON.parse(localStorage.getItem('meshcore-favorites') || '[]');
@@ -472,12 +982,12 @@
     var clean = {};
     var colorSections = ['theme', 'themeDark', 'nodeColors', 'typeColors'];
     for (var key in delta) {
-      if (!delta.hasOwnProperty(key)) continue;
+      if (!_own(delta, key)) continue;
       if (colorSections.indexOf(key) !== -1 && typeof delta[key] === 'object' && delta[key] !== null) {
         var section = {};
         var src = delta[key];
         for (var sk in src) {
-          if (!src.hasOwnProperty(sk)) continue;
+          if (!_own(src, sk)) continue;
           // font/mono are not colors
           if ((key === 'theme' || key === 'themeDark') && (sk === 'font' || sk === 'mono')) {
             if (typeof src[sk] === 'string') section[sk] = src[sk];
@@ -527,7 +1037,7 @@
         var ts = {};
         var tsrc = delta[key];
         for (var tk in tsrc) {
-          if (!tsrc.hasOwnProperty(tk)) continue;
+          if (!_own(tsrc, tk)) continue;
           if (TS_ENUMS[tk]) {
             if (TS_ENUMS[tk].indexOf(tsrc[tk]) !== -1) {
               ts[tk] = tsrc[tk];
@@ -541,14 +1051,144 @@
           }
         }
         if (Object.keys(ts).length) clean[key] = ts;
+      } else if (key === 'terrain' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #681 M6 — antenna-height defaults and the elevation model.
+        var tIn = delta[key];
+        var tOut = {};
+        for (var thi = 0; thi < TERRAIN_HEIGHT_FIELDS.length; thi++) {
+          var hk = TERRAIN_HEIGHT_FIELDS[thi].key;
+          if (tIn[hk] == null) continue;
+          var th = _parseAntennaHeight(tIn[hk]);
+          if (th !== null) {
+            tOut[hk] = th;
+          } else {
+            console.warn('[customizer-v2] Invalid antenna height rejected:', 'terrain.' + hk, tIn[hk]);
+          }
+        }
+        if (tIn.model != null) {
+          if (TERRAIN_MODELS.indexOf(tIn.model) >= 0) {
+            tOut.model = tIn.model;
+          } else {
+            console.warn('[customizer-v2] Invalid terrain model rejected:', tIn.model);
+          }
+        }
+        // #727 M4 — the share switch, a boolean and nothing else.
+        if (tIn[TERRAIN_SHARE_KEY] != null) {
+          if (typeof tIn[TERRAIN_SHARE_KEY] === 'boolean') {
+            tOut[TERRAIN_SHARE_KEY] = tIn[TERRAIN_SHARE_KEY];
+          } else {
+            console.warn('[customizer-v2] Invalid terrain share setting rejected:', tIn[TERRAIN_SHARE_KEY]);
+          }
+        }
+        // #789 M3 — the owner switch, a boolean and nothing else.
+        if (tIn[TERRAIN_OWNER_KEY] != null) {
+          if (typeof tIn[TERRAIN_OWNER_KEY] === 'boolean') {
+            tOut[TERRAIN_OWNER_KEY] = tIn[TERRAIN_OWNER_KEY];
+          } else {
+            console.warn('[customizer-v2] Invalid terrain owner-height setting rejected:', tIn[TERRAIN_OWNER_KEY]);
+          }
+        }
+        if (Object.keys(tOut).length) clean[key] = tOut;
+      } else if (key === 'masts' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #724 M5 — the antenna sites settings, each by the layer's rule.
+        var mIn = delta[key];
+        var mOut = {};
+        for (var mki = 0; mki < MASTS_SETTING_KEYS.length; mki++) {
+          var mk2 = MASTS_SETTING_KEYS[mki];
+          if (!_own(mIn, mk2) || mIn[mk2] == null) continue;
+          if (isValidMastsSetting(mk2, mIn[mk2])) mOut[mk2] = mIn[mk2];
+          else console.warn('[customizer-v2] Invalid antenna sites setting rejected:', 'masts.' + mk2, mIn[mk2]);
+        }
+        if (Object.keys(mOut).length) clean[key] = mOut;
+      } else if (key === 'heritage' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #723 M4 — the monuments settings, each by the overlay's rule.
+        var hIn = delta[key], hOut = {}, hRule = _heritageRule(), hKeys = hRule ? hRule.KEYS : [];
+        for (var hki = 0; hki < hKeys.length; hki++) {
+          var hk2 = hKeys[hki];
+          if (!_own(hIn, hk2) || hIn[hk2] == null) continue;
+          if (isValidHeritageSetting(hk2, hIn[hk2])) hOut[hk2] = hIn[hk2];
+          else console.warn('[customizer-v2] Invalid ancient monuments setting rejected:', 'heritage.' + hk2, hIn[hk2]);
+        }
+        if (Object.keys(hOut).length) clean[key] = hOut;
+      } else if (key === 'moments' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #881 M3 — the Live Moments settings, each by the module's rule.
+        var moIn = delta[key], moOut = {}, moRule = _momentsRule(), moKeys = moRule ? moRule.KEYS : [];
+        for (var moi = 0; moi < moKeys.length; moi++) {
+          var mok = moKeys[moi];
+          if (!_own(moIn, mok) || moIn[mok] == null) continue;
+          if (isValidMomentsSetting(mok, moIn[mok])) moOut[mok] = moIn[mok];
+          else console.warn('[customizer-v2] Invalid Moments setting rejected:', 'moments.' + mok, moIn[mok]);
+        }
+        if (Object.keys(moOut).length) clean[key] = moOut;
+      } else if (key === 'follow' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #880 M3 — the Follow replay settings, each by the module's rule.
+        var fIn = delta[key], fOut = {}, fRule = _followRule(), fKeys = fRule ? fRule.KEYS : [];
+        for (var fki = 0; fki < fKeys.length; fki++) {
+          var fk2 = fKeys[fki];
+          if (!_own(fIn, fk2) || fIn[fk2] == null) continue;
+          if (isValidFollowSetting(fk2, fIn[fk2])) fOut[fk2] = fIn[fk2];
+          else console.warn('[customizer-v2] Invalid Follow setting rejected:', 'follow.' + fk2, fIn[fk2]);
+        }
+        if (Object.keys(fOut).length) clean[key] = fOut;
+      } else if (key === 'kiosk' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #968 M2 — the kiosk scale and inset, by the kiosk's rule; the
+        // operator-only keys (tour, tiles, …) are never the viewer's.
+        var kIn = delta[key], kOut = {}, kRule = _kioskRule(), kKeys = kRule ? kRule.VIEWER_KEYS : [];
+        for (var kki = 0; kki < kKeys.length; kki++) {
+          var kk2 = kKeys[kki];
+          if (!_own(kIn, kk2) || kIn[kk2] == null) continue;
+          if (isValidKioskSetting(kk2, kIn[kk2])) kOut[kk2] = kIn[kk2];
+          else console.warn('[customizer-v2] Invalid Live kiosk setting rejected:', 'kiosk.' + kk2, kIn[kk2]);
+        }
+        if (Object.keys(kOut).length) clean[key] = kOut;
+      } else if (key === 'reach' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #968 M3 — the Predicted reach default, by the module's rule.
+        var rIn = delta[key], rOut = {}, rRule = _reachRule(), rKeys = rRule ? rRule.KEYS : [];
+        for (var rki = 0; rki < rKeys.length; rki++) {
+          var rk = rKeys[rki];
+          if (!_own(rIn, rk) || rIn[rk] == null) continue;
+          if (isValidReachSetting(rk, rIn[rk])) rOut[rk] = rIn[rk];
+          else console.warn('[customizer-v2] Invalid Predicted reach setting rejected:', 'reach.' + rk, rIn[rk]);
+        }
+        if (Object.keys(rOut).length) clean[key] = rOut;
+      } else if (key === 'skraafoto' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #737 — the oblique photo viewer's defaults, by the viewer's rule.
+        var sIn = delta[key], sOut = {}, sRule = _skraafotoRule(), sKeys = sRule ? sRule.KEYS : [];
+        for (var ski = 0; ski < sKeys.length; ski++) {
+          var sk2 = sKeys[ski];
+          if (!_own(sIn, sk2) || sIn[sk2] == null) continue;
+          if (isValidSkraafotoSetting(sk2, sIn[sk2])) sOut[sk2] = sIn[sk2];
+          else console.warn('[customizer-v2] Invalid oblique photo setting rejected:', 'skraafoto.' + sk2, sIn[sk2]);
+        }
+        if (Object.keys(sOut).length) clean[key] = sOut;
+      } else if (key === 'dhmOverlays' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #734 — the DHM overlay defaults, each by the overlays' rule.
+        var dIn = delta[key];
+        var dOut = {};
+        var dKeys = _dhmOverlays() ? _dhmOverlays().SETTING_KEYS : [];
+        for (var dki = 0; dki < dKeys.length; dki++) {
+          var dk = dKeys[dki];
+          if (!_own(dIn, dk) || dIn[dk] == null) continue;
+          if (isValidDHMOverlaySetting(dk, dIn[dk])) dOut[dk] = dIn[dk];
+          else console.warn('[customizer-v2] Invalid DHM overlay setting rejected:', 'dhmOverlays.' + dk, dIn[dk]);
+        }
+        if (Object.keys(dOut).length) clean[key] = dOut;
       } else if (key === 'branding' || key === 'home') {
         // Pass through as-is (object shape)
         if (typeof delta[key] === 'object' && delta[key] !== null) {
           clean[key] = JSON.parse(JSON.stringify(delta[key]));
         }
-      } else {
-        // Unknown key — pass through for forward compatibility
+      } else if (VALID_SECTIONS.indexOf(key) !== -1) {
+        // A known section with no validator of its own (distanceUnit,
+        // favorites, myNodes).
         clean[key] = delta[key];
+      } else {
+        // #681 M6 — an unknown top-level section is DROPPED, never stored.
+        // computeEffective merges whatever survives into window.SITE_CONFIG,
+        // so passing unknown sections through let an imported theme file
+        // plant server-only config in the client — map.dhm.token above all.
+        // VALID_SECTIONS is the whole surface the customizer owns.
+        console.warn('[customizer-v2] Unknown section dropped:', key);
       }
     }
     return clean;
@@ -566,7 +1206,7 @@
     // Build theme-only delta (without favorites/myNodes)
     var themeDelta = {};
     for (var k in delta) {
-      if (delta.hasOwnProperty(k) && k !== 'favorites' && k !== 'myNodes') {
+      if (_own(delta, k) && k !== 'favorites' && k !== 'myNodes') {
         themeDelta[k] = delta[k];
       }
     }
@@ -597,14 +1237,14 @@
     }
     if (!userOverrides || typeof userOverrides !== 'object') return effective;
     for (var key in userOverrides) {
-      if (!userOverrides.hasOwnProperty(key)) continue;
+      if (!_own(userOverrides, key)) continue;
       var uv = userOverrides[key];
       if (uv != null && typeof uv === 'object' && !Array.isArray(uv)) {
         // Object section — shallow merge
         if (!effective[key] || typeof effective[key] !== 'object') effective[key] = {};
         var val = userOverrides[key];
         for (var sk in val) {
-          if (val.hasOwnProperty(sk)) {
+          if (_own(val, sk)) {
             if (Array.isArray(val[sk])) {
               effective[key][sk] = JSON.parse(JSON.stringify(val[sk])); // array: full replace
             } else {
@@ -640,10 +1280,10 @@
 
     // Apply theme color/font CSS variables
     for (var key in THEME_CSS_MAP) {
-      if (themeSection[key]) {
-        root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
-      }
+      if (HEAT_COLOR_KEYS.indexOf(key) !== -1) continue; // _applyHeatCSS
+      if (themeSection[key]) root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
     }
+    _applyHeatCSS(root, effectiveConfig, userOverrides, dark);
 
     // Logo brand colors mirror --accent / --accent-hover ONLY when an
     // operator has actually overridden them via the customizer. We check
@@ -771,9 +1411,13 @@
       }
     }
 
-    // Distance unit → sync to localStorage for all pages
+    // Distance unit → sync to localStorage for all pages. With no unit set
+    // (a reset field, no server default) the mirror goes too, or
+    // getDistanceUnit() keeps the old pick while the dropdown says auto (#839).
     if (typeof effectiveConfig.distanceUnit === 'string' && DISTANCE_UNIT_VALUES.indexOf(effectiveConfig.distanceUnit) >= 0) {
       localStorage.setItem('meshcore-distance-unit', effectiveConfig.distanceUnit);
+    } else {
+      localStorage.removeItem('meshcore-distance-unit');
     }
 
     // Nav gradient
@@ -788,25 +1432,70 @@
     var br = effectiveConfig.branding;
     if (br) {
       if (br.siteName) {
-        document.title = br.siteName;
+        window.setInstanceTitle(br.siteName);
         _setBrandAlt(br.siteName);
         var brandEl = document.querySelector('.brand-text');
         if (brandEl) brandEl.textContent = br.siteName;
       }
-      if (br.logoUrl) {
-        _setBrandLogoUrl(br.logoUrl, br.siteName || null);
-        var iconEl = document.querySelector('.brand-icon');
-        if (iconEl) iconEl.innerHTML = '<img src="' + br.logoUrl + '" style="height:24px" onerror="this.style.display=\'none\'">';
-      }
-      if (br.faviconUrl) {
-        var fav = document.querySelector('link[rel="icon"]');
-        if (fav) fav.href = br.faviconUrl;
-      }
+      if (br.logoUrl) _setBrandLogoUrl(br.logoUrl, br.siteName || null);
+      if (br.faviconUrl) _setFaviconUrl(br.faviconUrl);
       // #1518 — apply validated homeUrl override to .nav-brand[href].
       // Always call: invalid/empty restores '#/' so a cleared override visibly
       // reverts. Validator rejects javascript:/data:/etc to prevent XSS.
       _setBrandHomeUrl(br.homeUrl);
     }
+
+    /* #681 M6 — tell an open Path profile panel that its defaults moved,
+     * and only then: a colour pick is pure CSS and must not cost a
+     * re-measure. This sits at the end of the pipeline rather than in the
+     * field handlers because setOverride is debounced — a listener fired
+     * from there would still read the previous settings off SITE_CONFIG.
+     * The first run only records the baseline. */
+    var terrainNow = JSON.stringify([terrainSettings(effectiveConfig), ownerSettings(effectiveConfig)]);
+    if (_lastTerrain !== null && _lastTerrain !== terrainNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('terrain-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next profile reads them anyway */ }
+    }
+    _lastTerrain = terrainNow;
+
+    /* #724 M5 — the same for the antenna sites settings: the layer re-gates
+     * its view and the profile hint re-pins and re-tiers on this event. */
+    var mastsNow = JSON.stringify(mastsSettings(effectiveConfig));
+    if (_lastMasts !== null && _lastMasts !== mastsNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('masts-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next view reads them anyway */ }
+    }
+    _lastMasts = mastsNow;
+
+    /* #723 M4 — the same for the monuments settings: the overlay re-reads
+     * its opacity and an open Path profile redraws its warning. */
+    var heritageNow = JSON.stringify(heritageSettings(effectiveConfig));
+    if (_lastHeritage !== null && _lastHeritage !== heritageNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('heritage-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next map reads them anyway */ }
+    }
+    _lastHeritage = heritageNow;
+    /* #881 M3 — the Live page re-fits its Moments stack and, when the
+     * on/off default moved, its checkbox. */
+    var momentsNow = JSON.stringify(momentsSettings(effectiveConfig));
+    if (_lastMoments !== null && _lastMoments !== momentsNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('moments-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next Live page reads them anyway */ }
+    }
+    _lastMoments = momentsNow;
+    /* #734 — the same for the DHM overlay defaults: an open map's layer
+     * control re-reads the contour min-zoom on this event. */
+    var dhmNow = JSON.stringify(dhmOverlaySettings(effectiveConfig));
+    if (_lastDHM !== null && _lastDHM !== dhmNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('dhm-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next map reads them anyway */ }
+    }
+    _lastDHM = dhmNow;
 
     // Dispatch theme-changed event (bare, no payload — matches existing behavior)
     window.dispatchEvent(new CustomEvent('theme-changed'));
@@ -990,7 +1679,7 @@
 
     var colorSections = ['theme', 'themeDark', 'nodeColors', 'typeColors'];
     for (var key in obj) {
-      if (!obj.hasOwnProperty(key)) continue;
+      if (!_own(obj, key)) continue;
       if (VALID_SECTIONS.indexOf(key) === -1) {
         console.warn('[customizer-v2] Unknown top-level key in import:', key);
         continue; // warning, not error
@@ -1012,7 +1701,7 @@
       // Validate colors in color sections
       if (colorSections.indexOf(key) !== -1 && typeof obj[key] === 'object') {
         for (var ck in obj[key]) {
-          if (!obj[key].hasOwnProperty(ck)) continue;
+          if (!_own(obj[key], ck)) continue;
           if ((key === 'theme' || key === 'themeDark') && (ck === 'font' || ck === 'mono')) continue;
           if (typeof obj[key][ck] === 'string' && !isValidColor(obj[key][ck])) {
             errors.push('Invalid color: ' + key + '.' + ck + ' = "' + obj[key][ck] + '"');
@@ -1024,6 +1713,158 @@
         for (var tk in obj[key]) {
           if (TS_ENUMS[tk] && TS_ENUMS[tk].indexOf(obj[key][tk]) === -1) {
             errors.push('Invalid timestamp enum: ' + tk + ' = "' + obj[key][tk] + '"');
+          }
+        }
+      }
+      // #681 M6 — terrain: antenna heights in metres, and the model enum.
+      if (key === 'terrain' && typeof obj[key] === 'object' && obj[key] !== null) {
+        for (var trk in obj[key]) {
+          if (!_own(obj[key], trk)) continue;
+          if (trk === 'model') {
+            if (TERRAIN_MODELS.indexOf(obj[key][trk]) === -1) {
+              errors.push('Invalid terrain model: "' + obj[key][trk] + '" \u2014 must be dtm or both');
+            }
+          } else if (trk === TERRAIN_SHARE_KEY || trk === TERRAIN_OWNER_KEY) {
+            if (typeof obj[key][trk] !== 'boolean') {
+              errors.push('Invalid terrain setting: terrain.' + trk + ' = "' + obj[key][trk] + '" \u2014 must be true or false');
+            }
+          } else if (!_own(TERRAIN_DEFAULTS, trk)) {
+            console.warn('[customizer-v2] Unknown terrain key in import:', trk);
+          } else if (!isValidAntennaHeight(obj[key][trk])) {
+            errors.push('Invalid antenna height: terrain.' + trk + ' = "' + obj[key][trk] + '" \u2014 must be 0-' + _maxAntennaHeight() + ' m');
+          }
+        }
+      }
+      // #724 M5 — masts: the antenna sites settings, bounded integers and
+      // one boolean.
+      if (key === 'masts' && typeof obj[key] === 'object' && obj[key] !== null) {
+        for (var msk in obj[key]) {
+          if (!_own(obj[key], msk)) continue;
+          if (MASTS_SETTING_KEYS.indexOf(msk) === -1) {
+            console.warn('[customizer-v2] Unknown masts key in import:', msk);
+          } else if (!isValidMastsSetting(msk, obj[key][msk])) {
+            var lim = _mastsLayer() && _mastsLayer().LIMITS[msk];
+            errors.push('Invalid antenna sites setting: masts.' + msk + ' = "' + obj[key][msk] + '" \u2014 must be ' +
+              (msk === 'enabled' ? 'true or false' : lim ? 'a whole number ' + lim[0] + '-' + lim[1] : 'unavailable without the antenna sites layer'));
+          }
+        }
+      }
+      // #723 M4 — heritage: the monuments settings, two switches and two
+      // bounded whole numbers.
+      if (key === 'heritage' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var hrule = _heritageRule();
+        for (var hsk in obj[key]) {
+          if (!_own(obj[key], hsk)) continue;
+          if (hrule && hrule.KEYS.indexOf(hsk) === -1) {
+            console.warn('[customizer-v2] Unknown heritage key in import:', hsk);
+          } else if (obj[key][hsk] === null && hrule && hrule.DEFAULTS[hsk] === null) {
+            // The documented default written out (warnDistanceM: null) is
+            // the same as leaving the key out; writeOverrides skips it.
+          } else if (!isValidHeritageSetting(hsk, obj[key][hsk])) {
+            var hlim = hrule && hrule.LIMITS[hsk];
+            errors.push('Invalid ancient monuments setting: heritage.' + hsk + ' = "' + obj[key][hsk] + '" \u2014 must be ' +
+              (!hrule ? 'unavailable without the monuments overlay' : hlim ? 'a whole number ' + hlim[0] + '-' + hlim[1] : 'true or false'));
+          }
+        }
+      }
+      // #881 M3 — moments: switches and two bounded whole numbers.
+      if (key === 'moments' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var morule = _momentsRule();
+        for (var mosk in obj[key]) {
+          if (!_own(obj[key], mosk)) continue;
+          if (morule && morule.KEYS.indexOf(mosk) === -1) {
+            console.warn('[customizer-v2] Unknown moments key in import:', mosk);
+          } else if (!isValidMomentsSetting(mosk, obj[key][mosk])) {
+            var molim = morule && morule.LIMITS[mosk];
+            errors.push('Invalid Moments setting: moments.' + mosk + ' = "' + obj[key][mosk] + '" \u2014 must be ' +
+              (!morule ? 'unavailable without the Live page' : molim ? 'a whole number ' + molim[0] + '-' + molim[1] : 'true or false'));
+          }
+        }
+      }
+      // #880 M3 — follow: a speed step and two bounded whole numbers; null
+      // settleSeconds is the documented default (the server's window).
+      if (key === 'follow' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var frule = _followRule();
+        for (var fsk in obj[key]) {
+          if (!_own(obj[key], fsk)) continue;
+          if (frule && frule.KEYS.indexOf(fsk) === -1) {
+            console.warn('[customizer-v2] Unknown follow key in import:', fsk);
+          } else if (obj[key][fsk] === null && frule && frule.DEFAULTS[fsk] === null) {
+            // The documented default written out; writeOverrides skips it.
+          } else if (!isValidFollowSetting(fsk, obj[key][fsk])) {
+            var flim = frule && frule.LIMITS[fsk];
+            errors.push('Invalid Follow setting: follow.' + fsk + ' = "' + obj[key][fsk] + '" \u2014 must be ' +
+              (!frule ? 'unavailable without the Live page' : fsk === 'speed' ? frule.SPEEDS.join(', ')
+                : 'a whole number ' + flim[0] + '-' + flim[1]));
+          }
+        }
+      }
+      // #968 M2 — kiosk: a scale step and a bounded inset.
+      if (key === 'kiosk' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var krule = _kioskRule();
+        for (var ksk in obj[key]) {
+          if (!_own(obj[key], ksk)) continue;
+          if (krule && krule.VIEWER_KEYS.indexOf(ksk) === -1) {
+            console.warn('[customizer-v2] Unknown kiosk key in import:', ksk);
+          } else if (!isValidKioskSetting(ksk, obj[key][ksk])) {
+            errors.push('Invalid Live kiosk setting: kiosk.' + ksk + ' = "' + obj[key][ksk] + '" \u2014 must be ' +
+              (!krule ? 'unavailable without the Live kiosk' : ksk === 'scale' ? 'auto, 1, 1.25, 1.5 or 2'
+                : 'a number ' + krule.LIMITS[ksk][0] + '-' + krule.LIMITS[ksk][1]));
+          }
+        }
+      }
+      // #968 M3 — reach: one bounded number; null is the default (the
+      // operator's value), the same as leaving the key out.
+      if (key === 'reach' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var rrule = _reachRule(), rb = _reachBounds();
+        for (var rsk in obj[key]) {
+          if (!_own(obj[key], rsk)) continue;
+          if (rrule && rrule.KEYS.indexOf(rsk) === -1) {
+            console.warn('[customizer-v2] Unknown reach key in import:', rsk);
+          } else if (obj[key][rsk] === null && rrule && rrule.DEFAULTS[rsk] === null) {
+            // The documented default written out; writeOverrides skips it.
+          } else if (!isValidReachSetting(rsk, obj[key][rsk])) {
+            errors.push('Invalid Predicted reach setting: reach.' + rsk + ' = "' + obj[key][rsk] + '" \u2014 must be ' +
+              (rb ? 'a number ' + rb[0] + '-' + rb[1] + ' dB' : 'unavailable without the Predicted reach'));
+          }
+        }
+      }
+      // #737 — skraafoto: two lists of values and a boolean.
+      if (key === 'skraafoto' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var srule = _skraafotoRule();
+        var orList = function (l) { return l.slice(0, -1).join(', ') + ' or ' + l[l.length - 1]; };
+        for (var ssk in obj[key]) {
+          if (!_own(obj[key], ssk)) continue;
+          if (!srule) {
+            errors.push('Invalid oblique photo setting: skraafoto.' + ssk + ' \u2014 unavailable without the oblique photo viewer');
+          } else if (srule.KEYS.indexOf(ssk) === -1) {
+            console.warn('[customizer-v2] Unknown skraafoto key in import:', ssk);
+          } else if (!srule.valid(ssk, obj[key][ssk])) {
+            errors.push('Invalid oblique photo setting: skraafoto.' + ssk + ' = "' + obj[key][ssk] + '" \u2014 must be ' +
+              (ssk === 'direction' ? orList(srule.DIRECTIONS) : ssk === 'zoom' ? orList(srule.ZOOMS) : 'true or false'));
+          }
+        }
+      }
+      // #734 — dhmOverlays: the hillshade enum, a boolean, a zoom inside
+      // the server's contour range.
+      if (key === 'dhmOverlays' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var DO = _dhmOverlays();
+        for (var dsk in obj[key]) {
+          if (!_own(obj[key], dsk)) continue;
+          var dv = obj[key][dsk];
+          if (!DO) {
+            errors.push('Invalid DHM overlay setting: dhmOverlays.' + dsk + ' \u2014 unavailable without the map overlays');
+          } else if (DO.SETTING_KEYS.indexOf(dsk) === -1) {
+            console.warn('[customizer-v2] Unknown dhmOverlays key in import:', dsk);
+          } else {
+            var dRange = dsk === 'contourMinZoom' ? DO.contourZoomRange() : null;
+            if (!DO.validSetting(dsk, dv) || (dRange && (dv < dRange[0] || dv > dRange[1]))) {
+              errors.push('Invalid DHM overlay setting: dhmOverlays.' + dsk + ' = "' + dv + '" \u2014 must be ' +
+                (dsk === 'hillshade' ? DO.HILLSHADE_VALUES.slice(0, -1).join(', ') + ' or ' + DO.HILLSHADE_VALUES[DO.HILLSHADE_VALUES.length - 1]
+                  : dsk === 'contours' ? 'true or false'
+                  : dsk === 'elevationOpacity' ? 'a whole percent ' + DO.ELEVATION_OPACITY_RANGE[0] + '-' + DO.ELEVATION_OPACITY_RANGE[1]
+                  : dRange ? 'a whole zoom ' + dRange[0] + '-' + dRange[1] : 'a whole zoom'));
+            }
           }
         }
       }
@@ -1090,7 +1931,7 @@
     var overrides = _getOverrides();
     var server = _getServer();
     if (section) {
-      if (!overrides[section] || !overrides[section].hasOwnProperty(key)) return false;
+      if (!overrides[section] || !_own(overrides[section], key)) return false;
       var serverSection = server[section] || {};
       var ov = overrides[section][key];
       var sv = serverSection[key];
@@ -1100,7 +1941,7 @@
       }
       return ov !== sv;
     }
-    if (!overrides.hasOwnProperty(key)) return false;
+    if (!_own(overrides, key)) return false;
     var ov2 = overrides[key];
     var sv2 = server[key];
     if (typeof ov2 === 'object' || typeof sv2 === 'object') {
@@ -1130,7 +1971,9 @@
     if (_styleEl) return;
     _styleEl = document.createElement('style');
     _styleEl.textContent = [
-      '.cust-overlay{position:fixed;top:56px;right:12px;z-index:1050;width:480px;height:calc(100vh - 68px);background:var(--card-bg);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.3);display:flex;flex-direction:column;resize:both;min-width:320px;min-height:300px;overflow:hidden}',
+      // #727 M4 — end above the phone bottom nav (bottom-nav.css's
+      // --bottom-nav-reserve: 0px on desktop), which sits over it at z-index 1200.
+      '.cust-overlay{position:fixed;top:56px;right:12px;z-index:1050;width:480px;height:calc(100vh - 68px - var(--bottom-nav-reserve, 0px));background:var(--card-bg);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.3);display:flex;flex-direction:column;resize:both;min-width:320px;min-height:300px;overflow:hidden}',
       '.cust-overlay.hidden{display:none}',
       '.cust-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);cursor:move;user-select:none;flex-shrink:0}',
       '.cust-header h2{margin:0;font-size:15px}',
@@ -1157,6 +2000,20 @@
       '.cust-hint{font-size:10px;color:var(--text-muted);margin-top:1px;line-height:1.2}',
       '.cust-color-row input[type="color"]{width:40px;height:32px;border:1px solid var(--border);border-radius:6px;cursor:pointer;padding:2px;background:var(--input-bg)}',
       '.cust-color-row .cust-hex{font-family:var(--mono);font-size:12px;color:var(--text-muted);min-width:70px}',
+      // #681 M6 — terrain-profile antenna defaults. 48px is the house
+      // minimum for a tap target (#235, #2052, #666), and a number input
+      // that wide keeps the stepper arrows reachable on a phone.
+      '.cust-terrain-row{display:flex;align-items:center;gap:8px;margin-bottom:10px}',
+      '.cust-terrain-row>div:first-child{min-width:160px;flex:1}',
+      '.cust-terrain-row label{font-size:12px;font-weight:600;margin:0;display:block}',
+      '.cust-terrain-row input[type="number"]{width:88px;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--input-bg);color:var(--text);box-sizing:border-box;touch-action:manipulation}',
+      '.cust-terrain-row input[type="number"]:focus{outline:none;border-color:var(--accent)}',
+      '#cv2-terrain-model{min-height:48px;touch-action:manipulation}',
+      // Colour swatches are a compact 40x32 on a pointer device. On touch
+      // they are the tap target, so they take the 48px floor there.
+      // flex:none so a narrow row cannot squeeze the swatch below the
+      // floor: the hex text beside it competes for the same width.
+      '@media(pointer:coarse){.cust-color-row input[type="color"]{width:48px;height:48px;min-width:48px;flex:none}}',
       '.cv2-override-dot{color:var(--link-color);cursor:pointer;font-size:10px;margin-left:4px;vertical-align:middle;title:"Reset to server default"}',
       '.cv2-override-dot:hover{color:var(--status-red)}',
       '.cust-node-dot{display:inline-block;width:16px;height:16px;border-radius:50%;vertical-align:middle}',
@@ -1203,7 +2060,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + _countOverrides('reach') + _countOverrides('moments') + _countOverrides('kiosk') + _countOverrides('follow') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -1221,6 +2078,90 @@
     }).join('') + '</div>';
   }
 
+  /* #681 M6 — a colour an <input type="color"> will take: 6-digit hex only.
+   * An rgb()/rgba() value (--terrain-clutter's default is one) has to be
+   * converted, and its alpha is dropped because the native picker has no
+   * alpha channel; the text beside the swatch keeps the real value. */
+  function _cssColorToHex(val) {
+    if (typeof val !== 'string') return '';
+    var s = val.trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(s)) return s;
+    if (/^#[0-9a-fA-F]{8}$/.test(s)) return s.slice(0, 7);
+    if (/^#[0-9a-fA-F]{3,4}$/.test(s)) return '#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+    var m = s.match(/^rgba?\(([^)]*)\)$/i);
+    if (!m) return '';
+    var parts = m[1].split(/[\s,/]+/).filter(function (x) { return x !== ''; });
+    if (parts.length < 3) return '';
+    var hex = '#';
+    for (var i = 0; i < 3; i++) {
+      var n = parseFloat(parts[i]);
+      if (!isFinite(n)) return '';
+      if (parts[i].charAt(parts[i].length - 1) === '%') n = n * 255 / 100;
+      n = Math.max(0, Math.min(255, Math.round(n)));
+      hex += (n < 16 ? '0' : '') + n.toString(16);
+    }
+    return hex;
+  }
+
+  /* #839 finding 9 — the value attribute of an <input type="color">: the
+   * colour as 6-digit hex, or no attribute at all when it is not one we can
+   * convert (an unset key, a var()). The picker then shows black, as it did
+   * when it rejected the value, but the browser no longer warns about a
+   * format it cannot take each time the panel renders. */
+  function _colorValueAttr(val) {
+    var hex = _cssColorToHex(val);
+    return hex ? ' value="' + escAttr(hex) + '"' : '';
+  }
+
+  /* Review PR#714 — the alpha of a CSS colour, 0-1, or 1 when it has none
+   * or is not one we can read. */
+  function _cssColorAlpha(val) {
+    if (typeof val !== 'string') return 1;
+    var s = val.trim();
+    var a = null;
+    if (/^#[0-9a-fA-F]{8}$/.test(s)) a = parseInt(s.slice(7), 16) / 255;
+    else if (/^#[0-9a-fA-F]{4}$/.test(s)) a = parseInt(s[4] + s[4], 16) / 255;
+    else {
+      var m = s.match(/^rgba?\(([^)]*)\)$/i);
+      var parts = m ? m[1].split(/[\s,/]+/).filter(function (x) { return x !== ''; }) : [];
+      if (parts.length === 4) {
+        a = parseFloat(parts[3]);
+        if (parts[3].charAt(parts[3].length - 1) === '%') a = a / 100;
+      }
+    }
+    if (a === null || !isFinite(a) || a < 0 || a >= 1) return 1;
+    return Math.round(a * 1000) / 1000;
+  }
+
+  /* Review PR#714 — the native picker hands back an opaque #rrggbb, so a
+   * pick over a translucent colour (--terrain-clutter is rgba(..., 0.55))
+   * would make it opaque. Carry the alpha of the colour being replaced over
+   * to the pick; an opaque colour stays a plain hex, as before. */
+  function _colorWithAlpha(picked, current) {
+    return _hexWithAlpha(picked, _cssColorAlpha(current));
+  }
+
+  function _hexWithAlpha(picked, a) {
+    var hex = _cssColorToHex(picked);
+    if (!(a >= 0 && a < 1) || !hex) return picked;
+    return 'rgba(' + parseInt(hex.slice(1, 3), 16) + ', ' + parseInt(hex.slice(3, 5), 16) + ', ' +
+      parseInt(hex.slice(5, 7), 16) + ', ' + a + ')';
+  }
+
+  /* #681 M6 — what a theme key resolves to on the page right now. The
+   * chart colours have no server default by design (they are chart ink, not
+   * page chrome), and a row with no value renders a black swatch and an
+   * empty hex — showing a colour the chart is not using. style.css holds
+   * the real defaults for light and dark, so read them back rather than
+   * repeating them here: no colour is hard-coded in this file. */
+  function _cssVarValue(key) {
+    var name = THEME_CSS_MAP[key];
+    if (!name || typeof getComputedStyle !== 'function') return '';
+    try {
+      return (getComputedStyle(document.documentElement).getPropertyValue(name) || '').trim();
+    } catch (_e) { return ''; }
+  }
+
   function _renderColorRow(key, section, effectiveVal, serverDefault) {
     var isFont = key === 'font' || key === 'mono';
     var val = effectiveVal || '';
@@ -1230,10 +2171,12 @@
     if (isFont) {
       inputHtml = '<input type="text" data-cv2-field="' + section + '.' + key + '" value="' + escAttr(val) + '" style="width:160px;font-size:11px;font-family:var(--mono);padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--text)">';
     } else {
-      // Ensure hex is 7 chars for color input
-      var hexVal = val.length === 7 ? val : (val.length === 4 ? '#' + val[1] + val[1] + val[2] + val[2] + val[3] + val[3] : val);
-      inputHtml = '<input type="color" data-cv2-field="' + section + '.' + key + '" value="' + hexVal + '">' +
-        '<span class="cust-hex">' + val + '</span>';
+      // data-cv2-alpha carries a translucent colour's alpha over to the
+      // pick, which the native picker cannot express (review PR#714).
+      var alpha = _cssColorAlpha(val);
+      inputHtml = '<input type="color" data-cv2-field="' + section + '.' + key + '"' + _colorValueAttr(val) +
+        (alpha < 1 ? ' data-cv2-alpha="' + alpha + '"' : '') + '>' +
+        '<span class="cust-hex">' + esc(val) + '</span>';
     }
     return '<div class="cust-color-row">' +
       '<div><label>' + (THEME_LABELS[key] || key) + dot + '</label>' +
@@ -1299,7 +2242,7 @@
   function _renderBranding() {
     var eff = _getEffective();
     var b = eff.branding || {};
-    var logoPreview = b.logoUrl ? '<img class="cust-preview-img" src="' + escAttr(b.logoUrl) + '" alt="Logo preview" onerror="this.style.display=\'none\'">' : '';
+    var logoPreview = b.logoUrl && _brandUrlOk(b.logoUrl) ? '<img class="cust-preview-img" src="' + escAttr(b.logoUrl) + '" alt="Logo preview" onerror="this.style.display=\'none\'">' : '';
     return '<div class="cust-panel' + (_activeTab === 'branding' ? ' active' : '') + '" data-panel="branding">' +
       '<div class="cust-field"><label>Site Name' + _overrideDot('branding', 'siteName') + '</label><input type="text" data-cv2-field="branding.siteName" value="' + escAttr(b.siteName || '') + '"></div>' +
       '<div class="cust-field"><label>Tagline' + _overrideDot('branding', 'tagline') + '</label><input type="text" data-cv2-field="branding.tagline" value="' + escAttr(b.tagline || '') + '"></div>' +
@@ -1324,6 +2267,41 @@
     for (var j = 0; j < ADVANCED_KEYS.length; j++) advancedRows += _renderColorRow(ADVANCED_KEYS[j], section, current[ADVANCED_KEYS[j]], serverCurrent[ADVANCED_KEYS[j]]);
     var fontRows = '';
     for (var f = 0; f < FONT_KEYS.length; f++) fontRows += _renderColorRow(FONT_KEYS[f], section, current[FONT_KEYS[f]], serverCurrent[FONT_KEYS[f]]);
+    // #681 M6 — the path-profile chart, in its own group so the Advanced
+    // list stays a list of page colours.
+    var terrainRows = '';
+    for (var t = 0; t < TERRAIN_COLOR_KEYS.length; t++) {
+      var tk = TERRAIN_COLOR_KEYS[t];
+      // No server default for these, so fall back to what the page is
+      // actually drawing with (style.css), not to an empty black swatch.
+      terrainRows += _renderColorRow(tk, section, current[tk] || _cssVarValue(tk), serverCurrent[tk]);
+    }
+    var mastsRows = '';
+    for (var mi = 0; mi < MASTS_COLOR_KEYS.length; mi++) {
+      var mk = MASTS_COLOR_KEYS[mi];
+      mastsRows += _renderColorRow(mk, section, current[mk] || _cssVarValue(mk), serverCurrent[mk]);
+    }
+
+    var heatRows = '';
+    for (var hi = 0; hi < HEAT_COLOR_KEYS.length; hi++) {
+      var hk = HEAT_COLOR_KEYS[hi];
+      heatRows += _renderColorRow(hk, section, current[hk] || _cssVarValue(hk), serverCurrent[hk]);
+    }
+    var momentsRows = '';
+    for (var moci = 0; moci < MOMENTS_COLOR_KEYS.length; moci++) {
+      var mock = MOMENTS_COLOR_KEYS[moci];
+      momentsRows += _renderColorRow(mock, section, current[mock] || _cssVarValue(mock), serverCurrent[mock]);
+    }
+    var kioskRows = '';
+    for (var kci = 0; kci < KIOSK_COLOR_KEYS.length; kci++) {
+      var kck = KIOSK_COLOR_KEYS[kci];
+      kioskRows += _renderColorRow(kck, section, current[kck] || _cssVarValue(kck), serverCurrent[kck]);
+    }
+    var followRows = '';
+    for (var fci = 0; fci < FOLLOW_COLOR_KEYS.length; fci++) {
+      var fck = FOLLOW_COLOR_KEYS[fci];
+      followRows += _renderColorRow(fck, section, current[fck] || _cssVarValue(fck), serverCurrent[fck]);
+    }
 
     return '<div class="cust-panel' + (_activeTab === 'theme' ? ' active' : '') + '" data-panel="theme">' +
       _renderPresets() +
@@ -1331,6 +2309,12 @@
       '<p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Toggle ' + renderConfigGlyph('ph:sun') + '/' + renderConfigGlyph('ph:moon') + ' in nav to edit the other mode.</p>' +
       basicRows +
       '<details class="cust-advanced"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Advanced (' + ADVANCED_KEYS.length + ' options)</summary>' + advancedRows + '</details>' +
+      '<details class="cust-terrain-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Terrain profile chart (' + TERRAIN_COLOR_KEYS.length + ' options)</summary>' + terrainRows + '</details>' +
+      '<details class="cust-masts-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Antenna sites map layer (' + MASTS_COLOR_KEYS.length + ' options)</summary>' + mastsRows + '</details>' +
+      '<details class="cust-heat-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Heat map (' + HEAT_COLOR_KEYS.length + ' options)</summary>' + heatRows + '</details>' +
+      '<details class="cust-moments-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live moments cards (' + MOMENTS_COLOR_KEYS.length + ' options)</summary>' + momentsRows + '</details>' +
+      '<details class="cust-kiosk-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live kiosk tiles (' + KIOSK_COLOR_KEYS.length + ' options)</summary>' + kioskRows + '</details>' +
+      '<details class="cust-follow-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live follow a packet (' + FOLLOW_COLOR_KEYS.length + ' options)</summary>' + followRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
   }
@@ -1476,7 +2460,7 @@
       rows += '<div class="cust-color-row">' +
         '<div><label>' + renderConfigGlyph(NODE_EMOJI[key]) + ' ' + NODE_LABELS[key] + _overrideDot('nodeColors', key) + '</label>' +
         '<div class="cust-hint">' + (NODE_HINTS[key] || '') + '</div></div>' +
-        '<input type="color" data-cv2-field="nodeColors.' + key + '" value="' + val + '">' +
+        '<input type="color" data-cv2-field="nodeColors.' + key + '"' + _colorValueAttr(val) + '>' +
         '<span class="cust-node-dot" style="background:' + val + '"></span>' +
         '<span class="cust-hex">' + val + '</span></div>';
     }
@@ -1490,7 +2474,7 @@
       typeRows += '<div class="cust-color-row">' +
         '<div><label>' + renderConfigGlyph(TYPE_EMOJI[tkey] || '') + ' ' + TYPE_LABELS[tkey] + _overrideDot('typeColors', tkey) + '</label>' +
         '<div class="cust-hint">' + (TYPE_HINTS[tkey] || '') + '</div></div>' +
-        '<input type="color" data-cv2-field="typeColors.' + tkey + '" value="' + tval + '">' +
+        '<input type="color" data-cv2-field="typeColors.' + tkey + '"' + _colorValueAttr(tval) + '>' +
         '<span class="cust-node-dot" style="background:' + tval + '"></span>' +
         '<span class="cust-hex">' + tval + '</span></div>';
     }
@@ -1532,7 +2516,7 @@
       '<p class="cust-hint" style="margin-bottom:8px">Outline around each map marker. Dial these down when hundreds of nodes make the default white border overwhelming. Changes are live on every mounted marker.</p>' +
       '<div class="cust-color-row"><div><label>Color' + _overrideDot('markerStroke', 'color') + '</label>' +
         '<div class="cust-hint">Marker outline color. Defaults to white for contrast on dark + light tiles.</div></div>' +
-        '<input type="color" data-cv2-field="markerStroke.color" value="' + esc(msColor) + '">' +
+        '<input type="color" data-cv2-field="markerStroke.color"' + _colorValueAttr(msColor) + '>' +
         '<span class="cust-node-dot" style="background:' + esc(msColor) + '"></span>' +
         '<span class="cust-hex">' + esc(msColor) + '</span></div>' +
       '<div class="cust-color-row"><div><label>Width' + _overrideDot('markerStroke', 'width') + '</label>' +
@@ -1588,27 +2572,530 @@
       '<button type="button" class="cust-dl-btn" data-cv2-reset-hints data-reset-gesture-hints>↺ Reset gesture hints</button>' +
       _renderChannelsShowEncryptedToggle() +
       _renderHide1ByteHopsToggle() +
-      _renderTileProviderSelector() +
+      '<div data-cv2-tile-providers>' + (_shownTileSelectorHtml = _renderTileProviderSelector()) + '</div>' +
+      _renderTerrainSettings() +
+      _renderShareSection() +
+      _renderMastsSettings() +
+      _renderDHMOverlaySettings() +
+      _renderHeritageSettings() +
+      _renderSkraafotoSettings() +
+      _renderReachSettings() +
+      _renderMomentsSettings() +
+      _renderFollowSettings() +
+      _renderKioskSettings() +
     '</div>';
   }
 
-  // ── #1633 Hide 1-byte path hops toggle ──
-  // Writes localStorage["meshcore-hide-1byte-hops"]. Default OFF: key is
-  // removed (not "false") so MC_getHide1ByteHops cleanly returns false.
-  // Fires `mc-hide-1byte-hops-changed`; map.js + packets.js subscribe and
-  // re-render in place (PR #1689 r1 adv #4). Analytics + route-view rebuild
-  // on next navigation — they don't need live wiring because they re-render
-  // on tab activation.
+  // ── #681 M6 Terrain profile defaults ──
+  // Antenna heights are the dominant error term in a path profile: the
+  // elevation model is accurate to centimetres, while nothing in the mesh
+  // says how high an antenna is. These are the defaults the Path profile
+  // tool starts from; the panel's own inputs, a remembered height and a
+  // shared link all still win over them, and an operator who set a real
+  // height in config.json wins too.
+  function _renderTerrainSettings() {
+    // Review PR#714 — no profile tool on this instance, no defaults to set.
+    // Same gate as the Map toggle and node detail (TerrainProfile.offered).
+    var tp = window.TerrainProfile;
+    if (!tp || typeof tp.offered !== 'function' || !tp.offered(window.MC_DHM_CFG)) return '';
+    var t = terrainSettings(_getEffective());
+    var rows = '';
+    for (var i = 0; i < TERRAIN_HEIGHT_FIELDS.length; i++) {
+      var f = TERRAIN_HEIGHT_FIELDS[i];
+      var id = 'cv2-terrain-' + f.key;
+      rows += '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">' + f.label + ' (m)' + _overrideDot('terrain', f.key) + '</label>' +
+          '<div class="cust-hint">' + f.hint + '</div></div>' +
+        '<input type="number" id="' + id + '" class="cust-terrain-h" min="0" max="' + _maxAntennaHeight() + '" step="0.5" ' +
+          'inputmode="decimal" data-cv2-terrain-height="' + f.key + '" value="' + escAttr(String(t[f.key])) + '">' +
+      '</div>';
+    }
+    var modelOpt = function (value, label) {
+      return '<option value="' + value + '"' + (t.model === value ? ' selected' : '') + '>' + label + '</option>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Terrain Profile</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Default antenna heights above ground for the Map page\u2019s Path profile tool. Mesh adverts carry no height, so these are assumptions \u2014 the panel labels them as such. A height you type, one this browser remembers, one in a link you open, and one the operator set in server config all take precedence.</p>' +
+      rows +
+      '<div class="cust-field" style="margin-top:10px"><label for="cv2-terrain-model">Elevation model' + _overrideDot('terrain', 'model') + '</label>' +
+        '<select id="cv2-terrain-model" data-cv2-terrain-model style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
+          modelOpt('both', 'Terrain and surface (trees, buildings)') +
+          modelOpt('dtm', 'Terrain only') +
+        '</select>' +
+        '<div class="cust-hint">Terrain always decides the verdict. Surface is drawn for information and costs a second elevation request.</div></div>' +
+      _renderOwnerSetting() +
+      _renderShareSettings(tp, '<p class="cust-section-title" style="font-size:13px;margin:16px 0 6px">Share previews</p>');
+  }
+
+  // #789 M3 — the owner switch, below the heights it relates to.
+  function _renderOwnerSetting() {
+    var on = ownerSettings(_getEffective()).preferOwnerHeights;
+    return '<div class="cust-field" style="margin-top:10px"><label class="cust-check" for="cv2-terrain-owner" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="cv2-terrain-owner" data-cv2-terrain-owner aria-describedby="cv2-terrain-owner-hint"' + (on ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>Prefer owner heights' + _overrideDot('terrain', TERRAIN_OWNER_KEY) + '</span></label>' +
+      '<div class="cust-hint" id="cv2-terrain-owner-hint">On: a height the node\u2019s owner proved, and this site approved, stands against the role heights above. Off: the role heights above replace it.</div></div>';
+  }
+
+  // ── #727 M4 / #811 M4 / #812 M4 Share previews ──
+  // One viewer switch for every card type: terrain profiles (dhm.share),
+  // node pages (share.nodes.enabled) and packet links (share.packets.enabled,
+  // the packet page and View Path); the latter two arrive in the share block.
+  // Inside the Terrain Profile section when the profile is offered, else its
+  // own section when only node or packet cards are. Without any route the
+  // viewer has nothing to choose; with one, the switch, and the operator's
+  // card look in fixed words: a server value is only ever compared, never
+  // printed.
+  function _cardShareCfg() {
+    var NS = window.NodeShare, PS = window.PacketShare, cfg = window.MC_SHARE_CFG;
+    var nodes = !!NS && typeof NS.offered === 'function' && NS.offered(cfg);
+    var packets = !!PS && typeof PS.offered === 'function' && PS.offered(cfg);
+    return nodes || packets ? { nodes: nodes, packets: packets, card: cfg.card } : null;
+  }
+
+  /** The switch's hint, naming exactly the card types the server offers.
+   *  One type keeps its own sentence (#727 M4's and #811 M4's wording);
+   *  several are listed as "a, b or c". */
+  function _shareHint(profiles, share) {
+    var kinds = [];
+    if (profiles) kinds.push(['a profile link', 'map']);
+    if (share && share.nodes) kinds.push(['a node link (repeaters, rooms and sensors)', 'node']);
+    if (share && share.packets) kinds.push(['a packet link (the packet page and View Path)', 'packet']);
+    if (kinds.length === 1) {
+      if (profiles) return 'Pasted into a chat, the link shows a card of the profile. Off: the plain map link, without a card.';
+      if (share.nodes) return 'Pasted into a chat, a node link (repeaters, rooms and sensors) shows a card of the node. Off: the plain node link, without a card.';
+      return 'Pasted into a chat, a packet link (the packet page and View Path) shows a card of the packet\u2019s path. Off: the plain packet link, without a card.';
+    }
+    var list = function (i) {
+      var words = kinds.map(function (k) { return k[i]; });
+      return words.slice(0, -1).join(', ') + ' or ' + words[words.length - 1];
+    };
+    return 'Pasted into a chat, ' + list(0) + ' shows a card. Off: the plain ' + list(1) + ' link, without a card.';
+  }
+
+  function _renderShareSettings(tp, head) {
+    var cfg = window.MC_DHM_CFG;
+    var profiles = !!tp && typeof tp.shareOffered === 'function' && tp.shareOffered(cfg);
+    var share = _cardShareCfg();
+    if (!profiles && !share) {
+      return head + '<div class="cust-hint">Link previews are off on this server, so Copy link hands out the plain map link.</div>';
+    }
+    var on = shareSettings(_getEffective()).shareLinks;
+    // Every card is drawn with map.dhm.profile.card, so one look is shown.
+    var src = profiles ? cfg.card : share.card;
+    var card = src && typeof src === 'object' ? src : null;
+    var hint = _shareHint(profiles, share);
+    var shown = function (id, label, value) {
+      return '<div class="cust-terrain-row"><div><span style="font-size:12px;font-weight:600">' + label + '</span></div>' +
+        '<span id="' + id + '" style="font-size:13px">' + value + '</span></div>';
+    };
+    return head +
+      '<div class="cust-field"><label class="cust-check" for="cv2-terrain-share" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="cv2-terrain-share" data-cv2-terrain-share' + (on ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>Copy link shares a preview' + _overrideDot('terrain', TERRAIN_SHARE_KEY) + '</span></label>' +
+        '<div class="cust-hint">' + hint + '</div></div>' +
+      (card
+        ? shown('cv2-card-theme', 'Card theme', card.theme === 'light' ? 'Light' : 'Dark') +
+          shown('cv2-card-names', 'Node names on the card', card.names === false ? 'Hidden' : 'Shown') +
+          '<div class="cust-hint">Set by the operator for every shared card.</div>'
+        : '') +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-top:8px">The card is drawn on the server in the operator\u2019s saved palette, not with the colour overrides in this browser.</p>';
+  }
+
+  // #811 M4 / #812 M4: node and packet cards without the terrain profile
+  // get the switch in a section of their own; with the profile it lives in
+  // that section.
+  function _renderShareSection() {
+    var tp = window.TerrainProfile;
+    if (tp && typeof tp.offered === 'function' && tp.offered(window.MC_DHM_CFG)) return '';
+    if (!_cardShareCfg()) return '';
+    return _renderShareSettings(null, '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Share previews</p>');
+  }
+
+  // ── #724 M5 Antenna sites settings ──
+  // Shown only where the server offers the layer. Every value starts at the
+  // operator's; a value back at it is a cleared override.
+  function _renderMastsSettings() {
+    var ML = _mastsLayer(), cfg = _mastsCfg();
+    if (!ML || !cfg) return '';
+    var m = mastsSettings(_getEffective());
+    var op = ML.settings(cfg, {});
+    var num = function (key, label, hint, min, max, step) {
+      var id = 'cv2-masts-' + key;
+      return '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">' + label + _overrideDot('masts', key) + '</label>' +
+          '<div class="cust-hint">' + hint + '</div></div>' +
+        '<input type="number" id="' + id + '" min="' + min + '" max="' + max + '" step="' + step + '" ' +
+          'inputmode="numeric" data-cv2-masts="' + key + '" value="' + escAttr(String(m[key])) + '">' +
+      '</div>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Antenna Sites</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">The Map\u2019s antenna sites layer (Mastedatabasen) and the interference hint in the Path profile. The hint is based on distance only: the source publishes no height or power.</p>' +
+      '<div class="cust-field"><label class="cust-check" for="cv2-masts-enabled" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="cv2-masts-enabled" data-cv2-masts="enabled"' + (m.enabled ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>Show antenna sites on the map by default' + _overrideDot('masts', 'enabled') + '</span></label>' +
+        '<div class="cust-hint">A link that says otherwise still wins.</div></div>' +
+      num('minZoom', 'Antenna sites from zoom', 'The server\u2019s gate is ' + op.minZoom + '; you can only raise it', op.minZoom, ML.LIMITS.minZoom[1], 1) +
+      num('hintDistanceM', 'Interference hint within (m)', 'A 700/800/900 MHz site this close to an end gets a hint', ML.LIMITS.hintDistanceM[0], ML.LIMITS.hintDistanceM[1], 10) +
+      num('hintStrongM', 'Strong hint within (m)', 'Possibly the same building or mast; 0 turns it off', ML.LIMITS.hintStrongM[0], m.hintDistanceM, 10);
+  }
+
+  // ── #734 DHM overlay defaults ──
+  // Shown only where the server offers a DHM overlay, with only the ones it
+  // offers. Every value starts at the built-in; a value back at it is a
+  // cleared override.
+  function _renderDHMOverlaySettings() {
+    var D = _dhmOverlays();
+    if (!D) return '';
+    var offered = D.offered();
+    if (!offered.length) return '';
+    var d = dhmOverlaySettings(_getEffective());
+    var has = function (id) { return offered.indexOf(id) >= 0; };
+    var labels = { off: 'Off', terrain: 'Terrain', surface: 'Surface, buildings and trees' };
+    var opts = D.HILLSHADE_VALUES.filter(function (v) { return v === 'off' || has(v); }).map(function (v) {
+      return '<option value="' + v + '"' + (d.hillshade === v ? ' selected' : '') + '>' + labels[v] + '</option>';
+    }).join('');
+    var html = '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">DHM Map Overlays</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">What the Map and Live pages start with from the Danish elevation model (DHM). A link that says otherwise still wins, and so does a choice you made in the map\u2019s layer control, until Reset All.</p>';
+    if (has('terrain') || has('surface')) {
+      html += '<div class="cust-field"><label for="cv2-overlay-hillshade">Hillshade by default' + _overrideDot('dhmOverlays', 'hillshade') + '</label>' +
+        '<select id="cv2-overlay-hillshade" data-cv2-overlay="hillshade" style="width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);touch-action:manipulation">' +
+          opts + '</select></div>';
+    }
+    if (has('contours')) {
+      var range = D.contourZoomRange();
+      html += '<div class="cust-field"><label class="cust-check" for="cv2-overlay-contours" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+          '<input type="checkbox" id="cv2-overlay-contours" data-cv2-overlay="contours"' + (d.contours ? ' checked' : '') + ' style="width:20px;height:20px">' +
+          '<span>Show contour lines by default' + _overrideDot('dhmOverlays', 'contours') + '</span></label></div>' +
+        '<div class="cust-terrain-row">' +
+          '<div><label for="cv2-overlay-contourMinZoom">Contour lines from zoom' + _overrideDot('dhmOverlays', 'contourMinZoom') + '</label>' +
+            '<div class="cust-hint">The server draws them from ' + range[0] + '; you can only raise it</div></div>' +
+          '<input type="number" id="cv2-overlay-contourMinZoom" min="' + range[0] + '" max="' + range[1] + '" step="1" ' +
+            'inputmode="numeric" data-cv2-overlay="contourMinZoom" value="' + escAttr(String(d.contourMinZoom)) + '">' +
+        '</div>';
+    }
+    if (has('elevation')) {
+      var op = D.ELEVATION_OPACITY_RANGE;
+      html += '<div class="cust-terrain-row">' +
+          '<div><label for="cv2-overlay-elevationOpacity">Elevation colours opacity (%)' + _overrideDot('dhmOverlays', 'elevationOpacity') + '</label>' +
+            '<div class="cust-hint">How strongly the colour-by-elevation layer covers the map, ' + op[0] + '-' + op[1] + '</div></div>' +
+          '<input type="number" id="cv2-overlay-elevationOpacity" min="' + op[0] + '" max="' + op[1] + '" step="5" ' +
+            'inputmode="numeric" data-cv2-overlay="elevationOpacity" value="' + escAttr(String(d.elevationOpacity)) + '">' +
+        '</div>';
+    }
+    return html;
+  }
+
+  // ── #723 M4 Ancient monuments settings ──
+  // Shown only where the server offers the overlay; the two profile rows
+  // only where the Path profile tool is offered too. A value back at its
+  // default is a cleared override, and an empty warning distance is the
+  // default (everything the server reports).
+  function _renderHeritageSettings() {
+    var R = _heritageRule();
+    if (!R || !_heritageCfg()) return '';
+    var h = heritageSettings(_getEffective());
+    var tp = window.TerrainProfile;
+    var profile = !!(tp && typeof tp.offered === 'function' && tp.offered(window.MC_DHM_CFG));
+    var check = function (key, label, hint) {
+      var id = 'cv2-heritage-' + key;
+      return '<div class="cust-field"><label class="cust-check" for="' + id + '" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="' + id + '" data-cv2-heritage="' + key + '"' + (h[key] ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>' + label + _overrideDot('heritage', key) + '</span></label>' +
+        '<div class="cust-hint">' + hint + '</div></div>';
+    };
+    var num = function (key, label, hint, step, value, placeholder) {
+      var id = 'cv2-heritage-' + key, lim = R.LIMITS[key];
+      return '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">' + label + _overrideDot('heritage', key) + '</label>' +
+          '<div class="cust-hint">' + hint + '</div></div>' +
+        '<input type="number" id="' + id + '" min="' + lim[0] + '" max="' + lim[1] + '" step="' + step + '" ' +
+          'inputmode="numeric" data-cv2-heritage="' + key + '" value="' + escAttr(value) + '"' +
+          (placeholder ? ' placeholder="' + escAttr(placeholder) + '"' : '') + '>' +
+      '</div>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Ancient Monuments</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">The Map\u2019s protected ancient monuments overlay (Slots- og Kulturstyrelsen, zoom ' + _heritageCfg().minZoom + '+) and its warning in the Path profile.</p>' +
+      check('enabled', 'Show protected ancient monuments on the map by default', 'A link that says otherwise, or your own last choice on the map, still wins, until Reset All.') +
+      num('opacityPct', 'Monuments overlay opacity (%)', 'How strongly the zones and points cover the map', 5, String(h.opacityPct)) +
+      (profile
+        ? check('profileWarning', 'Warn about monuments in the Path profile', 'Off: the profile asks the server nothing and shows no monument note. No note never means there is no monument.') +
+          num('warnDistanceM', 'Warn within (m) of a zone', 'Empty: every zone the server reports (its own radius). An end inside a zone is always shown.', 10,
+            h.warnDistanceM === null ? '' : String(h.warnDistanceM), 'server radius')
+        : '');
+  }
+
+  // ── #968 M3 Predicted reach ──
+  // Shown only while the server offers the predicted reach (its coverage
+  // block). Empty is the operator's value; a link's renv still wins, and
+  // the panel's Reset returns here.
+  function _renderReachSettings() {
+    var R = _reachRule(), P = window.PredictedReach;
+    if (!R || !P.offered(window.MC_COVERAGE_CFG)) return '';
+    var v = reachSettings(_getEffective()).environmentLossDb, b = _reachBounds();
+    var server = P.operatorRadio(window.MC_COVERAGE_CFG).environmentLossDb;
+    var id = 'cv2-reach-environmentLossDb';
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Predicted reach</p>' +
+      '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">Environment loss (dB)' + _overrideDot('reach', 'environmentLossDb') + '</label>' +
+          '<div class="cust-hint">Buildings, trees and other clutter the terrain model does not include. Empty: the server\u2019s ' +
+            escAttr(String(server)) + ' dB. A shared link\u2019s own value still wins; the panel\u2019s Reset returns here.</div></div>' +
+        '<input type="number" id="' + id + '" min="' + b[0] + '" max="' + b[1] + '" step="1" ' +
+          'inputmode="decimal" data-cv2-reach="environmentLossDb" value="' + (v === null ? '' : escAttr(String(v))) + '" ' +
+          'placeholder="' + escAttr(String(server)) + '">' +
+      '</div>';
+  }
+
+  // ── #881 M3 Live Moments ──
+  // Shown only where the server has Moments on (/api/config/client). The
+  // on/off here is the default; a ?moments= link, or the checkbox on the
+  // Live page, still wins until Reset All.
+  function _renderMomentsSettings() {
+    var R = _momentsRule();
+    if (!R || !window.MC_MOMENTS_CFG) return '';
+    var m = momentsSettings(_getEffective());
+    var check = function (key, label, hint) {
+      var id = 'cv2-moments-' + key;
+      return '<div class="cust-field"><label class="cust-check" for="' + id + '" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="' + id + '" data-cv2-moments="' + key + '"' + (m[key] ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>' + label + _overrideDot('moments', key) + '</span></label>' +
+        (hint ? '<div class="cust-hint">' + hint + '</div>' : '') + '</div>';
+    };
+    var num = function (key, label, hint) {
+      var id = 'cv2-moments-' + key, lim = R.LIMITS[key];
+      return '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">' + label + _overrideDot('moments', key) + '</label>' +
+          '<div class="cust-hint">' + hint + '</div></div>' +
+        '<input type="number" id="' + id + '" min="' + lim[0] + '" max="' + lim[1] + '" step="1" ' +
+          'inputmode="numeric" data-cv2-moments="' + key + '" value="' + escAttr(String(m[key])) + '">' +
+      '</div>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Live Moments</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Short cards on the Live map for new nodes, repeaters back online, record links and the busiest repeater. Which events count is the operator\u2019s setting.</p>' +
+      check('enabled', 'Show Moments on the Live page by default', 'A link that says otherwise, or your own last choice on the Live page, still wins, until Reset All.') +
+      num('visibleCards', 'Cards shown at once (desktop)', 'A phone always shows one; the rest wait their turn and stay in the list') +
+      num('dwellSeconds', 'Seconds before a card fades', 'A card you hover or focus stays until you leave it') +
+      check('showNewNode', 'New node', '') +
+      check('showBackOnline', 'Back online', '') +
+      check('showRecordLink', 'Record link', '') +
+      check('showBusiest', 'Busiest repeater', '');
+  }
+
+  // ── #880 M3 Live Map: Follow a packet ──
+  // Always offered: any Live page can follow a packet. The panel renders a
+  // placeholder; _bindEvents fills it with createElement/textContent
+  // (_buildFollowSettings) before it wires the override dots, so the dots
+  // here reset like every other. The empty settle field is the server's
+  // window, named in its placeholder and hint.
+  var FOLLOW_SPEED_LABELS = { 0.5: '0.5\u00d7 (slower)', 1: '1\u00d7', 2: '2\u00d7 (faster)' };
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  function _renderFollowSettings() {
+    return _followRule() ? '<div data-cv2-follow-settings></div>' : '';
+  }
+
+  function _followEl(tag, cls, text) {
+    var el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text != null) el.textContent = text;
+    return el;
+  }
+
+  // The DOM twin of _overrideDot(); null when the key is not overridden.
+  function _overrideDotEl(section, key) {
+    if (!_isOverridden(section, key)) return null;
+    var dot = _followEl('span', 'cv2-override-dot');
+    dot.setAttribute('data-reset-s', section);
+    dot.setAttribute('data-reset-k', key);
+    dot.title = 'Reset to server default';
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'ph-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    var use = document.createElementNS(SVG_NS, 'use');
+    use.setAttribute('href', '/icons/phosphor-sprite.svg#ph-circle-fill');
+    svg.appendChild(use);
+    dot.appendChild(svg);
+    return dot;
+  }
+
+  function _followLabel(id, key, text) {
+    var label = _followEl('label', null, text);
+    label.htmlFor = id;
+    var dot = _overrideDotEl('follow', key);
+    if (dot) label.appendChild(dot);
+    return label;
+  }
+
+  // A whole-number field: the label and hint on the left, the input right.
+  function _followNumberRow(key, labelText, hintText, value, placeholder) {
+    var R = _followRule(), lim = R.LIMITS[key], id = 'cv2-follow-' + key;
+    var row = _followEl('div', 'cust-terrain-row');
+    var left = _followEl('div');
+    left.appendChild(_followLabel(id, key, labelText));
+    left.appendChild(_followEl('div', 'cust-hint', hintText));
+    var inp = _followEl('input');
+    inp.type = 'number';
+    inp.id = id;
+    inp.min = String(lim[0]);
+    inp.max = String(lim[1]);
+    inp.step = '1';
+    inp.inputMode = 'numeric';
+    inp.setAttribute('data-cv2-follow', key);
+    inp.value = value == null ? '' : String(value);
+    if (placeholder != null) inp.placeholder = placeholder;
+    row.appendChild(left);
+    row.appendChild(inp);
+    return row;
+  }
+
+  /** Fills the Live Map section into host and wires its fields. A bad
+   *  value is put back; an empty settle field is the server's window. */
+  function _buildFollowSettings(host) {
+    var R = _followRule();
+    if (!R || !host) return;
+    var f = followSettings(_getEffective());
+    var serverSettle = _serverSettleSeconds();
+    host.textContent = '';
+    var title = _followEl('p', 'cust-section-title', 'Live Map');
+    title.style.cssText = 'font-size:14px;margin:16px 0 8px';
+    host.appendChild(title);
+    var intro = _followEl('p', 'cust-hint', 'Follow a packet: how the replay of one packet spreading through the mesh plays on the Live page. ' +
+      'These apply to this browser only, from the next follow.');
+    intro.style.cssText = 'font-size:12px;color:var(--text-muted);margin-bottom:8px';
+    host.appendChild(intro);
+
+    var field = _followEl('div', 'cust-field');
+    field.appendChild(_followLabel('cv2-follow-speed', 'speed', 'Replay speed'));
+    var sel = _followEl('select');
+    sel.id = 'cv2-follow-speed';
+    sel.setAttribute('data-cv2-follow', 'speed');
+    sel.style.cssText = 'width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;' +
+      'background:var(--input-bg);color:var(--text);touch-action:manipulation';
+    R.SPEEDS.forEach(function (v) {
+      var o = _followEl('option', null, FOLLOW_SPEED_LABELS[v] || v + '\u00d7');
+      o.value = String(v);
+      if (v === f.speed) o.selected = true;
+      sel.appendChild(o);
+    });
+    field.appendChild(sel);
+    field.appendChild(_followEl('div', 'cust-hint', 'Divides every hop step of the replay. Default 1\u00d7.'));
+    host.appendChild(field);
+
+    host.appendChild(_followNumberRow('targetSeconds', 'Replay length target (s)',
+      'How long a replay aims to take at 1\u00d7. Each hop step stays between 0.35 s and 1.5 s, so a very short or very deep path takes less or more. Default ' +
+      R.DEFAULTS.targetSeconds + ' s.', f.targetSeconds, null));
+    host.appendChild(_followNumberRow('settleSeconds', 'Settle delay (s)',
+      'How long following a just-heard packet waits for late observations before it loads. Empty: the server\u2019s ' +
+      serverSettle + ' s.', f.settleSeconds, String(serverSettle)));
+
+    var current = function (key) { var now = followSettings(_getEffective()); return now ? now[key] : null; };
+    sel.addEventListener('change', function () {
+      if (!setFollowSetting('speed', Number(sel.value))) sel.value = String(current('speed'));
+    });
+    host.querySelectorAll('input[data-cv2-follow]').forEach(function (inp) {
+      var key = inp.getAttribute('data-cv2-follow');
+      inp.addEventListener('change', function () {
+        var raw = String(inp.value).trim();
+        var v = raw === '' && key === 'settleSeconds' ? null : /^[0-9]{1,2}$/.test(raw) ? Number(raw) : undefined;
+        if (v === undefined || !setFollowSetting(key, v)) {
+          var now = current(key);
+          inp.value = now == null ? '' : String(now);
+        }
+      });
+    });
+  }
+
+  // ── #968 M2 Live kiosk ──
+  // Always offered: any server can run a kiosk link. Each field names the
+  // server's value, which is what an unset field means.
+  var KIOSK_SCALE_LABELS = { auto: 'Automatic (by screen size)', 1: '1\u00d7', 1.25: '1.25\u00d7', 1.5: '1.5\u00d7', 2: '2\u00d7' };
+  function _renderKioskSettings() {
+    var R = _kioskRule();
+    if (!R) return '';
+    var k = kioskSettings(_getEffective());
+    var op = R.display(null, window.MC_KIOSK_CFG);
+    var fmt = function (key, v) { return key === 'scale' ? KIOSK_SCALE_LABELS[v] : v + ' %'; };
+    var opts = R.SCALES.map(function (v) {
+      return '<option value="' + escAttr(String(v)) + '"' + (v === k.scale ? ' selected' : '') + '>' + KIOSK_SCALE_LABELS[v] + '</option>';
+    }).join('');
+    var lim = R.LIMITS.safeInsetVmin;
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Live kiosk</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">For a TV or wall screen running a <code>#/live?kiosk=1</code> link. Set these once in the screen\u2019s own browser, outside kiosk, before opening the kiosk link. They apply to this browser only and win over the server\u2019s kiosk preset.</p>' +
+      '<div class="cust-field"><label for="cv2-kiosk-scale">Text and tile size' + _overrideDot('kiosk', 'scale') + '</label>' +
+        '<select id="cv2-kiosk-scale" data-cv2-kiosk="scale" style="width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);touch-action:manipulation">' + opts + '</select>' +
+        '<div class="cust-hint">Server default: ' + fmt('scale', op.scale) + '. Automatic grows it with the screen, from 1\u00d7 up to 2\u00d7.</div></div>' +
+      '<div class="cust-terrain-row">' +
+        '<div><label for="cv2-kiosk-safeInsetVmin">Screen-edge margin (% of short side)' + _overrideDot('kiosk', 'safeInsetVmin') + '</label>' +
+          '<div class="cust-hint">Keeps text clear of a TV\u2019s cut-off edges. Server default: ' + fmt('safeInsetVmin', op.safeInsetVmin) + '.</div></div>' +
+        '<input type="number" id="cv2-kiosk-safeInsetVmin" min="' + lim[0] + '" max="' + lim[1] + '" step="0.5" ' +
+          'inputmode="decimal" data-cv2-kiosk="safeInsetVmin" value="' + escAttr(String(k.safeInsetVmin)) + '">' +
+      '</div>';
+  }
+
+  // ── #737 Oblique photo viewer defaults ──
+  // Shown only while the server offers the photos (its skraafoto block);
+  // the line-of-sight row only where the Path profile tool is offered too.
+  // A value back at its default is a cleared override.
+  function _renderSkraafotoSettings() {
+    var R = _skraafotoRule();
+    var S = window.Skraafoto;
+    if (!R || !S.offered(window.MC_SKRAAFOTO_CFG)) return '';
+    var s = skraafotoSettings(_getEffective());
+    var tp = window.TerrainProfile;
+    var profile = !!(tp && typeof tp.offered === 'function' && tp.offered(window.MC_DHM_CFG));
+    var select = function (key, label, values, hint) {
+      var id = 'cv2-skraafoto-' + key;
+      return '<div class="cust-field"><label for="' + id + '">' + label + _overrideDot('skraafoto', key) + '</label>' +
+        '<select id="' + id + '" data-cv2-skraafoto="' + key + '" style="width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);touch-action:manipulation">' +
+          values.map(function (v) {
+            return '<option value="' + escAttr(v) + '"' + (s[key] === v ? ' selected' : '') + '>' + escAttr(R.LABELS[key][v]) + '</option>';
+          }).join('') +
+        '</select><div class="cust-hint">' + hint + '</div></div>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Oblique Photos</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">How the oblique aerial photo viewer opens, on a node and in the Path profile.</p>' +
+      select('direction', 'First photo', R.DIRECTIONS, 'A shared link to a photo still opens that direction.') +
+      select('zoom', 'First view', R.ZOOMS, 'Zoomed in only where the point is in the photo; the Zoom button still switches.') +
+      (profile
+        ? '<div class="cust-field"><label class="cust-check" for="cv2-skraafoto-lineOfSight" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+            '<input type="checkbox" id="cv2-skraafoto-lineOfSight" data-cv2-skraafoto="lineOfSight"' + (s.lineOfSight ? ' checked' : '') + ' style="width:20px;height:20px">' +
+            '<span>Draw the line of sight from a Path profile' + _overrideDot('skraafoto', 'lineOfSight') + '</span></label>' +
+            '<div class="cust-hint">Off: the photo shows only the point.</div></div>'
+        : '');
+  }
+
+  /* One monuments input: the checkbox, or a whole number by the rule; an
+   * empty warning distance is null (the default). */
+  function _heritageInputValue(key, inp) {
+    if (key === 'enabled' || key === 'profileWarning') return !!inp.checked;
+    if (key === 'warnDistanceM' && inp.value === '') return null;
+    return /^[0-9]{1,4}$/.test(inp.value) ? Number(inp.value) : undefined;
+  }
+
+  /* One antenna sites input: a whole number (or the checkbox) by the
+   * layer's rule. A zoom gate below the operator's, or a strong tier past
+   * the distance, is not stored; the input shows the effective value. */
+  function _mastsInputValue(key, inp) {
+    if (key === 'enabled') return !!inp.checked;
+    return /^[0-9]{1,4}$/.test(inp.value) ? Number(inp.value) : null;
+  }
+
+  // ── #1633 / #674 1-byte path hops: Show / Mark / Hide ──
+  // Reads and writes through hop-filter.js (MC_get1ByteHopsMode /
+  // MC_set1ByteHopsMode), which owns the storage key, the default (mark) and
+  // the migration of the #1633 boolean key. Every change fires
+  // `mc-hide-1byte-hops-changed`; map.js (which redraws the route view) and
+  // packets.js subscribe and re-render in place (PR #1689 r1 adv #4, #673).
+  // Analytics rebuilds on its next tab activation.
   function _renderHide1ByteHopsToggle() {
-    var on = false;
-    try { on = localStorage.getItem('meshcore-hide-1byte-hops') === 'true'; } catch (_e) {}
+    var mode = typeof window.MC_get1ByteHopsMode === 'function' ? window.MC_get1ByteHopsMode() : 'mark';
+    var opt = function (value, label) {
+      return '<option value="' + value + '"' + (mode === value ? ' selected' : '') + '>' + label + '</option>';
+    };
     return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Path Display</p>' +
-      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">1-byte path-hash prefixes (firmware default) collide ~8-way at ~2k relays — many polylines and route-pattern rows they produce are visual noise. Hide them globally without changing what\'s stored.</p>' +
-      '<div class="cust-field" style="display:flex;align-items:center;gap:8px">' +
-        '<input type="checkbox" id="cv2-hide-1byte-hops" data-cv2-hide-1byte-hops' +
-          (on ? ' checked' : '') +
-          ' style="width:16px;height:16px;cursor:pointer">' +
-        '<label for="cv2-hide-1byte-hops" style="cursor:pointer;margin:0">Hide short (1-byte) path-hash hops</label>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">1-byte path-hash prefixes (firmware default) collide often: several nodes share each one, so a 1-byte hop on a route is a best guess. Mark flags the uncertain hops on the map route; Hide leaves 1-byte hops out everywhere without changing what\'s stored. Until you pick a mode here, the Live map shows every hop unmarked.</p>' +
+      '<div class="cust-field">' +
+        '<label for="cv2-hide-1byte-hops" style="display:block;margin-bottom:4px">Short (1-byte) path-hash hops</label>' +
+        '<select id="cv2-hide-1byte-hops" data-cv2-hide-1byte-hops style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
+          opt('show', 'Show') + opt('mark', 'Mark uncertain hops (default)') + opt('hide', 'Hide') +
+        '</select>' +
       '</div>';
   }
 
@@ -1634,11 +3121,19 @@
   // Persists per-browser via MC_setDarkTileProvider; map.js / live.js
   // listen for `mc-tile-provider-changed` and swap tiles live.
   
+  // The Map Tiles block as last rendered into the panel (see the #741
+  // fromConfig listener, which replaces only that block when it changes).
+  var _shownTileSelectorHtml = null;
+
   function _renderTileProviderSelector() {
     var reg = (typeof window !== 'undefined') && window.MC_TILE_PROVIDERS;
     if (!reg) return '';
-    var activeDark = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : 'carto-dark';
-    var activeLight = (typeof window.MC_getLightTileProvider === 'function') ? window.MC_getLightTileProvider() : 'carto-light';
+    // #332 — the last-resort id comes from the registry's own exported
+    // defaults, never from a hard-coded 'carto-*'. CARTO is no longer the
+    // built-in default, so naming it here would have preselected a style
+    // the instance may not even have enabled.
+    var activeDark = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : window.MC_DARK_TILE_DEFAULT;
+    var activeLight = (typeof window.MC_getLightTileProvider === 'function') ? window.MC_getLightTileProvider() : window.MC_LIGHT_TILE_DEFAULT;
     
     var darkIds = Object.keys(reg).filter(function(id) { return reg[id].type === 'dark'; });
     var lightIds = Object.keys(reg).filter(function(id) { return reg[id].type === 'light'; });
@@ -1766,6 +3261,23 @@
     '</div>';
   }
 
+  /* #332 — both geo-filter preview maps used to hard-code the CARTO
+   * light_all template, so they rendered "API KEY REQUIRED" tiles even on
+   * instances configured for Esri/OpenTopoMap/OSM. Resolve the operator's
+   * configured LIGHT provider instead (these previews are always
+   * light-styled regardless of the app theme), falling back to roles.js
+   * TILE_LIGHT, which is itself non-CARTO. */
+  function _cv2PreviewTile() {
+    var spec = (typeof window.MC_getTileSpec === 'function') ? window.MC_getTileSpec('light') : null;
+    return {
+      url: (spec && spec.url) || window.TILE_LIGHT,
+      // #741 M1b — a WMS light style is built from its descriptor.
+      wms: (spec && spec.wms) || null,
+      attribution: (spec && spec.attribution) || '© OpenStreetMap contributors',
+      maxZoom: (spec && spec.maxZoom) || 19
+    };
+  }
+
   function _gfOpenModal(container) {
     var existing = document.getElementById('cv2-gf-modal-overlay');
     if (existing) existing.remove();
@@ -1835,8 +3347,9 @@
     var modalClosingLine = null;
 
     _gfModalMap = L.map(mapDiv, { zoomControl: true });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-      attribution: '© OpenStreetMap © CartoDB', maxZoom: 19
+    var _cv2Tile = _cv2PreviewTile();
+    window.MC_createBaseLayer(_cv2Tile, {
+      attribution: _cv2Tile.attribution, maxZoom: _cv2Tile.maxZoom
     }).addTo(_gfModalMap);
 
     function renderModal() {
@@ -2005,7 +3518,7 @@
       }
       listEl.innerHTML = _gfPruneNodes.map(function (n) {
         var coords = n.lat != null ? (' · ' + n.lat.toFixed(4) + ', ' + n.lon.toFixed(4)) : '';
-        return '<div>' + (n.name || n.pubkey.slice(0, 12)) + coords + '</div>';
+        return '<div>' + esc(n.name || n.pubkey.slice(0, 12)) + coords + '</div>';
       }).join('');
       confirmBtn.textContent = 'Delete ' + count + ' node' + (count !== 1 ? 's' : '');
       resultEl.style.display = '';
@@ -2044,8 +3557,9 @@
     if (!mapEl || typeof L === 'undefined') return;
 
     _gfMap = L.map(mapEl, { zoomControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-      attribution: '© OpenStreetMap © CartoDB', maxZoom: 19
+    var _cv2Tile = _cv2PreviewTile();
+    window.MC_createBaseLayer(_cv2Tile, {
+      attribution: _cv2Tile.attribution, maxZoom: _cv2Tile.maxZoom
     }).addTo(_gfMap);
 
     if (!_gfLoaded) {
@@ -2105,10 +3619,23 @@
     if (pruneConfirmBtn) pruneConfirmBtn.addEventListener('click', function () { _gfPruneConfirm(container); });
   }
 
+  // Base-map picks live in their own keys (MC_set*TileProvider), not in the
+  // overrides, but Reset All clears them too (#1430, #741).
+  var TILE_PICK_KEYS = ['mc-light-tile-provider', 'mc-dark-tile-provider'];
+
+  // #741 — is there anything for Reset All to reset? A theme override, or a
+  // base-map choice on its own.
+  function _hasResettableCustomization() {
+    if (Object.keys(readOverrides()).length > 0) return true;
+    try {
+      return TILE_PICK_KEYS.some(function (k) { return localStorage.getItem(k) != null; });
+    } catch (_e) { return false; }
+  }
+
   function _renderExport() {
     var delta = readOverrides();
     var json = JSON.stringify(delta, null, 2);
-    var hasDelta = Object.keys(delta).length > 0;
+    var hasDelta = _hasResettableCustomization();
 
     return '<div class="cust-panel' + (_activeTab === 'export' ? ' active' : '') + '" data-panel="export">' +
       '<p class="cust-section-title">Export / Import</p>' +
@@ -2190,7 +3717,7 @@
     // Clean scalar sections
     for (var si = 0; si < SCALAR_SECTIONS.length; si++) {
       var sk = SCALAR_SECTIONS[si];
-      if (delta.hasOwnProperty(sk) && delta[sk] === server[sk]) {
+      if (_own(delta, sk) && delta[sk] === server[sk]) {
         delete delta[sk]; changed = true;
       }
     }
@@ -2204,7 +3731,26 @@
     if (inner) _renderPanel(inner);
   }
 
+  // #1420 / #741 — the light and dark base-map dropdowns persist the pick
+  // and fire mc-tile-provider-changed (through MC_set*TileProvider).
+  function _bindTileProviderSelects(container) {
+    container.querySelectorAll('[data-cv2-dark-tile-provider]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (typeof window.MC_setDarkTileProvider === 'function') window.MC_setDarkTileProvider(sel.value);
+      });
+    });
+    container.querySelectorAll('[data-cv2-light-tile-provider]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (typeof window.MC_setLightTileProvider === 'function') window.MC_setLightTileProvider(sel.value);
+      });
+    });
+  }
+
   function _bindEvents(container) {
+    // #880 M3 — the Live Map section is built as DOM; first, so the
+    // override-dot wiring below sees its dots.
+    container.querySelectorAll('[data-cv2-follow-settings]').forEach(_buildFollowSettings);
+
     // Tab switching
     container.querySelectorAll('.cust-tab').forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -2253,25 +3799,7 @@
       });
     });
 
-    // #1420 Dark-tile provider dropdown — persists + fires mc-tile-provider-changed
-    container.querySelectorAll('[data-cv2-dark-tile-provider]').forEach(function (sel) {
-      sel.addEventListener('change', function () {
-        var id = sel.value;
-        if (typeof window.MC_setDarkTileProvider === 'function') {
-          window.MC_setDarkTileProvider(id);
-        }
-      });
-    });
-
-    // Light-tile provider dropdown — persists + fires mc-tile-provider-changed
-    container.querySelectorAll('[data-cv2-light-tile-provider]').forEach(function (sel) {
-      sel.addEventListener('change', function () {
-        var id = sel.value;
-        if (typeof window.MC_setLightTileProvider === 'function') {
-          window.MC_setLightTileProvider(id);
-        }
-      });
-    });
+    _bindTileProviderSelects(container);
 
     // #1454 Show-encrypted-channels checkbox — persists + fires
     // mc-channels-show-encrypted-changed; channels.js re-fetches live.
@@ -2288,20 +3816,201 @@
       });
     });
 
-    // #1633 Hide-1-byte-path-hops checkbox — persists + fires
-    // mc-hide-1byte-hops-changed; consumers re-render or rely on the next
-    // navigation refresh (analytics tab, packets list).
-    container.querySelectorAll('[data-cv2-hide-1byte-hops]').forEach(function (cb) {
-      cb.addEventListener('change', function () {
-        var on = !!cb.checked;
-        if (typeof window.MC_setHide1ByteHops === 'function') {
-          window.MC_setHide1ByteHops(on);
-        } else {
-          try {
-            if (on) localStorage.setItem('meshcore-hide-1byte-hops', 'true');
-            else localStorage.removeItem('meshcore-hide-1byte-hops');
-          } catch (_e) {}
+    // #681 M6 — terrain antenna-height defaults. A value back at the
+    // built-in default is a cleared override, not a stored one, so the
+    // section only ever holds what the viewer actually changed.
+    container.querySelectorAll('[data-cv2-terrain-height]').forEach(function (inp) {
+      var key = inp.dataset.cv2TerrainHeight;
+      inp.addEventListener('change', function () {
+        var raw = _parseAntennaHeight(inp.value);
+        if (raw === null) {
+          // Put the effective value back rather than storing nonsense.
+          inp.value = String(terrainSettings(_getEffective())[key]);
+          return;
         }
+        if (raw === TERRAIN_DEFAULTS[key]) clearOverride('terrain', key);
+        else setOverride('terrain', key, raw);
+      });
+    });
+
+    // #681 M6 — default elevation model (terrain only, or with the surface).
+    container.querySelectorAll('[data-cv2-terrain-model]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (TERRAIN_MODELS.indexOf(sel.value) === -1) return;
+        if (sel.value === TERRAIN_DEFAULTS.model) clearOverride('terrain', 'model');
+        else setOverride('terrain', 'model', sel.value);
+      });
+    });
+
+    // #727 M4 — the share switch. On is the default, so only off is stored.
+    container.querySelectorAll('[data-cv2-terrain-share]').forEach(function (box) {
+      box.addEventListener('change', function () {
+        if (box.checked) clearOverride('terrain', TERRAIN_SHARE_KEY);
+        else setOverride('terrain', TERRAIN_SHARE_KEY, false);
+      });
+    });
+
+    // #789 M3 — the owner switch. On is the default, so only off is stored.
+    container.querySelectorAll('[data-cv2-terrain-owner]').forEach(function (box) {
+      box.addEventListener('change', function () {
+        if (box.checked) clearOverride('terrain', TERRAIN_OWNER_KEY);
+        else setOverride('terrain', TERRAIN_OWNER_KEY, false);
+      });
+    });
+
+    // #724 M5 — antenna sites settings. A value back at the operator's is
+    // a cleared override, like the terrain defaults.
+    container.querySelectorAll('[data-cv2-masts]').forEach(function (inp) {
+      var key = inp.dataset.cv2Masts;
+      inp.addEventListener('change', function () {
+        var ML = _mastsLayer(), cfg = _mastsCfg();
+        if (!ML || !cfg) return;
+        var v = _mastsInputValue(key, inp);
+        var now = mastsSettings(_getEffective());
+        var op = ML.settings(cfg, {});
+        if (v === null || !isValidMastsSetting(key, v) ||
+            (key === 'minZoom' && v < op.minZoom) ||
+            (key === 'hintStrongM' && v > now.hintDistanceM)) {
+          // Put the effective value back rather than storing nonsense.
+          if (key === 'enabled') inp.checked = now.enabled; else inp.value = String(now[key]);
+          return;
+        }
+        if (v === op[key]) clearOverride('masts', key);
+        else setOverride('masts', key, v);
+        // A new default applies to the next map, not one the viewer chose.
+        if (key === 'enabled' && window.MC_forgetOverlayPref) window.MC_forgetOverlayPref('masts-sites');
+      });
+    });
+
+    // #723 M4 — ancient monuments settings. A value back at its default
+    // is a cleared override; a bad one is put back.
+    container.querySelectorAll('[data-cv2-heritage]').forEach(function (inp) {
+      var key = inp.dataset.cv2Heritage;
+      inp.addEventListener('change', function () {
+        var R = _heritageRule();
+        if (!R) return;
+        var v = _heritageInputValue(key, inp);
+        var now = heritageSettings(_getEffective());
+        if (v === undefined || (v !== null && !isValidHeritageSetting(key, v))) {
+          if (inp.type === 'checkbox') inp.checked = !!now[key];
+          else inp.value = now[key] === null ? '' : String(now[key]);
+          return;
+        }
+        if (v === R.DEFAULTS[key]) clearOverride('heritage', key);
+        else setOverride('heritage', key, v);
+        // A new default applies to the next map, not one the viewer chose.
+        if (key === 'enabled' && window.MC_forgetOverlayPref) window.MC_forgetOverlayPref('heritage-monuments');
+      });
+    });
+
+    // #881 M3 — Live Moments settings. A value back at the server default
+    // is a cleared override; a bad one is put back. A new on/off default
+    // makes the viewer's saved Live choice forgotten, so it applies.
+    container.querySelectorAll('[data-cv2-moments]').forEach(function (inp) {
+      var key = inp.dataset.cv2Moments;
+      inp.addEventListener('change', function () {
+        var R = _momentsRule();
+        if (!R) return;
+        var v = inp.type === 'checkbox' ? !!inp.checked : (/^[0-9]{1,3}$/.test(inp.value) ? Number(inp.value) : undefined);
+        var now = momentsSettings(_getEffective());
+        if (v === undefined || !isValidMomentsSetting(key, v)) {
+          if (inp.type === 'checkbox') inp.checked = !!now[key];
+          else inp.value = String(now[key]);
+          return;
+        }
+        if (key === 'enabled') {
+          try { localStorage.removeItem(window.LiveMoments.STORAGE_KEY); } catch (_e) { /* private mode */ }
+        }
+        _saveMomentsSetting(key, v);
+      });
+    });
+
+    // #968 M2 — Live kiosk scale and inset. The operator's own value is a
+    // cleared override (setKioskSetting); a bad one is put back.
+    container.querySelectorAll('[data-cv2-kiosk]').forEach(function (inp) {
+      var key = inp.dataset.cv2Kiosk;
+      inp.addEventListener('change', function () {
+        var raw = inp.value;
+        var v = key === 'scale' ? (raw === 'auto' ? 'auto' : Number(raw))
+          : (/^[0-9]{1,2}(\.[0-9]+)?$/.test(raw) ? Number(raw) : undefined);
+        if (!setKioskSetting(key, v)) {
+          var now = kioskSettings(_getEffective());
+          if (now) inp.value = String(now[key]);
+        }
+      });
+    });
+
+    // #968 M3 — the Predicted reach default. Empty is a cleared override
+    // (the operator's value); a bad value is put back.
+    container.querySelectorAll('[data-cv2-reach]').forEach(function (inp) {
+      var key = inp.dataset.cv2Reach;
+      inp.addEventListener('change', function () {
+        if (!_reachRule()) return;
+        var v = reachInputValue(key, inp.value);
+        if (v === null) { clearOverride('reach', key); return; }
+        if (v === undefined) {
+          var now = reachSettings(_getEffective())[key];
+          inp.value = now === null ? '' : String(now);
+          return;
+        }
+        setOverride('reach', key, v);
+      });
+    });
+
+    // #737 — oblique photo viewer defaults. A value back at its default is
+    // a cleared override; a bad one is put back. The next viewer reads it.
+    container.querySelectorAll('[data-cv2-skraafoto]').forEach(function (inp) {
+      var key = inp.dataset.cv2Skraafoto;
+      inp.addEventListener('change', function () {
+        var R = _skraafotoRule();
+        if (!R) return;
+        var v = key === 'lineOfSight' ? !!inp.checked : inp.value;
+        if (!isValidSkraafotoSetting(key, v)) {
+          var now = skraafotoSettings(_getEffective());
+          if (key === 'lineOfSight') inp.checked = now.lineOfSight; else inp.value = now[key];
+          return;
+        }
+        if (v === R.DEFAULTS[key]) clearOverride('skraafoto', key);
+        else setOverride('skraafoto', key, v);
+      });
+    });
+
+    // #734 — DHM overlay defaults. A value back at the built-in is a
+    // cleared override; a new on/off default applies to the next map, so
+    // the remembered choice of that overlay is forgotten (as #724 M5).
+    container.querySelectorAll('[data-cv2-overlay]').forEach(function (inp) {
+      var key = inp.dataset.cv2Overlay;
+      inp.addEventListener('change', function () {
+        var D = _dhmOverlays();
+        if (!D) return;
+        var v = key === 'contours' ? !!inp.checked
+          : key === 'contourMinZoom' ? (/^[0-9]{1,2}$/.test(inp.value) ? Number(inp.value) : null)
+          : key === 'elevationOpacity' ? (/^[0-9]{1,3}$/.test(inp.value) ? Number(inp.value) : null)
+          : inp.value;
+        var now = dhmOverlaySettings(_getEffective());
+        var built = D.settings({});
+        var range = D.contourZoomRange();
+        if (v === null || !isValidDHMOverlaySetting(key, v) ||
+            (key === 'contourMinZoom' && (!range || v < range[0] || v > range[1]))) {
+          // Put the effective value back rather than storing nonsense.
+          if (key === 'contours') inp.checked = now.contours; else inp.value = String(now[key]);
+          return;
+        }
+        if (v === built[key]) clearOverride('dhmOverlays', key);
+        else setOverride('dhmOverlays', key, v);
+        if (window.MC_forgetOverlayPref) {
+          if (key === 'hillshade') window.MC_forgetOverlayPref('dhm-terrain');
+          if (key === 'contours') window.MC_forgetOverlayPref('dhm-contours');
+        }
+      });
+    });
+
+    // #1633 / #674 1-byte path hops select — persists + fires
+    // mc-hide-1byte-hops-changed through hop-filter.js; consumers re-render
+    // or rely on the next navigation refresh (analytics tab, packets list).
+    container.querySelectorAll('[data-cv2-hide-1byte-hops]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (typeof window.MC_set1ByteHopsMode === 'function') window.MC_set1ByteHopsMode(sel.value);
       });
     });
 
@@ -2346,10 +4055,16 @@
       var key = parts[1];
       // Optimistic CSS for color pickers on input event
       if (inp.type === 'color') {
+        // The value to store: the pick, with the alpha of the colour it
+        // replaces when that one was translucent (review PR#714).
+        var picked = function () {
+          var a = inp.getAttribute('data-cv2-alpha');
+          return a ? _hexWithAlpha(inp.value, Number(a)) : inp.value;
+        };
         inp.addEventListener('input', function () {
           // Optimistic CSS update (Decision #12)
-          var cssVar = THEME_CSS_MAP[key];
-          if (cssVar) document.documentElement.style.setProperty(cssVar, inp.value);
+          var cssVar = HEAT_COLOR_KEYS.indexOf(key) !== -1 ? _heatUserVar(key) : THEME_CSS_MAP[key];
+          if (cssVar) document.documentElement.style.setProperty(cssVar, picked());
           // Mirror to logo brand vars so the wordmark recolors live too.
           if (key === 'accent') document.documentElement.style.setProperty('--logo-accent', inp.value);
           if (key === 'accentHover') document.documentElement.style.setProperty('--logo-accent-hi', inp.value);
@@ -2360,13 +4075,13 @@
           }
           // Update hex display
           var hex = inp.parentElement.querySelector('.cust-hex');
-          if (hex) hex.textContent = inp.value;
+          if (hex) hex.textContent = picked();
           // Update node dot
           var dot = inp.parentElement.querySelector('.cust-node-dot');
           if (dot) dot.style.background = inp.value;
         });
         inp.addEventListener('change', function () {
-          setOverride(section, key, inp.value);
+          setOverride(section, key, picked());
         });
       } else {
         // Text inputs — debounced write on input
@@ -2377,19 +4092,13 @@
             _setBrandAlt(inp.value);
             var el = document.querySelector('.brand-text');
             if (el) el.textContent = inp.value;
-            document.title = inp.value;
+            window.setInstanceTitle(inp.value);
           }
           if (section === 'branding' && key === 'logoUrl') {
             _setBrandLogoUrl(inp.value || '', null);
-            var iconEl = document.querySelector('.brand-icon');
-            if (iconEl) {
-              if (inp.value) iconEl.innerHTML = '<img src="' + inp.value + '" style="height:24px" onerror="this.style.display=\'none\'">';
-              else iconEl.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg>';
-            }
           }
           if (section === 'branding' && key === 'faviconUrl') {
-            var link = document.querySelector('link[rel="icon"]');
-            if (link && inp.value) link.href = inp.value;
+            _setFaviconUrl(inp.value);
           }
           if (section === 'branding' && key === 'homeUrl') {
             // #1518 — live nav-brand[href] swap. Validator silently drops
@@ -2668,6 +4377,44 @@
     _updateSaveStatus(_saveStatus);
   }
 
+  // #741 — the base-map lists come from the tile registry, which is rebuilt
+  // when /api/config/client lands. On a cold start (a slow phone) the panel
+  // can already be open by then, listing only the providers known at parse
+  // time, so the operator's gated styles (Dataforsyningen, Esri, ...) must
+  // appear, or vanish, in place. A closed panel re-renders on open.
+  //
+  // Only the Map Tiles block is replaced, and only when its markup changed:
+  // a full panel re-render would destroy whatever input the viewer is typing
+  // in (and collapse the phone keyboard), the case the debounced re-render
+  // above also avoids. If one of the base-map selects itself has the focus,
+  // the block is replaced once the focus leaves it.
+  function _refreshTileProviderBlock() {
+    if (!_panelEl || _panelEl.classList.contains('hidden')) return;
+    var block = _panelEl.querySelector('[data-cv2-tile-providers]');
+    if (!block) return;
+    var html = _renderTileProviderSelector();
+    if (html === _shownTileSelectorHtml) return;
+    if (block.contains(document.activeElement)) {
+      if (block.hasAttribute('data-cv2-refresh-pending')) return;
+      block.setAttribute('data-cv2-refresh-pending', '');
+      block.addEventListener('focusout', function onOut() {
+        block.removeEventListener('focusout', onOut);
+        block.removeAttribute('data-cv2-refresh-pending');
+        // Once the focus has moved on (it may move to the other select).
+        setTimeout(_refreshTileProviderBlock, 0);
+      });
+      return;
+    }
+    block.innerHTML = html;
+    _shownTileSelectorHtml = html;
+    _bindTileProviderSelects(block);
+  }
+  try {
+    window.addEventListener('mc-tile-provider-changed', function (e) {
+      if (e && e.detail && e.detail.fromConfig) _refreshTileProviderBlock();
+    });
+  } catch (_e) { /* no window events (tests) */ }
+
   // ── Initialization (runs immediately on script load) ──
 
   // 1. Migration check
@@ -2699,8 +4446,10 @@
       : (earlyEffective.theme || {});
     var root = document.documentElement.style;
     for (var key in THEME_CSS_MAP) {
+      if (HEAT_COLOR_KEYS.indexOf(key) !== -1) continue; // _applyHeatCSS
       if (themeSection[key]) root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
     }
+    _applyHeatCSS(root, earlyEffective, earlyOverrides, dark);
     // Mirror accent → logo brand vars ONLY when present in overrides (so the
     // server-default accent never clobbers the sage/teal :root brand defaults).
     var ovTheme = dark
@@ -2739,17 +4488,12 @@
         _setBrandAlt(overrides.branding.siteName);
         var brandEl = document.querySelector('.brand-text');
         if (brandEl) brandEl.textContent = overrides.branding.siteName;
-        document.title = overrides.branding.siteName;
+        window.setInstanceTitle(overrides.branding.siteName);
       }
       if (overrides.branding.logoUrl) {
         _setBrandLogoUrl(overrides.branding.logoUrl, overrides.branding.siteName || null);
-        var iconEl = document.querySelector('.brand-icon');
-        if (iconEl) iconEl.innerHTML = '<img src="' + overrides.branding.logoUrl + '" style="height:24px" onerror="this.style.display=\'none\'">';
       }
-      if (overrides.branding.faviconUrl) {
-        var link = document.querySelector('link[rel="icon"]');
-        if (link) link.href = overrides.branding.faviconUrl;
-      }
+      if (overrides.branding.faviconUrl) _setFaviconUrl(overrides.branding.faviconUrl);
       // #1518 — re-apply homeUrl override after DOM is ready (handles cold
       // page loads where the customizer pipeline ran before .nav-brand mounted).
       if (overrides.branding.homeUrl) {
@@ -2785,12 +4529,23 @@
       STORAGE_KEY,                 // 'cs-theme-overrides'
       'meshcore-cb-preset',        // #1361 CB preset id
       'channels-show-encrypted',   // #1454 encrypted-channel toggle
-      'meshcore-hide-1byte-hops',  // #1633 hide 1-byte path hops toggle
-      'mc-dark-tile-provider'      // #1430 dark-tile provider pick
+      'meshcore-hide-1byte-hops',  // #1633 hide 1-byte path hops toggle (pre-#674)
+      'meshcore-1byte-hops-mode',  // #674 1-byte path hops: show/mark/hide
+      'mc-dark-tile-provider',     // #1430 dark-tile provider pick
+      'mc-light-tile-provider',    // light-tile provider pick (#741)
+      'live-moments',              // the Live page's Moments choice (#881 M3)
+      'meshcore-distance-unit'     // mirror of the Distance unit pick (#839)
     ];
     for (var i = 0; i < CUSTOMIZER_LS_KEYS.length; i++) {
       try { localStorage.removeItem(CUSTOMIZER_LS_KEYS[i]); } catch (_e) { /* ignore */ }
     }
+    // The map layer control's own choices (hillshade, contours, monuments,
+    // antenna sites, Aerial): they outrank the defaults set here, so a reset
+    // that kept them would not reset the map (#839 finding 8). The keys
+    // live with the overlays in map-tile-providers.js.
+    try {
+      if (typeof window !== 'undefined' && typeof window.MC_forgetMapLayerPrefs === 'function') window.MC_forgetMapLayerPrefs();
+    } catch (_e) { /* ignore */ }
 
     // 2. CB preset — body[data-cb-preset] + CSS var teardown lives in
     //    MeshCorePresets.clearPreset(). Prefer the canonical helper so
@@ -2839,6 +4594,11 @@
           rs.removeProperty('--mc-mb-' + k);
         });
         for (var ri = 0; ri < 5; ri++) rs.removeProperty('--mc-rt-ramp-' + ri);
+        ['new-node', 'back-online', 'record-link', 'busiest'].forEach(function (k) { rs.removeProperty('--mc-moment-' + k); });
+        ['light', 'dark'].forEach(function (mode) {
+          for (var hn = 1; hn <= 5; hn++) rs.removeProperty('--mc-heat-' + mode + '-' + hn);
+        });
+        HEAT_COLOR_KEYS.forEach(function (k) { rs.removeProperty(_heatUserVar(k)); });
         // Theme vars the customizer might have stamped onto :root via
         // applyCSS (logo accents + every entry in THEME_CSS_MAP).
         rs.removeProperty('--logo-accent');
@@ -2857,15 +4617,19 @@
     //    default. Re-applying the effective active id achieves that
     //    without forcing a particular value (it falls through to the
     //    server default / DEFAULT_ID inside getActiveId()).
-    try {
-      if (typeof window !== 'undefined' &&
-          typeof window.MC_setDarkTileProvider === 'function' &&
-          typeof window.MC_getDarkTileProvider === 'function') {
-        window.MC_setDarkTileProvider(window.MC_getDarkTileProvider());
-        // Re-clear so we don't re-persist the just-re-applied value.
-        try { localStorage.removeItem('mc-dark-tile-provider'); } catch (_e) {}
-      }
-    } catch (_e) { /* ignore */ }
+    //    #741 — the light pick (e.g. a Dataforsyningen base map) gets the
+    //    same treatment as the dark one.
+    [['Dark', 'mc-dark-tile-provider'], ['Light', 'mc-light-tile-provider']].forEach(function (t) {
+      try {
+        var set = (typeof window !== 'undefined') && window['MC_set' + t[0] + 'TileProvider'];
+        var get = (typeof window !== 'undefined') && window['MC_get' + t[0] + 'TileProvider'];
+        if (typeof set === 'function' && typeof get === 'function') {
+          set(get());
+          // Re-clear so we don't re-persist the just-re-applied value.
+          try { localStorage.removeItem(t[1]); } catch (_e) {}
+        }
+      } catch (_e) { /* ignore */ }
+    });
 
     // 6. Encrypted-channel toggle — removing the LS key (step 1) fixes
     //    persistence, but channels.js subscribes to
@@ -2907,6 +4671,12 @@
     validateShape: validateShape,
     applyCSS: applyCSS,
     isValidColor: isValidColor,
+    // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
+    cssColorToHex: _cssColorToHex,
+    colorValueAttr: _colorValueAttr,
+    colorWithAlpha: _colorWithAlpha,
+    renderTerrainSettings: _renderTerrainSettings,
+    renderShareSection: _renderShareSection,
     isValidHomeUrl: isValidHomeUrl,
     isOverridden: _isOverridden,
     // #1496 — full reset (not just STORAGE_KEY). See _resetAll() above.
@@ -2916,6 +4686,77 @@
     // #1380 — exposed for unit tests; see test-issue-1380-*.
     applyCbSim: _applyCbSim,
     resetCbPreset: _resetCbPreset,
-    THEME_CSS_MAP: THEME_CSS_MAP
+    THEME_CSS_MAP: THEME_CSS_MAP,
+    // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
+    TERRAIN_DEFAULTS: TERRAIN_DEFAULTS,
+    TERRAIN_COLOR_KEYS: TERRAIN_COLOR_KEYS,
+    // #727 M4 — exposed for tests; see test-issue-727-m4-share-customizer.js.
+    TERRAIN_SHARE_KEY: TERRAIN_SHARE_KEY,
+    shareSettings: shareSettings,
+    // #789 M3 — exposed for tests; see test-issue-789-m3-customizer.js.
+    TERRAIN_OWNER_KEY: TERRAIN_OWNER_KEY,
+    ownerSettings: ownerSettings,
+    MASTS_COLOR_KEYS: MASTS_COLOR_KEYS,
+    HEAT_COLOR_KEYS: HEAT_COLOR_KEYS,
+    VALID_SECTIONS: VALID_SECTIONS,
+    isValidAntennaHeight: isValidAntennaHeight,
+    terrainSettings: terrainSettings,
+    // #724 M5 — exposed for tests; see test-issue-724-m5-masts-customizer.js.
+    MASTS_SETTING_KEYS: MASTS_SETTING_KEYS,
+    isValidMastsSetting: isValidMastsSetting,
+    mastsSettings: mastsSettings,
+    renderMastsSettings: _renderMastsSettings,
+    // #734 — exposed for tests; see test-issue-734-customizer-overlays.js.
+    isValidDHMOverlaySetting: isValidDHMOverlaySetting,
+    dhmOverlaySettings: dhmOverlaySettings,
+    renderDHMOverlaySettings: _renderDHMOverlaySettings,
+    // #723 M4 — exposed for tests; see test-issue-723-m4-heritage-customizer.js.
+    HERITAGE_SETTING_KEYS: _heritageRule() ? _heritageRule().KEYS : [],
+    isValidHeritageSetting: isValidHeritageSetting,
+    heritageSettings: heritageSettings,
+    renderHeritageSettings: _renderHeritageSettings,
+    // #737 — exposed for tests; see test-issue-737-customizer-skraafoto.js.
+    // A getter: public/skraafoto.js loads after this file (index.html).
+    get SKRAAFOTO_SETTING_KEYS() { var R = _skraafotoRule(); return R ? R.KEYS.slice() : []; },
+    isValidSkraafotoSetting: isValidSkraafotoSetting,
+    skraafotoSettings: skraafotoSettings,
+    renderSkraafotoSettings: _renderSkraafotoSettings,
+    // #881 M3 — exposed for tests; see test-881-m3-customizer-moments.js.
+    MOMENTS_COLOR_KEYS: MOMENTS_COLOR_KEYS,
+    // #883 M2 — exposed for tests; see test-883-kiosk-numbers.js.
+    KIOSK_COLOR_KEYS: KIOSK_COLOR_KEYS,
+    isValidMomentsSetting: isValidMomentsSetting,
+    momentsSettings: momentsSettings,
+    saveMomentsSetting: _saveMomentsSetting,
+    renderMomentsSettings: _renderMomentsSettings,
+    // #968 M2 — exposed for tests; see test-968-customizer-kiosk.js. A
+    // getter: public/live-kiosk.js loads after this file (index.html).
+    get KIOSK_SETTING_KEYS() { var R = _kioskRule(); return R ? R.VIEWER_KEYS.slice() : []; },
+    isValidKioskSetting: isValidKioskSetting,
+    kioskSettings: kioskSettings,
+    setKioskSetting: setKioskSetting,
+    renderKioskSettings: _renderKioskSettings,
+    // #880 M3 — exposed for tests; see test-880-m3-follow-customizer.js. A
+    // getter: public/live-follow.js loads after this file (index.html).
+    FOLLOW_COLOR_KEYS: FOLLOW_COLOR_KEYS,
+    get FOLLOW_SETTING_KEYS() { var R = _followRule(); return R ? R.KEYS.slice() : []; },
+    isValidFollowSetting: isValidFollowSetting,
+    followSettings: followSettings,
+    setFollowSetting: setFollowSetting,
+    renderFollowSettings: _renderFollowSettings,
+    buildFollowSettings: _buildFollowSettings,
+    // #968 M3 — exposed for tests; see test-968-m3-customizer-reach.js.
+    isValidReachSetting: isValidReachSetting,
+    reachInputValue: reachInputValue,
+    reachSettings: reachSettings,
+    renderReachSettings: _renderReachSettings,
+    countOverrides: _countOverrides,
+    // #741 — exposed for tests; see test-issue-741-customizer-base-maps.js.
+    renderTileProviderSelector: _renderTileProviderSelector,
+    hasResettableCustomization: _hasResettableCustomization,
+    // v0.2.9 review nit (#825 N1) — exposed for tests; see
+    // test-issue-734-customizer-overlays.js (Display badge and order).
+    renderTabs: _renderTabs,
+    renderDisplay: _renderDisplay
   };
 })();

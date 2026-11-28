@@ -295,7 +295,7 @@ window.ChannelDecrypt = (function () {
   function saveKey(channelName, keyHex, label) {
     var keys = getKeys();
     keys[channelName] = keyHex;
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(keys)); } catch (e) { /* quota */ }
+    setItemMakingRoom(STORAGE_KEY, JSON.stringify(keys));
     _keyMapCache = null; // invalidate live-decrypt index
     if (typeof label === 'string' && label.trim()) {
       saveLabel(channelName, label.trim());
@@ -318,14 +318,14 @@ window.ChannelDecrypt = (function () {
   function removeKey(channelName) {
     var keys = getKeys();
     delete keys[channelName];
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(keys)); } catch (e) { /* quota */ }
+    setItemMakingRoom(STORAGE_KEY, JSON.stringify(keys));
     _keyMapCache = null; // invalidate live-decrypt index
     // Also clear cached messages and any label for this channel (#1020)
     clearChannelCache(channelName);
     var labels = getLabels();
     if (labels[channelName]) {
       delete labels[channelName];
-      try { localStorage.setItem(LABELS_KEY, JSON.stringify(labels)); } catch (e) { /* quota */ }
+      setItemMakingRoom(LABELS_KEY, JSON.stringify(labels));
     }
   }
 
@@ -351,63 +351,213 @@ window.ChannelDecrypt = (function () {
     } else {
       delete labels[channelName];
     }
-    try { localStorage.setItem(LABELS_KEY, JSON.stringify(labels)); } catch (e) { /* quota */ }
+    setItemMakingRoom(LABELS_KEY, JSON.stringify(labels));
   }
 
-  /** Remove cached messages for a specific channel (by name or hash). */
-  function clearChannelCache(channelKey) {
-    try {
-      var cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
-      delete cache[channelKey];
-      localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
-    } catch (e) { /* quota */ }
+  // N2 (#152 follow-up): decrypted messages are cached per channel AND per
+  // region selection, as "<channel>|<sorted regions>" ("<channel>|" for all
+  // regions). Region order doesn't change which observers are included, so
+  // it must not change the key either.
+  //
+  // #163: a channel name may contain '|', which would make the key (and
+  // clearChannelCache()'s prefix match) ambiguous. The channel part therefore
+  // has '%' and '|' percent-encoded, so the first '|' of a key is always the
+  // separator. Names without either character keep their plain key.
+  var CACHE_REGION_SEP = '|';
+
+  function encodeChannelPart(channelName) {
+    return String(channelName).replace(/[%|]/g, encodeURIComponent);
+  }
+
+  function channelCacheKey(channelName, regionParam) {
+    var regions = regionParam ? String(regionParam).split(',').filter(Boolean).sort().join(',') : '';
+    return encodeChannelPart(channelName) + CACHE_REGION_SEP + regions;
   }
 
   // ---- Message cache (localStorage) ----
-
-  function cacheMessages(channelHash, messages) {
-    try {
-      var cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
-      cache[channelHash] = { messages: messages, ts: Date.now() };
-      localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
-    } catch (e) { /* quota */ }
-  }
-
-  function getCachedMessages(channelHash) {
-    try {
-      var cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
-      var entry = cache[channelHash];
-      return entry ? entry.messages : null;
-    } catch (e) { return null; }
-  }
+  //
+  // One JSON blob under CACHE_KEY: { "<channel>|<regions>": entry }. It is
+  // only a cache, so it always gives way: it is kept under a fixed
+  // character budget, a quota failure evicts and retries, and keys and
+  // labels evict it before they would fail to save.
 
   // Cache with lastTimestamp and count (used by channels.js via getCache/setCache)
   var MAX_CACHED_MESSAGES = 1000;
+  // N2 (#152 follow-up): keys are region-scoped, so one channel can occupy
+  // several entries. Cap the number of distinct entries so visiting many
+  // region combinations over time can't grow the blob unboundedly.
+  var MAX_CACHE_KEYS = 50;
+  // R4-2 (#153 review round 4): one entry can reach ~365 KiB (1000
+  // messages) and localStorage holds ~5.2M characters per origin, shared
+  // with the keys and labels. Keep the whole blob under this many
+  // characters, least recently used entries going first.
+  var CACHE_BUDGET_CHARS = 1500000;
+  // Set once the cache blob of an earlier key format is dropped. 2: the
+  // unescaped "<channel>|<regions>" keys of #153; 3 (#163): escaped keys.
+  var CACHE_VERSION_KEY = 'corescope_channel_cache_v';
+  var CACHE_VERSION = '3';
+
+  var _cacheMigrated = false;
+  var _cacheUseSeq = 0;
+  // Last-read stamps of this page load, folded into the entries' `at` on
+  // the next write so a read doesn't cost a rewrite of the whole blob.
+  var _cacheReadAt = {};
+
+  // Strictly increasing, so entries written or read in the same
+  // millisecond still have a defined least-recently-used order.
+  function nextCacheUse() {
+    _cacheUseSeq = Math.max(Date.now(), _cacheUseSeq + 1);
+    return _cacheUseSeq;
+  }
+
+  function cacheLastUse(cache, key) {
+    var entry = cache[key] || {};
+    return Math.max(entry.at || entry.ts || 0, _cacheReadAt[key] || 0);
+  }
+
+  function readCacheBlob() {
+    try {
+      var cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
+      return (cache && typeof cache === 'object') ? cache : {};
+    } catch (e) { return {}; }
+  }
+
+  // Drop the whole cache blob once when its key format is older than
+  // CACHE_VERSION. Pre-#153 entries are keyed by the bare channel name and
+  // #153's by the unescaped "<channel>|<regions>"; for a name containing '|'
+  // the two can't be told apart from the current keys, and nothing reads
+  // them any more. It is only a cache, so dropping all of it is simpler than
+  // rewriting it, and leaves no old plaintext behind.
+  function ensureCacheMigrated() {
+    if (_cacheMigrated) return;
+    _cacheMigrated = true;
+    try {
+      if (localStorage.getItem(CACHE_VERSION_KEY) === CACHE_VERSION) return;
+      localStorage.removeItem(CACHE_KEY);
+    } catch (e) { _cacheMigrated = false; return; /* storage unavailable: retried on next use */ }
+    try { localStorage.setItem(CACHE_VERSION_KEY, CACHE_VERSION); } catch (e) { /* retried next load */ }
+  }
+
+  /**
+   * Persist `cache`, evicting least recently used entries until it is within
+   * MAX_CACHE_KEYS and CACHE_BUDGET_CHARS and localStorage accepts it. Each
+   * entry is serialised once; setItem() either stores the whole new blob or
+   * leaves the old one, so the blob is never half-written. Returns whether
+   * the blob was written.
+   */
+  function writeCacheBlob(cache) {
+    var parts = {};
+    var size = 2; // "{}"
+    var keys = Object.keys(cache);
+    keys.forEach(function (k) {
+      if (cache[k] && _cacheReadAt[k]) cache[k].at = cacheLastUse(cache, k);
+      parts[k] = JSON.stringify(k) + ':' + JSON.stringify(cache[k]);
+      size += parts[k].length + 1; // + separating comma
+    });
+    _cacheReadAt = {}; // folded into the entries above
+    keys.sort(function (a, b) { return cacheLastUse(cache, a) - cacheLastUse(cache, b); });
+    while (keys.length > MAX_CACHE_KEYS || (keys.length && size - 1 > CACHE_BUDGET_CHARS)) {
+      size -= parts[keys.shift()].length + 1;
+    }
+    for (;;) {
+      try {
+        localStorage.setItem(CACHE_KEY, '{' + keys.map(function (k) { return parts[k]; }).join(',') + '}');
+        return true;
+      } catch (e) {
+        // QuotaExceededError: localStorage is shared with the keys and
+        // labels, so give up room until the blob fits.
+        if (!keys.length) break;
+        keys.shift();
+      }
+    }
+    try { localStorage.removeItem(CACHE_KEY); } catch (e) { /* nothing cached */ }
+    return false;
+  }
+
+  // Drop the least recently used cache entry (or the empty blob itself).
+  // Returns false once there is no cache left to give up.
+  function evictOldestCacheEntry() {
+    var raw;
+    try { raw = localStorage.getItem(CACHE_KEY); } catch (e) { return false; }
+    if (raw === null) return false;
+    var cache = readCacheBlob();
+    var keys = Object.keys(cache);
+    if (!keys.length) {
+      try { localStorage.removeItem(CACHE_KEY); } catch (e) { return false; }
+      return true;
+    }
+    keys.sort(function (a, b) { return cacheLastUse(cache, a) - cacheLastUse(cache, b); });
+    delete cache[keys[0]];
+    writeCacheBlob(cache);
+    return true;
+  }
+
+  // setItem() for the keys and labels: when the quota is hit, evict decrypt
+  // cache until the write fits, so the cache can never cost the user a key.
+  function setItemMakingRoom(storageKey, value) {
+    for (;;) {
+      try {
+        localStorage.setItem(storageKey, value);
+        return true;
+      } catch (e) {
+        if (!evictOldestCacheEntry()) return false;
+      }
+    }
+  }
+
+  /**
+   * Remove every cached message set of a channel (by name or hash): each
+   * region-scoped "<channel>|<regions>" entry, and nothing of any other
+   * channel (see encodeChannelPart()).
+   */
+  function clearChannelCache(channelKey) {
+    ensureCacheMigrated();
+    var cache = readCacheBlob();
+    var prefix = encodeChannelPart(channelKey) + CACHE_REGION_SEP;
+    Object.keys(cache).forEach(function (k) {
+      if (k.indexOf(prefix) === 0) delete cache[k];
+    });
+    writeCacheBlob(cache);
+  }
+
+  /** Remove one cache entry, e.g. one region of a channel. */
+  function deleteCache(key) {
+    ensureCacheMigrated();
+    var cache = readCacheBlob();
+    if (!Object.prototype.hasOwnProperty.call(cache, key)) return;
+    delete cache[key];
+    writeCacheBlob(cache);
+  }
 
   function setCache(key, messages, lastTimestamp, totalCount) {
-    try {
-      // Enforce cache size limit: only keep most recent MAX_CACHED_MESSAGES
-      var toStore = messages;
-      if (messages.length > MAX_CACHED_MESSAGES) {
-        toStore = messages.slice(messages.length - MAX_CACHED_MESSAGES);
-      }
-      var cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
-      cache[key] = {
-        messages: toStore,
-        lastTimestamp: lastTimestamp,
-        count: totalCount || toStore.length,
-        ts: Date.now()
-      };
-      localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
-    } catch (e) { /* quota */ }
+    ensureCacheMigrated();
+    // Enforce cache size limit: only keep most recent MAX_CACHED_MESSAGES
+    var toStore = messages;
+    if (messages.length > MAX_CACHED_MESSAGES) {
+      toStore = messages.slice(messages.length - MAX_CACHED_MESSAGES);
+    }
+    var cache = readCacheBlob();
+    cache[key] = {
+      messages: toStore,
+      lastTimestamp: lastTimestamp,
+      count: totalCount || toStore.length,
+      ts: Date.now(),
+      at: nextCacheUse()
+    };
+    writeCacheBlob(cache);
   }
 
   function getCache(key) {
-    try {
-      var cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
-      return cache[key] || null;
-    } catch (e) { return null; }
+    ensureCacheMigrated();
+    var entry = readCacheBlob()[key] || null;
+    if (entry) _cacheReadAt[key] = nextCacheUse();
+    return entry;
   }
+
+  // #163: drop old-format cache entries (and their plaintext) when the module
+  // loads, not on the first cache use. The calls in the cache functions stay
+  // as the fallback for a localStorage that wasn't available yet.
+  ensureCacheMigrated();
 
   return {
     deriveKey: deriveKey,
@@ -428,11 +578,11 @@ window.ChannelDecrypt = (function () {
     saveLabel: saveLabel,
     getLabel: getLabel,
     getLabels: getLabels,
+    channelCacheKey: channelCacheKey,
     clearChannelCache: clearChannelCache,
-    cacheMessages: cacheMessages,
-    getCachedMessages: getCachedMessages,
     setCache: setCache,
     getCache: getCache,
+    deleteCache: deleteCache,
     buildKeyMap: buildKeyMap,
     tryDecryptLive: tryDecryptLive
   };

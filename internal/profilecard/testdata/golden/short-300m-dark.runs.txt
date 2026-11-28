@@ -1,0 +1,16 @@
+badge         24px bold    x=1001 y= 58 w= 157 Terrain: Clear
+surface-badge 16px regular x= 990 y=100 w= 174 Buildings/trees: Blocked
+title         40px bold    x=  44 y= 70 w= 685 55.0000, 10.0000 → 55.1000, 10.1000
+subtitle      22px regular x=  44 y=104 w= 427 Path profile · 300 m · 869.618 MHz · k = 4/3
+axis-y        16px regular x=  52 y=150 w=  36 68 m
+axis-y        16px regular x=  52 y=238 w=  36 64 m
+axis-y        16px regular x=  52 y=326 w=  36 59 m
+axis-y        16px regular x=  52 y=414 w=  36 55 m
+axis-y        16px regular x=  52 y=502 w=  36 51 m
+pin           18px bold    x= 106 y=299 w=  13 A
+pin           18px bold    x=1152 y=238 w=  13 B
+axis-x        16px regular x=  96 y=524 w=   9 0
+axis-x        16px regular x= 614 y=524 w=  45 150 m
+axis-x        16px regular x=1131 y=524 w=  45 300 m
+summary       20px regular x=  24 y=574 w= 749 Tightest Fresnel point: clearance 5 m at 200 m · heights 8 m / 8 m · terrain + surface
+attribution   18px regular x=  24 y=604 w= 760 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0 — data bearbejdet

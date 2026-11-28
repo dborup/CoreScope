@@ -32,7 +32,7 @@ const EXPECTED_TABS = ['home', 'packets', 'live', 'map', 'channels', 'more'];
 // #1174: long-tail routes surfaced in the More sheet (the routes NOT in
 // the 5 primary bottom-nav slots). Mirror data-route values from the
 // existing top-nav.
-const EXPECTED_MORE_ROUTES = ['nodes', 'tools', 'observers', 'analytics', 'perf', 'audio-lab'];
+const EXPECTED_MORE_ROUTES = ['regions', 'nodes', 'tools', 'observers', 'analytics', 'perf', 'audio-lab'];
 
 function isVisible(rect) {
   return rect && rect.width > 0 && rect.height > 0;
@@ -212,7 +212,7 @@ async function main() {
     fail(`(g) More tab aria-expanded should be 'false' before tap, got ${moreTabState.ariaExpanded}`);
   }
 
-  // ── (h) #1174: tap More opens a sheet listing 6 long-tail routes ──
+  // ── (h) #1174: tap More opens a sheet listing 7 long-tail routes ──
   await page.click('[data-bottom-nav-tab="more"]').catch(() => {});
   // Wait for sheet to render.
   await page.waitForSelector('[data-bottom-nav-sheet]', { timeout: 3000 }).catch(() => {});
@@ -239,7 +239,7 @@ async function main() {
   if (sheetOpen.present && sheetOpen.role === 'menu') pass('(h) sheet role="menu"');
   else if (sheetOpen.present) fail(`(h) sheet role should be 'menu', got ${sheetOpen.role}`);
   if (sheetOpen.present && sheetOpen.missing.length === 0) {
-    pass(`(h) sheet lists all 6 long-tail routes: ${sheetOpen.itemRoutes.join(',')}`);
+    pass(`(h) sheet lists all 7 long-tail routes: ${sheetOpen.itemRoutes.join(',')}`);
   } else if (sheetOpen.present) {
     fail(`(h) sheet missing routes: ${sheetOpen.missing.join(',')} (got ${sheetOpen.itemRoutes.join(',')})`);
   }
@@ -266,6 +266,17 @@ async function main() {
   else fail('(i) sheet still visible after route tap');
   if (afterRouteTap.moreTabExpanded === 'false') pass('(i) More tab aria-expanded="false" after close');
   else fail(`(i) More tab aria-expanded should be 'false' after close, got ${afterRouteTap.moreTabExpanded}`);
+
+  // ── (i2) #454: Regions is reachable from the sheet and opens its map ──
+  await page.click('[data-bottom-nav-tab="more"]').catch(() => {});
+  await page.click('[data-bottom-nav-more-route="regions"]').catch(() => {});
+  await page.waitForFunction(() => location.hash === '#/regions', null, { timeout: 3000 }).catch(() => {});
+  const regionsTap = await page.waitForSelector('.leaflet-container', { timeout: 5000 }).then(() => true).catch(() => false);
+  const regionsHash = await page.evaluate(() => location.hash);
+  if (regionsHash === '#/regions') pass('(i2) tapping Regions navigated to #/regions');
+  else fail(`(i2) hash did not change to #/regions (got ${regionsHash})`);
+  if (regionsTap) pass('(i2) Regions page rendered its map');
+  else fail('(i2) Regions page map (.leaflet-container) not rendered');
 
   // ── (j) #1174: tap outside closes the sheet ──
   // Reopen.

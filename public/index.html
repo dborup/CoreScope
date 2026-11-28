@@ -5,14 +5,15 @@
   <link rel="icon" href="favicon.ico" type="image/x-icon">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>CoreScope</title>
+  <title>__OG_TITLE__</title>
 
-  <!-- Open Graph / Discord embed -->
-  <meta property="og:title" content="CoreScope">
-  <meta property="og:description" content="Real-time MeshCore LoRa mesh network analyzer — live packet visualization, node tracking, channel decryption, route analysis, and deep mesh analytics.">
-  <meta property="og:image" content="https://raw.githubusercontent.com/Kpa-clawbot/corescope/master/public/og-image.png">
-  <meta property="og:image:width" content="1200">
-  <meta property="og:image:height" content="630">
+  <!-- Open Graph / Discord embed. OG placeholders are filled by the Go server
+       (cmd/server/og_meta.go, #646) from branding config; crawlers do not run JS. -->
+  <meta property="og:title" content="__OG_TITLE__">
+  <meta property="og:site_name" content="__OG_SITE_NAME__">
+  <meta property="og:description" content="__OG_DESCRIPTION__">
+  <meta property="og:image" content="__OG_IMAGE__">
+  __OG_IMAGE_DIMS__
   <!-- No og:url: the removed tag hardcoded the upstream analyzer instance's
        own URL as the canonical URL for every self-hosted deployment (#1890)
        — correct for upstream, wrong canonical metadata for any other
@@ -20,15 +21,59 @@
        itself decide what a click navigates to. Omitting it lets each
        instance's own crawled URL serve as the canonical reference instead;
        this does not refresh previews a consumer already cached under the
-       old, incorrect value. -->
+       old, incorrect value. The one exception is a /p share link (#727),
+       whose og:url and robots noindex the server writes into the page-meta
+       placeholder below from the request's own origin; on every other page
+       that placeholder is empty. -->
+  __OG_PAGE_META__
   <meta property="og:type" content="website">
   <meta name="theme-color" content="#0a0a0a">
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="CoreScope">
-  <meta name="twitter:description" content="Real-time MeshCore LoRa mesh network analyzer — live packet visualization, node tracking, channel decryption, and route analysis.">
-  <meta name="twitter:image" content="https://raw.githubusercontent.com/Kpa-clawbot/corescope/master/public/og-image.png">
+  <meta name="twitter:title" content="__OG_TITLE__">
+  <meta name="twitter:description" content="__OG_DESCRIPTION__">
+  <meta name="twitter:image" content="__OG_IMAGE__">
+  <!-- #727: /p?profile=… is a terrain-profile share link. Its only job is
+       to carry per-profile preview tags for link crawlers, which never run
+       this. A browser moves on to the #/map deep link before anything else
+       loads, keeping only the profile's own keys (an allow-list, so no
+       other parameter reaches the hash), with replaceState: no reload, no
+       history entry for /p, and the app boots once. The relative asset
+       URLs below resolve the same at /p as at /. Tracking keys (fbclid,
+       utm_*, ...) are not on the allow-list, so they never reach the hash.
+       A path starting with // is left alone: built into the target it
+       would read as another host (defence in depth; the server already
+       cleans such paths with a 301). #811: /p?node=<key> is a node share
+       link and moves on to #/nodes/<key>, carrying the key only when it is
+       a full 64-hex key (lower-cased), else to the #/nodes list. #812:
+       /p?packet=<hash> is a packet share link and moves on to
+       #/packets/<hash>, carrying the hash only when it is exactly 16 hex
+       characters (lower-cased), else to the #/packets list. #812 M3: with
+       viewPath=1 (exactly) and a full hash it is a View Path link and moves
+       on to #/packets/<hash>?viewPath=1, which opens the View Path modal. -->
+  <script data-share-handoff>
+    (function () {
+      var path = location.pathname;
+      if (path.indexOf('//') === 0 || !/\/p$/.test(path)) return;
+      var src = new URLSearchParams(location.search), next = path.slice(0, -1);
+      if (src.has('node')) {
+        // #811: a node link opens the node page; only a full key is carried.
+        var pk = String(src.get('node')).toLowerCase();
+        next += /^[0-9a-f]{64}$/.test(pk) ? '#/nodes/' + pk : '#/nodes';
+      } else if (src.has('packet')) {
+        // #812: a packet link opens the packet page; only a full hash is carried.
+        var h = String(src.get('packet')).toLowerCase();
+        next += /^[0-9a-f]{16}$/.test(h) ? '#/packets/' + h + (src.get('viewPath') === '1' ? '?viewPath=1' : '') : '#/packets';
+      } else {
+        var keep = ['profile', 'model', 'ha', 'hb', 'k', 'freq'], out = new URLSearchParams();
+        keep.forEach(function (k) { if (src.has(k)) out.set(k, src.get(k)); });
+        var qs = out.toString();
+        next += '#/map' + (qs ? '?' + qs : '');
+      }
+      try { history.replaceState(null, '', next); } catch (_) { location.replace(next); }
+    })();
+  </script>
   <!-- PR #893 follow-up: apply persisted theme before stylesheet/paint to prevent
        FOUC (light flash for users who chose dark). Matches keys used by app.js. -->
   <script>
@@ -50,17 +95,23 @@
   <link rel="stylesheet" href="node-reach-coverage.css?v=__BUST__">
   <link rel="stylesheet" href="bottom-nav.css?v=__BUST__">
   <link rel="stylesheet" href="nav-drawer.css?v=__BUST__">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+  <link rel="stylesheet" href="channel-proposals.css?v=__BUST__">
+  <link rel="stylesheet" href="antenna-claims.css?v=__BUST__">
+  <link rel="stylesheet" href="vendor/leaflet/1.9.4/leaflet.css"
+    integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
     crossorigin="anonymous">
   <link rel="stylesheet" href="vendor/MarkerCluster.css?v=__BUST__">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css?v=__BUST__">
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+  <script src="vendor/leaflet/1.9.4/leaflet.js"
+    integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
     crossorigin="anonymous"></script>
   <script src="vendor/leaflet.markercluster.js?v=__BUST__"></script>
-  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-  <script src="https://unpkg.com/chart.js@4/dist/chart.umd.min.js"></script>
+  <script src="vendor/leaflet.heat/0.2.0/leaflet-heat.js"
+    integrity="sha384-mFKkGiGvT5vo1fEyGCD3hshDdKmW3wzXW/x+fWriYJArD0R3gawT6lMvLboM22c0"
+    crossorigin="anonymous"></script>
+  <script src="vendor/chart.js/4.5.1/chart.umd.min.js"
+    integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
+    crossorigin="anonymous"></script>
 </head>
 <body>
   <!-- #1380 — Colorblind a11y stretch goal: Brettel/Vienot 1997 dichromatic
@@ -128,6 +179,7 @@
         <a href="#/home" class="nav-link" data-route="home" data-priority="high">Home</a>
         <a href="#/packets" class="nav-link" data-route="packets" data-priority="high">Packets</a>
         <a href="#/map" class="nav-link" data-route="map" data-priority="high">Map</a>
+        <a href="#/regions" class="nav-link" data-route="regions">Regions</a>
         <a href="#/live" class="nav-link" data-route="live" data-priority="high"><svg class="ph-icon" aria-hidden="true" focusable="false"><use href="/icons/phosphor-sprite.svg#ph-broadcast"></use></svg> Live</a>
         <a href="#/channels" class="nav-link" data-route="channels">Channels</a>
         <a href="#/nodes" class="nav-link" data-route="nodes" data-priority="high">Nodes</a>
@@ -175,18 +227,36 @@
   <script src="vendor/qrcode.js"></script>
   <script src="payload-labels.js?v=__BUST__"></script>
   <script src="roles.js?v=__BUST__"></script>
+  <script src="heard-by.js?v=__BUST__"></script>
+  <script src="my-mesh-observers.js?v=__BUST__"></script>
+  <script src="my-mesh-activity.js?v=__BUST__"></script>
+  <script src="map-chrome-fit.js?v=__BUST__"></script>
+  <script src="heat-gradient.js?v=__BUST__"></script>
   <script src="map-tile-providers.js?v=__BUST__"></script>
+  <script src="masts-layer.js?v=__BUST__"></script>
+  <script src="masts-hint.js?v=__BUST__"></script>
   <script src="cb-presets.js?v=__BUST__"></script>
+  <script src="page-title.js?v=__BUST__"></script>
+  <script src="antenna-height.js?v=__BUST__"></script>
   <script src="customize-v2.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="region-filter.js?v=__BUST__"></script>
   <script src="area-filter.js?v=__BUST__"></script>
+  <script src="scope-member-filter.js?v=__BUST__"></script>
+  <script src="dagi-filter.js?v=__BUST__"></script>
+  <script src="dagi-outline.js?v=__BUST__"></script>
   <script src="hop-resolver.js?v=__BUST__"></script>
   <script src="hop-filter.js?v=__BUST__"></script>
+  <script src="live-heard-filter.js?v=__BUST__"></script>
+  <script src="live-scope-color.js?v=__BUST__"></script>
+  <script src="live-moments.js?v=__BUST__"></script>
+  <script src="live-kiosk.js?v=__BUST__"></script>
+  <script src="live-follow.js?v=__BUST__"></script>
   <script src="hop-display.js?v=__BUST__"></script>
   <script src="warmup-banner.js?v=__BUST__"></script>
   <script src="app.js?v=__BUST__"></script>
   <script src="bottom-nav.js?v=__BUST__"></script>
   <script src="nav-drawer.js?v=__BUST__"></script>
+  <script src="version-notice.js?v=__BUST__"></script>
   <script src="touch-gestures.js?v=__BUST__"></script>
   <script src="gesture-hints.js?v=__BUST__"></script>
   <script src="url-state.js?v=__BUST__"></script>
@@ -206,16 +276,29 @@
   <script src="channel-color-picker.js?v=__BUST__"></script>
   <script src="packets.js?v=__BUST__"></script>
   <script src="geo-filter-overlay.js?v=__BUST__"></script>
+  <script src="terrain-profile-cursor.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="terrain-profile.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="coverage.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="skraafoto.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="heritage-info.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="map.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="regions-map.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="route-render.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="route-view-utils.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="route-view.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="admin-key.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="channel-proposals.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="channels.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="table-sort.js?v=__BUST__"></script>
   <script src="nodes-export.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="node-adverts.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="advert-interval-analytics.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="node-share.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="nodes.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="traces.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="path-inspector.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="scope-audit.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="observer-airtime.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="analytics.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="audio.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="audio-v1-constellation.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
@@ -226,6 +309,7 @@
   <script src="mqtt-status-panel.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="observer-detail.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="observer-neighbors-tool.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="antenna-claims.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="new-nodes.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="node-changes.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="network-digest.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
@@ -238,6 +322,7 @@
   <script src="packet-path-map.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="node-reach-coverage.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="node-reach.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="reach-rank.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="rx-coverage.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="perf.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="ping-scores.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>

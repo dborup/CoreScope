@@ -47,11 +47,12 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   await page.fill('#chPskName', 'CovShare');
   await page.click('#chPskAddBtn');
   await page.waitForFunction(() => document.getElementById('chAddChannelModal')?.classList.contains('hidden'), { timeout: 5000 });
-  await page.waitForSelector('.ch-section-mychannels [data-share-channel]',
+  await page.waitForSelector('.ch-section-mychannels [data-row-menu]',
     { timeout: 5000 });
 
   await step('clicking Share opens dedicated #chShareModal with QR + Hex key', async () => {
-    await page.click('.ch-section-mychannels [data-share-channel]');
+    await page.click('.ch-section-mychannels [data-row-menu]');
+    await page.click('#chRowMenu [data-share-channel]');
     await page.waitForSelector('#chShareModal:not(.hidden)', { timeout: 5000 });
     const title = await page.textContent('#chShareModalTitle');
     assert(/Share/i.test(title), 'title should start with Share: ' + title);
@@ -88,7 +89,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         return keys;
       } catch (e) { return null; }
     });
-    await page.click('.ch-section-mychannels [data-share-channel]');
+    await page.click('.ch-section-mychannels [data-row-menu]');
+    await page.click('#chRowMenu [data-share-channel]');
     await page.waitForSelector('#chShareModal:not(.hidden)', { timeout: 5000 });
     const errTxt = await page.textContent('#chShareQr');
     assert(/No stored key|cannot share/i.test(errTxt),
@@ -126,10 +128,11 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await page.fill('#chPskName', 'CovKbd');
     await page.click('#chPskAddBtn');
     await page.waitForFunction(() => document.getElementById('chAddChannelModal')?.classList.contains('hidden'), { timeout: 5000 });
-    await page.waitForSelector('.ch-section-mychannels [data-share-channel]',
+    await page.waitForSelector('.ch-section-mychannels [data-row-menu]',
       { timeout: 5000 });
-    const shareSpan = await page.$('.ch-section-mychannels [data-share-channel]');
-    await shareSpan.focus();
+    const menuTrigger = await page.$('.ch-section-mychannels [data-row-menu]');
+    await menuTrigger.focus();
+    await page.keyboard.press('Enter'); // opens the menu, focus lands on Share
     await page.keyboard.press('Enter');
     await page.waitForSelector('#chShareModal:not(.hidden)', { timeout: 5000 });
     await page.keyboard.press('Escape');

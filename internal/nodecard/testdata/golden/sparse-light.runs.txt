@@ -1,0 +1,5 @@
+badge   24px bold    x=1055 y= 64 w= 103 Repeater
+title   44px bold    x=  44 y= 78 w= 427 DK_7800_Kjeldbjerg
+label   22px regular x=  24 y=196 w= 118 Relayed 1 h
+value   44px bold    x=  24 y=252 w=  24 2
+asof    22px regular x=  24 y=594 w= 290 as of 2026-11-15 13:20 UTC

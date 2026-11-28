@@ -28,7 +28,7 @@ test('registers the ping-scores page', () => {
 });
 
 test('fetches via the shared api() helper, not a raw fetch', () => {
-  assert.ok(/api\(\s*'\/ping-scores'\s*\)/.test(src));
+  assert.ok(/api\(\s*'\/ping-scores'/.test(src));
 });
 
 test('escapes sender name before interpolating into a record card', () => {
@@ -64,10 +64,11 @@ function makeSandbox(apiImpl) {
         }
         // Register data-view-path buttons too, since the smoke test needs
         // to click one and verify PacketPathMap.open was called.
-        const vpRe = /data-view-path="([^"]*)"/g;
+        const vpRe = /data-view-path="([^"]*)"(?:\s+data-view-record="([^"]*)")?/g;
         while ((m = vpRe.exec(html))) {
           const child = makeElement('button');
           child.dataset.viewPath = m[1];
+          if (m[2]) child.dataset.viewRecord = m[2];
           this.appendChild(child);
         }
       },
@@ -92,8 +93,14 @@ function makeSandbox(apiImpl) {
   const container = makeElement('div');
   let registered = null;
   const ctx = {
-    window: { PacketPathMap: { open: (h) => { ctx.window._openedHash = h; } } },
-    console, Math, String, JSON, Promise, Error, Date, isNaN,
+    window: { PacketPathMap: {
+      open: (h, options) => { ctx.window._openedHash = h; ctx.window._openedOptions = options; },
+      restore: (h, options) => { ctx.window.PacketPathMap.open(h, options); return true; },
+      close: () => { ctx.window._closed = true; },
+    } },
+    console, Math, String, JSON, Promise, Error, Date, isNaN, URLSearchParams,
+    location: { origin: 'http://localhost:13581', hash: '#/ping-scores' },
+    history: { state: null, pushState(state, _, url) { this.state = state; ctx.location.hash = url; }, replaceState(state, _, url) { this.state = state; if (url !== undefined) ctx.location.hash = url; } },
     escapeHtml: (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
     api: apiImpl,
     registerPage: (name, mod) => { registered = mod; },
@@ -112,6 +119,111 @@ function makeSandbox(apiImpl) {
       passed++;
       console.log('  ✅ shows a friendly empty state when totalPings is 0');
     } catch (e) { failed++; console.log('  ❌ shows a friendly empty state when totalPings is 0: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      const hash = 'same-record-hash';
+      const record = { hash, timestamp: new Date().toISOString(), farthestKm: 50, stationCount: 2, deepestHops: 1 };
+      const { ctx, container, getPage } = makeSandbox(() => Promise.resolve({ totalPings: 1, farthestPing: record, thisWeek: { farthestPing: record } }));
+      await getPage().init(container);
+      const buttons = container.querySelectorAll('[data-view-path]');
+      assert.deepStrictEqual(buttons.map(b => b.dataset.viewRecord), ['thisWeek.farthestPing', 'allTime.farthestPing']);
+      buttons[1].click();
+      const opts = ctx.window._openedOptions;
+      assert.strictEqual(ctx.location.hash, '#/ping-scores/same-record-hash?viewPath=1&record=allTime.farthestPing');
+      assert.strictEqual(opts.shareURL, 'http://localhost:13581/#/ping-scores/same-record-hash?viewPath=1&record=allTime.farthestPing');
+      assert.strictEqual(opts.routePrefix, '#/ping-scores/');
+      assert.strictEqual(opts.routeQueryKey, 'record');
+      let requested;
+      ctx.api = (url) => { requested = url; return Promise.resolve({ status: 'archived' }); };
+      await opts.loadPath(hash);
+      assert.strictEqual(requested, '/ping-scores/same-record-hash/path?record=allTime.farthestPing');
+      passed++;
+      console.log('  ✅ record buttons preserve all-time/weekly slot and load the ping-specific path API');
+    } catch (e) { failed++; console.log('  ❌ record buttons preserve all-time/weekly slot: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      const { ctx, container, getPage } = makeSandbox(() => Promise.resolve({ totalPings: 1 }));
+      ctx.location.hash = '#/ping-scores/oldhash?viewPath=1&record=thisWeek.mostHopsPing';
+      await getPage().init(container, 'oldhash');
+      assert.strictEqual(ctx.window._openedHash, 'oldhash');
+      assert.ok(ctx.window._openedOptions.shareURL.includes('record=thisWeek.mostHopsPing'));
+      passed++;
+      console.log('  ✅ cold ping map links open without resolving a retained packet first');
+    } catch (e) { failed++; console.log('  ❌ cold ping map links: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      const keys = ['farthestPing', 'mostHopsPing', 'widestSpreadPing', 'fastestSpreadPing', 'mostEfficientPing'];
+      const data = { totalPings: 1, thisWeek: {} };
+      const ping = { hash: 'samehash', farthestKm: 10, deepestHops: 2, stationCount: 3, spreadSeconds: 2, kmPerSecondAirtime: 5 };
+      keys.forEach(k => { data[k] = ping; data.thisWeek[k] = ping; });
+      const { ctx, container, getPage } = makeSandbox(() => Promise.resolve(data));
+      await getPage().init(container);
+      const buttons = container.querySelectorAll('[data-view-path]');
+      assert.strictEqual(buttons.length, 10);
+      for (const btn of buttons) {
+        btn.click();
+        assert.ok(ctx.window._openedOptions.shareURL.endsWith('record=' + btn.dataset.viewRecord));
+      }
+      assert.deepStrictEqual(buttons.map(b => b.dataset.viewRecord), ['thisWeek', 'allTime'].flatMap(scope => keys.map(k => scope + '.' + k)));
+      passed++;
+      console.log('  ✅ all ten record slots remain distinct even when every card shares the same hash');
+    } catch (e) { failed++; console.log('  ❌ all ten record slots: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      const { ctx, container, getPage } = makeSandbox(() => Promise.resolve({ totalPings: 1 }));
+      ctx.location.hash = '#/ping-scores/oldhash?viewPath=1&record=allTime.__proto__';
+      await getPage().init(container, 'oldhash');
+      assert.strictEqual(ctx.window._openedHash, undefined);
+      assert.ok(container.innerHTML.includes('Invalid ping record link'));
+      passed++;
+      console.log('  ✅ invalid record slots cannot select another endpoint or prototype member');
+    } catch (e) { failed++; console.log('  ❌ invalid record slots: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      const { ctx, container, getPage } = makeSandbox(() => Promise.resolve({ totalPings: 1 }));
+      ctx.location.hash = '#/ping-scores/oldhash?viewPath=1&record=allTime.farthestPing';
+      ctx.window.PacketPathMap.restore = () => false;
+      await getPage().init(container, 'oldhash');
+      assert.strictEqual(ctx.location.hash, '#/ping-scores/oldhash?record=allTime.farthestPing');
+      passed++;
+      console.log('  ✅ a closed history entry removes only viewPath and preserves its record slot');
+    } catch (e) { failed++; console.log('  ❌ closed history entry: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      const { ctx, container, getPage } = makeSandbox(() => Promise.resolve({ totalPings: 0 }));
+      await getPage().init(container);
+      getPage().destroy();
+      assert.strictEqual(ctx.window._closed, true);
+      passed++;
+      console.log('  ✅ leaving Ping Scores closes its map');
+    } catch (e) { failed++; console.log('  ❌ destroy closes map: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      let resolve;
+      const { container, getPage } = makeSandbox(() => new Promise(r => { resolve = r; }));
+      const pending = getPage().init(container);
+      getPage().destroy();
+      container.innerHTML = 'different page';
+      resolve({ totalPings: 1, farthestPing: { hash: 'late', farthestKm: 50 } });
+      await pending;
+      assert.strictEqual(container.innerHTML, 'different page');
+      passed++;
+      console.log('  ✅ late score responses cannot overwrite another page after destroy');
+    } catch (e) { failed++; console.log('  ❌ late response after destroy: ' + e.message); }
   })();
 
   await (async () => {

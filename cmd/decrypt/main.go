@@ -121,7 +121,7 @@ LIMITATIONS
 	key := channel.DeriveKey(ch)
 	chHash := channel.ChannelHash(key)
 
-	db, err := sql.Open("sqlite", *dbPath+"?mode=ro")
+	db, err := openReadOnly(*dbPath)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
@@ -464,4 +464,11 @@ init();
 </html>`)
 
 	return []byte(b.String())
+}
+
+// openReadOnly opens the CoreScope database read-only. modernc.org/sqlite
+// applies query parameters only to a "file:" name: without the prefix
+// mode=ro is dropped and a missing file is created (#583).
+func openReadOnly(path string) (*sql.DB, error) {
+	return sql.Open("sqlite", "file:"+path+"?mode=ro")
 }

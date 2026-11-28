@@ -9,7 +9,7 @@ Open-source, self-hosted MeshCore mesh network packet analyzer. Community altern
 - **Frontend**: SPA, vanilla HTML/CSS/JS, Leaflet maps, WebSocket live feed, Canvas animations
 - **Backend**: Node.js + Express + better-sqlite3 + ws + mqtt
 - **Decoder**: Custom `decoder.js` (from MeshCore Packet.h spec)
-- **Data**: SQLite, MQTT ingestion, REST API, manual packet injection
+- **Data**: SQLite, MQTT ingestion, REST API
 
 ## Architecture
 
@@ -19,7 +19,6 @@ The `@michaelhart/meshcore-decoder` npm library has a path parsing bug — treat
 ### Packet Ingestion
 - MQTT subscriber (configurable broker/topic)
 - Companion bridge (BLE → MQTT via `meshcore_observer.py`)
-- POST `/api/packets` for manual injection
 - WebSocket broadcast to all connected clients
 
 ### Channel Decryption
@@ -129,7 +128,6 @@ meshcore-analyzer/
 │   ├── live.js/css     (live view + VCR)
 │   └── vendor/         (third-party libs)
 └── tools/
-    ├── generate-packets.js
     ├── e2e-test.js
     └── frontend-test.js
 ```

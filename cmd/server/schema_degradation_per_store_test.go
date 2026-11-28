@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"log"
 	"strings"
 	"testing"
@@ -17,27 +16,22 @@ import (
 // package-level sentinel. GREEN follow-up moves the sentinel to a
 // PacketStore field so each instance has a fresh dedupe set.
 func TestSchemaDegradationLogIsPerStore(t *testing.T) {
-	var buf bytes.Buffer
-	prev := log.Writer()
-	prevFlags := log.Flags()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(prev)
-		log.SetFlags(prevFlags)
-	})
-
 	const msg = "test-schema-degradation-marker-1199"
 
-	s1 := &PacketStore{}
-	s2 := &PacketStore{}
-	s1.logSchemaDegradationOnce(msg)
-	s2.logSchemaDegradationOnce(msg)
+	// The capture is locked (#310): goroutines from earlier tests keep
+	// logging into whatever writer is installed.
+	out := captureLog(func() {
+		log.SetFlags(0)
+		s1 := &PacketStore{}
+		s2 := &PacketStore{}
+		s1.logSchemaDegradationOnce(msg)
+		s2.logSchemaDegradationOnce(msg)
+	})
 
-	hits := strings.Count(buf.String(), msg)
+	hits := strings.Count(out, msg)
 	if hits != 2 {
 		t.Fatalf("expected 2 log emissions (one per PacketStore), got %d. "+
 			"package-level sentinel pollutes across instances — move to a "+
-			"struct field. log buffer:\n%s", hits, buf.String())
+			"struct field. log buffer:\n%s", hits, out)
 	}
 }

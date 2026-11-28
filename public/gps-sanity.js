@@ -64,7 +64,17 @@
     if (contentEl) contentEl.innerHTML = '<p class="text-muted">Loading…</p>';
     if (statusEl) statusEl.textContent = '';
     api('/analytics/gps-sanity', { ttl: 30000 })
-      .then(function (data) {
+      .then(async function (data) {
+        if (window.MeshConfigReady) await window.MeshConfigReady;
+        if (!container) return;
+        if (window.EstimatedPositions?.enabled(data) === false) {
+          rows = [];
+          if (statusEl) statusEl.textContent = '';
+          if (contentEl) contentEl.innerHTML = window.EstimatedPositions.disabledNoticeHTML;
+          var filterInput = document.getElementById('gps-sanity-filter');
+          if (filterInput) filterInput.disabled = true;
+          return;
+        }
         rows = (data && Array.isArray(data.nodes)) ? data.nodes : [];
         totalRealGPS = (data && data.totalRealGps) || 0;
         evaluated = (data && data.evaluated) || 0;

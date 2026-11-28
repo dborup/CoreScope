@@ -3,7 +3,6 @@
 
 (function () {
   let nodes = [];
-  const PAYLOAD_TYPES = {0:'Request',1:'Response',2:'Direct Msg',3:'ACK',4:'Advert',5:'Channel Msg',7:'Anon Req',8:'Path',9:'Trace'};
 
   function syncClaimedToFavorites() {
     const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
@@ -96,6 +95,12 @@
   // the next number, so a delayed response from an earlier view is ignored --
   // even for the same node (A -> B -> A) in a panel that is still connected.
   let detailViewSeq = 0;
+  // #789 M2b: the owner antenna-height section of the full node page.
+  let antennaClaimView = null;
+  function destroyAntennaClaimView() {
+    if (antennaClaimView) antennaClaimView.destroy();
+    antennaClaimView = null;
+  }
 
   // Disposes the detail map together with its pending resize, so the timer
   // can never outlive the map it was scheduled for.
@@ -128,19 +133,51 @@
   // the provider's invert CSS filter to the tile pane when needed.
   function _applyTilesToNodeMap(map) {
     if (!map) return;
+    /* #741 M1a — one place where this page turns a spec into a base layer,
+     * for the inset and its reference overlay alike. It stays nested: both
+     * callers are right here, and the suites that drive this helper extract
+     * it by name (#332 M7, #390 P1, #752 I1, #1470).
+     * index.html loads map-tile-providers.js before nodes.js, so the
+     * factory is the production path; the direct L.tileLayer keeps the OSM
+     * fallback drawing on a page that has getTileUrl() (roles.js) but no
+     * registry at all, which is what this helper did before the factory
+     * existed (#778 review finding 4). The credit and the ceiling travel in
+     * `opts`, not on the spec, so that fallback is one Leaflet call and not
+     * a second copy of the factory's spec-merging rules. */
+    var baseLayer = function (spec, opts) {
+      if (typeof window.MC_createBaseLayer === 'function') return window.MC_createBaseLayer(spec, opts);
+      return L.tileLayer(spec.url, opts); // #741 no-registry fallback
+    };
     var tileUrl = (window.getTileUrl && window.getTileUrl()) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
     var provider = window.getActiveTileProvider && window.getActiveTileProvider();
     var attribution = (provider && provider.attribution) || '© OpenStreetMap contributors';
-    var layer = L.tileLayer(tileUrl, { maxZoom: 18, attribution: attribution }).addTo(map);
+    // #741 — the registry's shared base-layer factory builds the inset's
+    // base map. getTileUrl() (roles.js) is a URL template only, so a WMS
+    // style (M1b) is built from the provider's own `wms` descriptor instead;
+    // the factory resolves its lazy url. The 18 here is this helper's own
+    // historical ceiling, kept as is (map.js/live.js use 19).
+    var spec = (provider && provider.wms) ? { wms: provider.wms } : { url: tileUrl };
+    var layer = baseLayer(spec, { maxZoom: 18, attribution: attribution }).addTo(map);
     // Esri 2-layer provider: add the labels reference overlay too
     if (provider && provider.refUrl) {
-      try { L.tileLayer(provider.refUrl, { maxZoom: 18 }).addTo(map); } catch (_e) {}
+      try { baseLayer({ url: provider.refUrl }, { maxZoom: 18 }).addTo(map); } catch (_e) {}
     }
     // Apply invert CSS filter to the tile pane if the provider needs it
     try {
       var pane = map.getPane && map.getPane('tilePane');
       if (pane) pane.style.filter = (provider && provider.invertFilter) ? provider.invertFilter : '';
     } catch (_e) {}
+    // #752 — every inset built on this helper renders the viewer's active
+    // provider, so it must credit it: Esri requires "Powered by Esri" and
+    // OSM/CARTO require their credit too. The inset maps are created with
+    // attributionControl: false, so they get the registry's own control
+    // (the one Live gets, #735), in its compact form. Called after the
+    // layers are on the map, so the control counts this credit at once and
+    // drops it again when the layer goes (MC_setLayerAttribution keeps it
+    // right if a caller ever swaps the credit in place).
+    if (typeof window.MC_ensureAttribution === 'function') {
+      window.MC_ensureAttribution(map, { compact: true });
+    }
     return layer;
   }
   // Exposed so the node-reach link-map (node-reach-map.js) reuses the user's
@@ -170,6 +207,10 @@
         if (token) parts.push('sort=' + encodeURIComponent(token));
       }
     }
+    // #740 M3a: this rebuilds the query from scratch, so it carries the
+    // DAGI param itself; a tab, search or sort change would erase it.
+    var dagi = window.DagiFilter ? DagiFilter.hashParam() : '';
+    if (dagi) parts.push(dagi);
     return parts.length ? '?' + parts.join('&') : '';
   }
   window.buildNodesQuery = buildNodesQuery;
@@ -179,7 +220,11 @@
     var cur = String(location.hash || '');
     var subpath = '';
     var m = cur.match(/^#\/nodes(\/[^?]*)?/);
-    if (m && m[1]) subpath = m[1];
+    // #521: location.hash already names the next page while hashchange has
+    // not run yet (and after destroy() for the debounced search). Writing the
+    // filters then replaces that hash and the router re-opens Nodes.
+    if (!m) return;
+    if (m[1]) subpath = m[1];
     history.replaceState(null, '', '#/nodes' + subpath + buildNodesQuery(activeTab, search));
   }
 
@@ -202,6 +247,145 @@
   }
 
   /* === Shared helper functions for node detail rendering === */
+
+  function getLastAdvert(n, stats, adverts) {
+    // New health APIs distinguish own adverts from arbitrary packet analytics.
+    // Null is authoritative: never relabel relay-touched last_seen as an advert.
+    if (Object.prototype.hasOwnProperty.call(stats, 'lastAdvert')) return stats.lastAdvert || null;
+    let latest = null;
+    // Compatibility with older APIs: exact origin, never a path/prefix match.
+    for (const packet of adverts || []) {
+      if (Number(packet.payload_type) !== 4) continue;
+      let decoded = packet.decoded_json;
+      if (typeof decoded === 'string') {
+        try { decoded = JSON.parse(decoded); } catch (_) { continue; }
+      }
+      if (decoded && decoded.signatureValid === false) continue;
+      const source = decoded && (decoded.pubKey || decoded.publicKey);
+      if (typeof source !== 'string' || source.toLowerCase() !== String(n.public_key || '').toLowerCase()) continue;
+      const ts = packet.first_seen || packet.timestamp;
+      if (ts && Number.isFinite(Date.parse(ts)) && (!latest || Date.parse(ts) > Date.parse(latest))) latest = ts;
+    }
+    return latest;
+  }
+
+  function nodeWithHealthActivity(n, stats, adverts) {
+    // Directory last_seen/last_heard can include historical heuristic relay
+    // inference. Do not let them outrank the identity-safe health contract.
+    const activity = Object.prototype.hasOwnProperty.call(stats, 'lastAdvert')
+      ? stats.lastHeard || null
+      : getLastAdvert(n, stats, adverts);
+    return Object.assign({}, n, { _lastHeard: activity, last_heard: null, last_seen: null, _liveSeen: null });
+  }
+
+  // #634 (upstream 2315): one Traffic share renderer for the full table
+  // (table=true, keeps the row id) and the dl-based previews (table=false).
+  function renderTrafficShare(n, table) {
+    if (n.role !== 'repeater' && n.role !== 'room') return '';
+    if (n.traffic_share_score == null && n.usefulness_score == null) return '';
+    // #1456: prefer the new traffic_share_score field; fall back
+    // to legacy usefulness_score for graceful degradation
+    // against stale servers. The visible label is now "Traffic
+    // share" (the old "Usefulness" implied a composite that
+    // doesn't exist yet — see #672).
+    const raw = (n.traffic_share_score != null) ? n.traffic_share_score : n.usefulness_score;
+    const s = Number(raw) || 0;
+    const pct = (s * 100).toFixed(1);
+    // Visual indicator: width % bar with green→yellow→red color by score.
+    // Per issue #672 classification table: 0.8+ Critical, 0.6+ Valuable,
+    // 0.3+ Moderate, 0.1+ Marginal, else Redundant.
+    let label, color;
+    if (s >= 0.8) { label = 'Critical'; color = 'var(--status-green, #2ecc71)'; }
+    else if (s >= 0.6) { label = 'Valuable'; color = 'var(--status-green, #2ecc71)'; }
+    else if (s >= 0.3) { label = 'Moderate'; color = 'var(--status-yellow, #f1c40f)'; }
+    else if (s >= 0.1) { label = 'Marginal'; color = 'var(--status-orange, #e67e22)'; }
+    else { label = 'Redundant'; color = 'var(--status-red, #e74c3c)'; }
+    const barWidth = Math.max(2, Math.round(s * 100));
+    const tooltip = "Fraction of all non-advert mesh traffic in the analyzer's memory that transited through this repeater as a relay hop. High = lots of packets pass through; low = quieter (may still be structurally important — see Bridge score). One of 4 planned scoring axes (#672); others pending.";
+    const attrs = (table ? 'id="row-usefulness-score" ' : '') + `data-usefulness-score="${s.toFixed(4)}" data-traffic-share-score="${s.toFixed(4)}"`;
+    const labelHtml = `Traffic share <span style="color:var(--text-muted);cursor:help" aria-label="help">ⓘ</span>`;
+    const valueHtml = `<span style="display:inline-block;vertical-align:middle;width:80px;height:8px;background:var(--bg-secondary,#333);border-radius:4px;overflow:hidden;margin-right:6px"><span style="display:block;width:${barWidth}%;height:100%;background:${color}"></span></span><span style="color:${color};font-weight:600">${pct}%</span> <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${label}</span>`;
+    return table
+      ? `<tr ${attrs}><td title="${tooltip}">${labelHtml}</td><td>${valueHtml}</td></tr>`
+      : `<dt title="${tooltip}">${labelHtml}</dt><dd ${attrs}>${valueHtml}</dd>`;
+  }
+
+  function renderHashPrefix(n, table) {
+    let value = n.hash_size
+      ? '<code style="font-family:var(--mono);font-weight:700">' + escapeHtml(String(n.public_key).slice(0, n.hash_size * 2).toUpperCase()) + '</code> (' + escapeHtml(String(n.hash_size)) + '-byte)'
+      : 'Unknown';
+    if (n.hash_size_inconsistent) {
+      const seen = (Array.isArray(n.hash_sizes_seen) ? n.hash_sizes_seen : []).join(', ');
+      value += ' <span style="color:var(--status-yellow);cursor:help" title="Seen: ' + escapeHtml(seen) + '-byte"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> varies</span>';
+    }
+    return table ? `<tr><td>Hash Prefix</td><td>${value}</td></tr>` : `<dt>Hash Prefix</dt><dd>${value}</dd>`;
+  }
+
+  // Copy URL (#811 M4): the link that previews as a node card when the
+  // server shares node cards for this role, else the plain #/nodes/ link.
+  // Built at click time, so a late /api/config/client or a customizer
+  // change applies without a re-render.
+  function bindCopyUrl(btn, n) {
+    if (!btn) return;
+    const idle = btn.innerHTML;
+    btn.addEventListener('click', () => {
+      window.copyToClipboard(window.NodeShare.copyURL(n), () => {
+        btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Copied!';
+        setTimeout(() => { btn.innerHTML = idle; }, 2000);
+      });
+    });
+  }
+
+  /* Node-detail actions owned by other modules: #681 M5 "Terrain profile"
+   * and #941 "Predicted reach" (roles.js nodeToolActions, shared with the
+   * Map page popup, #959), then #737 M2 "Oblique photo" (skraafoto.js).
+   * They and the built-in actions share the node-action-chip class (#920).
+   * Each module owns its button and its gate, so this only mounts what it
+   * hands back once the client config is in (roles.js mountConfigAction). */
+  function mountNodeActions(row, n) {
+    if (!row) return;
+    var sf = window.Skraafoto, mountConfigAction = window.mountConfigAction;
+    window.nodeToolActions(n).forEach(function (a) { mountConfigAction(row, a.testid, a.build); });
+    if (sf && typeof sf.nodeAction === 'function') {
+      mountConfigAction(row, 'node-skraafoto', function () { return sf.nodeAction(n, window.MC_SKRAAFOTO_CFG); });
+    }
+  }
+
+  // Tablet slide-over body. The API's node object carries `name`; advert_name
+  // is only the legacy fallback.
+  function renderSlideOverBody(n) {
+    const name = n.name || n.advert_name;
+    const lastHeard = n.last_heard || n.last_seen;
+    const relayed = (n.role === 'repeater' || n.role === 'room')
+      ? '<dt>Last Relayed</dt><dd>' + renderRelayActivity(n) + '</dd>' : '';
+    return '<dl style="margin:0;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px">' +
+        '<dt>Name</dt><dd>' + escapeHtml(name || '—') + '</dd>' +
+        '<dt>Role</dt><dd>' + escapeHtml((n.role || '').toString() || '—') + '</dd>' +
+        '<dt>Public key</dt><dd class="mono" style="word-break:break-all">' + escapeHtml(n.public_key || '—') + '</dd>' +
+        '<dt>Last heard</dt><dd>' + (lastHeard ? timeAgo(lastHeard) : '—') + '</dd>' +
+        relayed +
+        renderTrafficShare(n, false) +
+        renderHashPrefix(n, false) +
+        '<dt>Adverts</dt><dd>' + (n.advert_count != null ? n.advert_count : '—') + '</dd>' +
+      '</dl>' +
+      '<p style="margin-top:14px"><a class="btn-primary" href="#/nodes/' + encodeURIComponent(n.public_key || '') + '">Open full detail →</a></p>';
+  }
+
+  // #634 (upstream 2296): the link opens one sample packet of the observed path.
+  function renderExamplePacketLink(hash) {
+    return '<a href="#/packets/' + encodeURIComponent(hash) + '" class="ch-analyze-link">View example packet →</a>';
+  }
+
+  function renderRelayActivity(n) {
+    let html = n.last_relayed ? renderNodeTimestampHtml(n.last_relayed) + ' ' : '';
+    html += n.last_relayed && n.relay_active
+      ? '<span style="color:var(--status-green-text);font-size:11px">actively relaying</span>'
+      : '<span style="color:var(--text-muted);font-size:11px">no recent confirmed relay</span>';
+    if (n.relay_count_1h != null || n.relay_count_24h != null) {
+      html += ` <span style="color:var(--text-muted);font-size:11px;margin-left:4px">(${n.relay_count_1h || 0} relays/hr, ${n.relay_count_24h || 0} relays/24h)</span>`;
+    }
+    return html;
+  }
 
   function getStatusTooltip(role, status) {
     const isInfra = role === 'repeater' || role === 'room';
@@ -293,6 +477,13 @@
     // in CoreScope today; hash_size is the observed effective capability).
     if (n.hash_size && Number(n.hash_size) >= 2) {
       html += ` <span class="badge multibyte-badge" title="Node advertises multibyte hash path (firmware Feat1/Feat2)">Multibyte: ${Number(n.hash_size)}-byte</span>`;
+    }
+    // #353: a 1-byte advertised path hash collides often -- shared amber
+    // recommendation badge (app.js). The standalone badge spells the
+    // recommendation out as its visible label (recInLabel), so it needs no
+    // separate sr-only clause.
+    if (isPathHashSizeWarn(n.hash_size)) {
+      html += ' ' + renderPathHashSize(1, 'Recommended: 2- or 3-byte path hash', { block: 'node-path-hash-badge', cls: 'badge', recInLabel: true });
     }
     if (n.hash_size_inconsistent) {
       html += ` <a href="#/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" class="badge" style="background:var(--status-yellow);color:#000;font-size:10px;cursor:pointer;text-decoration:none"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> variable hash size</a>`;
@@ -508,12 +699,75 @@
 
   // ─── End neighbor helpers ─────────────────────────────────────────────────
 
+  // #254: the Affinity Debug card (only shown with debugAffinity). Its heading is
+  // a disclosure button, with caret-right when collapsed and caret-down when
+  // expanded (#189), and aria-expanded on the button follows the body. The click
+  // is handled by onFullBodyClick, delegated from #nodeFullBody.
+  function affinityDebugCaretHtml(expanded) {
+    return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-' + (expanded ? 'down' : 'right') + '"/></svg>';
+  }
+
+  function renderAffinityDebugCard() {
+    return `<div class="node-full-card" id="node-affinity-debug" style="display:none">
+          <h4><button type="button" class="affinity-debug-toggle" aria-expanded="false" aria-controls="affinityDebugBody"><span class="toggle-icon">${affinityDebugCaretHtml(false)}</span> <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Affinity Debug</button></h4>
+          <div class="affinity-debug-body" id="affinityDebugBody" hidden>
+            <div id="affinityDebugContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading debug data…</div></div>
+          </div>
+        </div>`;
+  }
+
+  function toggleAffinityDebug(btn) {
+    const expanded = btn.getAttribute('aria-expanded') !== 'true';
+    btn.setAttribute('aria-expanded', String(expanded));
+    const body = btn.ownerDocument.getElementById(btn.getAttribute('aria-controls'));
+    if (body) body.hidden = !expanded;
+    const icon = btn.querySelector('.toggle-icon');
+    if (icon) icon.innerHTML = affinityDebugCaretHtml(expanded);
+    return expanded;
+  }
+
+  function onFullBodyClick(e) {
+    const btn = e.target.closest && e.target.closest('.affinity-debug-toggle');
+    if (btn) toggleAffinityDebug(btn);
+  }
+
   let directNode = null; // set when navigating directly to #/nodes/:pubkey
 
+  // #259: the full-screen node view's Escape-to-go-back handler. Module level
+  // so every init() registers the same reference and destroy() can remove it.
+  function _nodesEsc(e) {
+    if (e.key === 'Escape') {
+      document.removeEventListener('keydown', _nodesEsc);
+      location.hash = '#/nodes';
+    }
+  }
+
+  // #259: the list view's Escape-to-close-the-detail-panel handler, same class
+  // of leak. It used to be a fresh closure registered inside renderLeft(), and
+  // renderLeft() runs on every load of the list -- a visit, a region change, a
+  // filter change -- so the listeners stacked and were never removed. Module
+  // level means a repeat add is a DOM no-op and destroy() can take it off.
+  function _nodesPanelEsc(e) {
+    if (e.key !== 'Escape') return;
+    const panel = document.getElementById('nodesRight');
+    if (!panel || panel.classList.contains('empty')) return;
+    closeDetailView();
+    panel.classList.add('empty');
+    panel.innerHTML = '<span>Select a node to view details</span>';
+    selectedKey = null;
+    history.replaceState(null, '', '#/nodes');
+    renderRows();
+  }
+
   let regionChangeHandler = null;
+  let areaChangeHandler = null;
+  let dagiChangeHandler = null;
+  let packetCountHelpCleanup = null;
 
   function init(app, routeParam) {
     directNode = routeParam || null;
+    if (packetCountHelpCleanup) packetCountHelpCleanup();
+    packetCountHelpCleanup = setupPacketCountHelp(app);
 
     if (directNode) {
       // Full-screen single node view (desktop + mobile).
@@ -530,14 +784,16 @@
         </div>
       </div>`;
       document.getElementById('nodeBackBtn').addEventListener('click', () => { location.hash = '#/nodes'; });
+      // Wired once here: loadFullNode re-renders the body (theme-refresh) and
+      // would stack listeners.
+      document.getElementById('nodeFullBody').addEventListener('click', onFullBodyClick);
       loadFullNode(directNode);
-      // Escape to go back to nodes list
-      document.addEventListener('keydown', function nodesEsc(e) {
-        if (e.key === 'Escape') {
-          document.removeEventListener('keydown', nodesEsc);
-          location.hash = '#/nodes';
-        }
-      });
+      // Escape to go back to nodes list. #259: one listener, not one per visit.
+      // It used to be a fresh closure per init() that only unhooked itself when
+      // Escape fired, so node A -> B -> C stacked three and one Escape wrote the
+      // same hash three times. _nodesEsc is a stable module-level reference, so
+      // a repeat add is a DOM no-op, and destroy() takes it off again.
+      document.addEventListener('keydown', _nodesEsc);
       return;
     }
 
@@ -568,6 +824,8 @@
       </div>
       <div id="nodesRegionFilter" class="region-filter-container"></div>
       <div id="nodesAreaFilter" style="display:none"></div>
+      <div id="nodesDagiFilter" class="dagi-filter-container" style="display:none"></div>
+      <div id="nodesDagiNotice" class="dagi-notice" role="status" hidden></div>
       <div class="split-layout">
         <div class="panel-left" id="nodesLeft" aria-live="polite" aria-relevant="additions removals"></div>
         <div class="panel-right empty" id="nodesRight"><span>Select a node to view details</span></div>
@@ -577,7 +835,11 @@
     RegionFilter.init(document.getElementById('nodesRegionFilter'));
     AreaFilter.init(document.getElementById('nodesAreaFilter'));
     regionChangeHandler = RegionFilter.onChange(function () { _allNodes = null; _fleetSkew = null; loadNodes(); });
-    AreaFilter.onChange(function () { _allNodes = null; _fleetSkew = null; loadNodes(); });
+    areaChangeHandler = AreaFilter.onChange(function () { _allNodes = null; _fleetSkew = null; loadNodes(); });
+    if (window.DagiFilter) {
+      DagiFilter.init(document.getElementById('nodesDagiFilter'));
+      dagiChangeHandler = DagiFilter.onChange(function () { _allNodes = null; _fleetSkew = null; loadNodes(); });
+    }
 
     if (search) {
       var _si = document.getElementById('nodeSearch');
@@ -605,9 +867,17 @@
       const advertMsgs = msgs.filter(isAdvertMessage);
       if (!advertMsgs.length) return;
 
+      // #279: invalidateApiCache() clears only the TTL cache, so a plain
+      // loadNodes(true) could still join a /nodes request that was already
+      // in flight -- one the server may have answered before this advert
+      // arrived, leaving the node that just advertised out of the list.
+      // Same shape as the #243 /channels bug, and the same call-site fix:
+      // bust never joins an in-flight request and takes its slot, so a
+      // later plain load joins this newer one. A refresh that fetches
+      // nothing (the in-place branch below) is unaffected.
       if (!_allNodes) {
         invalidateApiCache('/nodes');
-        loadNodes(true);
+        loadNodes(true, { bust: true });
         return;
       }
 
@@ -635,7 +905,7 @@
         _fleetSkew = null;
         invalidateApiCache('/nodes');
       }
-      loadNodes(true);
+      loadNodes(true, { bust: true });  // #279, as above
     }, 5000);
   }
 
@@ -643,14 +913,148 @@
    * Fetch node detail + health data in parallel.
    * Both selectNode() and loadFullNode() need the same data —
    * this shared helper avoids duplicating the fetch logic (fixes #391).
+   * It is the only caller that asks for the Recent Adverts route breakdown
+   * (#2073, the advertRoutes opt-in, docs/api-spec.md); other node-detail
+   * fetches stay on the plain URL, which the server answers as before.
    */
   async function fetchNodeDetail(pubkey) {
     const [nodeData, healthData] = await Promise.all([
-      api('/nodes/' + encodeURIComponent(pubkey), { ttl: CLIENT_TTL.nodeDetail }),
-      api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeDetail }).catch(() => null)
+      api('/nodes/' + encodeURIComponent(pubkey) + '?include=advertRoutes', { ttl: CLIENT_TTL.nodeDetail }),
+      api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeDetail }).catch(() => null),
+      window.MeshConfigReady
     ]);
     nodeData.healthData = healthData;
     return nodeData;
+  }
+
+  /**
+   * #199: the node page for a key with no nodes row. The 404 body of
+   * /api/nodes/{pubkey} carries the key's inactive_nodes row (retired after
+   * retention.nodeDays without an advert) and/or its observer row. Returns
+   * { title, html } explaining that state, or null when the instance knows
+   * nothing about the key (the generic "Node not found" then stays).
+   */
+  function missingNodeView(pubkey, notFound) {
+    const inactive = notFound && notFound.inactive_node;
+    const observer = notFound && notFound.observer;
+    if (!inactive && !observer) return null;
+    const name = (inactive && inactive.name) || (observer && observer.name) || '';
+    const when = (iso) => '<span title="' + escapeHtml(timeAgo(iso)) + '">' + escapeHtml(formatAbsoluteTimestamp(iso)) + '</span>';
+    const rows = [];
+    let headline, explanation;
+    if (inactive) {
+      headline = 'Inactive node';
+      // The record, not the device (#208): an observer can be uploading now
+      // while its node row is still in inactive_nodes.
+      explanation = 'No advert heard since ' + when(inactive.last_seen) + '; this node is listed as inactive. ' +
+        'Nodes without an advert inside the retention window are moved off the node list until they advertise again.';
+      rows.push(['Name', escapeHtml(inactive.name || '—')], ['Role', escapeHtml(inactive.role || '—')], ['Last advert', when(inactive.last_seen)]);
+    } else {
+      headline = 'No node record';
+      explanation = 'This device uploads as an observer, but no advert from it has been heard here, so it has no node record.';
+      rows.push(['Name', escapeHtml(observer.name || '—')]);
+    }
+    if (observer) rows.push(['Last upload as observer', when(observer.last_seen)]);
+    const observerLink = observer
+      ? '<a href="#/observers/' + encodeURIComponent(observer.id) + '" class="btn-primary" style="text-decoration:none;padding:6px 14px">View observer →</a>'
+      : '';
+    const html =
+      '<div class="node-full-card" style="padding:24px;margin:16px auto;max-width:560px">' +
+        '<div style="font-size:18px;font-weight:600;margin-bottom:8px;text-align:center">' + headline + '</div>' +
+        '<div class="mono" style="font-size:11px;color:var(--text-muted);word-break:break-all;margin-bottom:12px;text-align:center">' + escapeHtml(pubkey || '') + '</div>' +
+        '<p style="color:var(--text-muted);margin:0 0 12px">' + explanation + '</p>' +
+        '<dl style="margin:0 0 16px;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px">' +
+          rows.map(r => '<dt>' + r[0] + '</dt><dd style="margin:0">' + r[1] + '</dd>').join('') +
+        '</dl>' +
+        '<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">' +
+          observerLink +
+          '<a href="#/nodes" class="btn-primary" style="text-decoration:none;padding:6px 14px">← Back to Nodes</a>' +
+        '</div>' +
+      '</div>';
+    return { title: name || (pubkey || '').slice(0, 12) + '…', html };
+  }
+
+  // #382: help for the "Total Packets" count. The text depends on what the cell
+  // actually shows: the seen count exists only in the full view, and the
+  // advert_count fallback is not a transmission count.
+  function packetCountHelpText(opts) {
+    if (opts.fallback) {
+      return 'No packet statistics are available for this node, so this shows its advert count (adverts recorded for this node), not a count of transmissions.';
+    }
+    return 'Total Packets counts distinct transmissions involving this node as an originator, destination, or resolved relay. ' +
+      'It covers the current packet window (the in-memory packet store, limited by retention and the maximum packet count), not all time.' +
+      (opts.showSeen ? ' The seen count totals observations of those transmissions; one transmission can have multiple observations.' : '');
+  }
+
+  function renderPacketCountLabel(id, opts) {
+    return `<button type="button" class="sort-help node-packet-count-help" aria-label="Total Packets help" aria-describedby="${id}">Total Packets <span aria-hidden="true">ⓘ</span><span class="sort-help-tip" id="${id}" role="tooltip">${escapeHtml(packetCountHelpText(opts))}</span></button>`;
+  }
+
+  function setupPacketCountHelp(app) {
+    let activeHelp = null;
+    let frame = 0;
+
+    function position() {
+      if (!activeHelp || !activeHelp.isConnected) { activeHelp = null; return; }
+      const tip = activeHelp.querySelector('.sort-help-tip');
+      if (!tip.offsetHeight) return;
+      const trigger = activeHelp.getBoundingClientRect();
+      const container = activeHelp.closest('#nodesRight, #nodeFullBody');
+      if (!container) return;
+      const bounds = container.getBoundingClientRect();
+      const top = Math.max(0, bounds.top);
+      const bottom = Math.min(window.innerHeight, bounds.bottom);
+      const left = Math.max(0, bounds.left);
+      const right = Math.min(window.innerWidth, bounds.right);
+      if (trigger.bottom <= top || trigger.top >= bottom) {
+        activeHelp.classList.add('help-dismissed');
+        return;
+      }
+      tip.style.maxWidth = (right - left) + 'px';
+      tip.style.left = Math.max(left - trigger.left, Math.min(0, right - trigger.left - tip.offsetWidth)) + 'px';
+      const height = tip.offsetHeight;
+      const preferredTop = trigger.top - height < top ? trigger.bottom : trigger.top - height;
+      tip.style.top = (Math.max(top, Math.min(preferredTop, bottom - height)) - trigger.top) + 'px';
+      tip.style.bottom = 'auto';
+    }
+
+    function open(event) {
+      const help = event.target.closest('.node-packet-count-help');
+      if (!help || help.contains(event.relatedTarget)) return;
+      activeHelp = help;
+      help.classList.remove('help-dismissed');
+      if (event.type === 'pointerover') help.classList.toggle('help-touch', event.pointerType === 'touch');
+      position();
+    }
+
+    function schedule() {
+      if (!activeHelp || frame) return;
+      frame = requestAnimationFrame(() => { frame = 0; position(); });
+    }
+
+    function dismiss(event) {
+      if (event.key !== 'Escape' || !activeHelp || !activeHelp.isConnected ||
+          !activeHelp.querySelector('.sort-help-tip').offsetHeight) return;
+      activeHelp.classList.add('help-dismissed');
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+
+    app.addEventListener('pointerover', open);
+    app.addEventListener('focusin', open);
+    app.addEventListener('scroll', schedule, true);
+    window.addEventListener('resize', schedule);
+    // Capture also dismisses hover-only help before the page's Escape shortcuts.
+    document.addEventListener('keydown', dismiss, true);
+    return () => {
+      app.removeEventListener('pointerover', open);
+      app.removeEventListener('focusin', open);
+      app.removeEventListener('scroll', schedule, true);
+      window.removeEventListener('resize', schedule);
+      document.removeEventListener('keydown', dismiss, true);
+      cancelAnimationFrame(frame);
+      activeHelp = null;
+    };
   }
 
   async function loadFullNode(pubkey) {
@@ -660,7 +1064,7 @@
       const nodeData = await fetchNodeDetail(pubkey);
       if (viewSeq !== detailViewSeq || !body.isConnected) return;
       const healthData = nodeData.healthData;
-      const n = nodeData.node;
+      const n = nodeWithHealthActivity(nodeData.node, (healthData && healthData.stats) || {}, nodeData.recentAdverts || []);
       const adverts = (nodeData.recentAdverts || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       const title = document.querySelector('.node-full-title');
       if (title) title.textContent = n.name || pubkey.slice(0, 12);
@@ -676,17 +1080,17 @@
       // use). Shown alongside a real fix too, not just as a fallback when
       // one's missing -- lets a node flagged by Suspicious GPS Positions
       // be visually cross-checked against its own claimed position.
-      const hasEstLoc = n.estimated_lat != null && n.estimated_lon != null;
+      const estimatesEnabled = window.EstimatedPositions?.enabled() !== false;
+      const hasEstLoc = estimatesEnabled && n.estimated_lat != null && n.estimated_lon != null;
 
       // Health stats
       const h = healthData || {};
       const stats = h.stats || {};
-      const observers = h.observers || [];
+      const heardByTotal = HeardBy.counts(h).total;
       const recent = h.recentPackets || [];
-      const lastHeard = stats.lastHeard;
+      const lastHeard = getLastAdvert(n, stats, adverts);
 
-      // Attach health lastHeard for shared helpers
-      n._lastHeard = lastHeard || n.last_seen;
+      // General activity was supplied separately by nodeWithHealthActivity.
       const si = getStatusInfo(n);
       const roleColor = si.roleColor;
       const statusLabel = si.statusLabel;
@@ -705,12 +1109,12 @@
           <div style="margin:4px 0 6px">${renderNodeBadges(n, roleColor)}</div>
           ${renderHashInconsistencyWarning(n)}
           <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:6px">${n.public_key}</div>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">
-            <button class="btn-primary" id="copyUrlBtn" style="flex:0 0 auto;font-size:12px;padding:4px 10px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-clipboard-text"/></svg> Copy URL</button>
-            <button class="btn-primary" id="copyShortUrlBtn" title="Short URL using an 8-char pubkey prefix — easier to send over the mesh (issue #772)" style="flex:0 0 auto;font-size:12px;padding:4px 10px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Copy short URL</button>
-            <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="flex:0 0 auto;text-decoration:none;font-size:12px;padding:4px 10px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-bar"/></svg> Analytics</a>
-            <a href="#/nodes/${encodeURIComponent(n.public_key)}/reach" class="btn-primary" style="flex:0 0 auto;text-decoration:none;font-size:12px;padding:4px 10px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Reach</a>
-            <a href="#/observers/${encodeURIComponent(n.public_key.toUpperCase())}" class="btn-primary" title="View this pubkey as an observer" style="flex:0 0 auto;text-decoration:none;font-size:12px;padding:4px 10px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-eye"/></svg> Observer →</a>
+          <div class="node-full-actions">
+            <button class="btn-primary node-action-chip" id="copyUrlBtn"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-clipboard-text"/></svg> Copy URL</button>
+            <button class="btn-primary node-action-chip" id="copyShortUrlBtn" title="Short URL using an 8-char pubkey prefix — easier to send over the mesh (issue #772)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Copy short URL</button>
+            <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary node-action-chip"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-bar"/></svg> Analytics</a>
+            <a href="#/nodes/${encodeURIComponent(n.public_key)}/reach" class="btn-primary node-action-chip"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Reach</a>
+            <a href="#/observers/${encodeURIComponent(n.public_key.toUpperCase())}" class="btn-primary node-action-chip" title="View this pubkey as an observer"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-eye"/></svg> Observer →</a>
           </div>
         </div>
 
@@ -724,30 +1128,9 @@
 
         <table class="node-stats-table" id="node-stats">
           <tr><td>Status</td><td><span title="${si.statusTooltip}">${statusLabel}</span> <span style="font-size:11px;color:var(--text-muted);margin-left:4px">${statusExplanation}</span></td></tr>
-          <tr><td>Last Heard</td><td>${renderNodeTimestampHtml(lastHeard || n.last_seen)}</td></tr>
-          ${(n.role === 'repeater' || n.role === 'room') ? `<tr><td title="Last time this repeater appeared as a relay hop in a non-advert packet observed by the network. Distinct from 'Last Heard' (which counts the repeater's own adverts). See issue #662.">Last Relayed</td><td>${n.last_relayed ? renderNodeTimestampHtml(n.last_relayed) + ' ' + (n.relay_active ? '<span style="color:var(--status-green-text);font-size:11px"><span style="color:var(--status-green-text)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> actively relaying</span>' : '<span style="color:var(--status-yellow);font-size:11px"><span style="color:var(--status-yellow)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> alive (idle)</span>') : '<span style="color:var(--text-muted)">never observed as relay hop</span> <span style="color:var(--status-yellow);font-size:11px"><span style="color:var(--status-yellow)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> alive (idle)</span>'}${(n.relay_count_1h != null || n.relay_count_24h != null) ? ` <span style="color:var(--text-muted);font-size:11px;margin-left:4px">(${n.relay_count_1h || 0} relays/hr, ${n.relay_count_24h || 0} relays/24h)</span>` : ''}</td></tr>` : ''}
-          ${(n.role === 'repeater' || n.role === 'room') && (n.traffic_share_score != null || n.usefulness_score != null) ? (() => {
-            // #1456: prefer the new traffic_share_score field; fall back
-            // to legacy usefulness_score for graceful degradation
-            // against stale servers. The visible label is now "Traffic
-            // share" (the old "Usefulness" implied a composite that
-            // doesn't exist yet — see #672).
-            const raw = (n.traffic_share_score != null) ? n.traffic_share_score : n.usefulness_score;
-            const s = Number(raw) || 0;
-            const pct = (s * 100).toFixed(1);
-            // Visual indicator: width % bar with green→yellow→red color by score.
-            // Per issue #672 classification table: 0.8+ Critical, 0.6+ Valuable,
-            // 0.3+ Moderate, 0.1+ Marginal, else Redundant.
-            let label, color;
-            if (s >= 0.8) { label = 'Critical'; color = 'var(--status-green, #2ecc71)'; }
-            else if (s >= 0.6) { label = 'Valuable'; color = 'var(--status-green, #2ecc71)'; }
-            else if (s >= 0.3) { label = 'Moderate'; color = 'var(--status-yellow, #f1c40f)'; }
-            else if (s >= 0.1) { label = 'Marginal'; color = 'var(--status-orange, #e67e22)'; }
-            else { label = 'Redundant'; color = 'var(--status-red, #e74c3c)'; }
-            const barWidth = Math.max(2, Math.round(s * 100));
-            const tooltip = "Fraction of all non-advert mesh traffic in the analyzer's memory that transited through this repeater as a relay hop. High = lots of packets pass through; low = quieter (may still be structurally important — see Bridge score). One of 4 planned scoring axes (#672); others pending.";
-            return `<tr id="row-usefulness-score" data-usefulness-score="${s.toFixed(4)}" data-traffic-share-score="${s.toFixed(4)}"><td title="${tooltip}">Traffic share <span style="color:var(--text-muted);cursor:help" aria-label="help">ⓘ</span></td><td><span style="display:inline-block;vertical-align:middle;width:80px;height:8px;background:var(--bg-secondary,#333);border-radius:4px;overflow:hidden;margin-right:6px"><span style="display:block;width:${barWidth}%;height:100%;background:${color}"></span></span><span style="color:${color};font-weight:600">${pct}%</span> <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${label}</span></td></tr>`;
-          })() : ''}
+          <tr><td>Last Heard (advert)</td><td>${renderNodeTimestampHtml(lastHeard)}</td></tr>
+          ${(n.role === 'repeater' || n.role === 'room') ? `<tr><td title="Confirmed observed flood-path relay hops; ambiguous hashes and intended direct routes are excluded.">Last Relayed</td><td>${renderRelayActivity(n)}</td></tr>` : ''}
+          ${renderTrafficShare(n, true)}
           ${(n.role === 'repeater' || n.role === 'room') && n.bridge_score != null ? (() => {
             // Bridge axis (issue #672 axis 2 of 4): normalized betweenness
             // centrality from the neighbor-edges graph. Distinct from the
@@ -778,88 +1161,36 @@
               : 'Own scope';
             const title = "This node's own configured region scope (hashRegions) — set in its own adverts. Distinct from Transported scopes below, which are regions this node has relayed for OTHER nodes." +
               (confirmed ? ` Confirmed via the observer /neighbors report's self.default_scope (#1865 follow-up), last confirmed ${escapeHtml(String(n.default_scope_confirmed_at))}.` : '');
-            const value = n.default_scope === null ? '<span class="text-muted">—</span>' : n.default_scope === '' ? '<span class="text-muted">unknown scope</span>' : '<span class="badge">' + escapeHtml(n.default_scope) + '</span>';
+            const value = n.default_scope === null ? '<span class="text-muted">—</span>' : n.default_scope === '' ? '<span class="text-muted">unknown scope</span>' : '<span class="badge-scope">' + escapeHtml(n.default_scope) + '</span>';
             return `<tr id="row-own-scope"><td title="${title}">${label}</td><td>${value}</td></tr>`;
           })() : ''}
-          ${(n.role === 'repeater' || n.role === 'room') && Array.isArray(n.transported_scopes) && n.transported_scopes.length ? `<tr id="row-transported-scopes"><td title="Distinct region scopes (transmissions.scope_name) of all non-advert packets in which this repeater appears as a path hop. Shows which regions' traffic this repeater has carried (#1751).">Transported scopes</td><td><span style="display:inline-flex;flex-wrap:wrap;gap:3px;vertical-align:middle">${n.transported_scopes.map(sc => '<span class="badge">' + escapeHtml(String(sc)) + '</span>').join('')}</span></td></tr>` : ''}
+          ${(n.role === 'repeater' || n.role === 'room') && Array.isArray(n.transported_scopes) && n.transported_scopes.length ? `<tr id="row-transported-scopes"><td title="Distinct region scopes (transmissions.scope_name) of all non-advert packets in which this repeater appears as a path hop. Shows which regions' traffic this repeater has carried (#1751).">Transported scopes</td><td><span style="display:inline-flex;flex-wrap:wrap;gap:3px;vertical-align:middle">${n.transported_scopes.map(sc => '<span class="badge-scope">' + escapeHtml(String(sc)) + '</span>').join('')}</span></td></tr>` : ''}
           ${'configured_scope' in n && n.configured_scope !== null ? `<tr id="row-configured-scope"><td title="Region scopes this node has CONFIGURED, confirmed via an observer /neighbors report (status=responded) — concrete evidence, distinct from observed default scope and transported scopes (#1865).${n.configured_scope_at ? ' Last confirmed ' + escapeHtml(String(n.configured_scope_at)) + '.' : ''}">Configured scope <span style="color:var(--status-green,#2ecc71)" aria-label="confirmed"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg></span></td><td>${n.configured_scope === '' ? '<span style="color:var(--text-muted)">none configured</span>' : `<code style="color:var(--link-color)">${escapeHtml(n.configured_scope)}</code>`}</td></tr>` : ''}
           <tr><td>First Seen</td><td>${renderNodeTimestampHtml(n.first_seen)}</td></tr>
-          <tr><td>Total Packets</td><td>${stats.totalTransmissions || stats.totalPackets || n.advert_count || 0}${stats.totalObservations && stats.totalObservations !== (stats.totalTransmissions || stats.totalPackets) ? ' <span class="text-muted" style="font-size:0.85em">(seen ' + stats.totalObservations + '×)</span>' : ''}</td></tr>
+          <tr><td>${renderPacketCountLabel('fullNodePacketCountHelp', { fallback: !(stats.totalTransmissions || stats.totalPackets), showSeen: !!(stats.totalObservations && stats.totalObservations !== (stats.totalTransmissions || stats.totalPackets)) })}</td><td>${stats.totalTransmissions || stats.totalPackets || n.advert_count || 0}${stats.totalObservations && stats.totalObservations !== (stats.totalTransmissions || stats.totalPackets) ? ' <span class="text-muted" style="font-size:0.85em">(seen ' + stats.totalObservations + '×)</span>' : ''}</td></tr>
           <tr><td>Packets Today</td><td>${stats.packetsToday || 0}</td></tr>
-          ${stats.avgSnr != null ? `<tr><td>Avg SNR</td><td>${Number(stats.avgSnr).toFixed(1)} dB</td></tr>` : ''}
           ${stats.avgHops ? `<tr><td>Avg Hops</td><td>${stats.avgHops}</td></tr>` : ''}
           ${hasLoc ? `<tr><td>Location</td><td>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</td></tr>` : ''}
           ${hasEstLoc ? `<tr><td>${hasLoc ? 'Neighbor Estimate' : 'Location'} <span class="text-muted" style="font-size:10px">(estimated)</span></td><td>~${Number(n.estimated_lat).toFixed(5)}, ~${Number(n.estimated_lon).toFixed(5)} <span class="text-muted" style="font-size:11px">(from ${n.estimated_contributor_count} neighbor${n.estimated_contributor_count === 1 ? '' : 's'}${hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix'})</span></td></tr>` : ''}
-          <tr><td>Hash Prefix</td><td>${n.hash_size ? '<code style="font-family:var(--mono);font-weight:700">' + n.public_key.slice(0, n.hash_size * 2).toUpperCase() + '</code> (' + n.hash_size + '-byte)' : 'Unknown'}${n.hash_size_inconsistent ? ' <span style="color:var(--status-yellow);cursor:help" title="Seen: ' + (Array.isArray(n.hash_sizes_seen) ? n.hash_sizes_seen : []).join(', ') + '-byte"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> varies</span>' : ''}</td></tr>
+          ${!estimatesEnabled ? `<tr><td>Position estimates</td><td>${window.EstimatedPositions.disabledNoticeHTML}</td></tr>` : ''}
+          ${renderHashPrefix(n, true)}
         </table>
 
         <div class="node-full-card" id="node-packets">
-          ${(() => { const validPackets = adverts.filter(p => p.hash && p.timestamp); return `
-          <h4>Recent Packets (${validPackets.length})</h4>
-          <div class="node-activity-list">
-            ${validPackets.length ? validPackets.map(p => {
-              let decoded; try { decoded = JSON.parse(p.decoded_json); } catch {}
-              const typeLabel = p.payload_type === 4 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Advert' : p.payload_type === 5 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chat-circle"/></svg> Channel' : p.payload_type === 2 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-envelope"/></svg> DM' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-package"/></svg> Packet';
-              const detail = decoded?.text ? ': ' + escapeHtml(truncate(decoded.text, 50)) : decoded?.name ? ' — ' + escapeHtml(decoded.name) : '';
-              const obs = p.observer_name || p.observer_id;
-              const snr = p.snr != null ? ` · SNR ${p.snr}dB` : '';
-              const rssi = p.rssi != null ? ` · RSSI ${p.rssi}dBm` : '';
-              const obsBadge = p.observation_count > 1 ? ` <span class="badge badge-obs" title="Seen ${p.observation_count} times"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-eye"/></svg> ${p.observation_count}</span>` : '';
-              // Show hash size per advert if inconsistent
-              let hashSizeBadge = '';
-              if (n.hash_size_inconsistent && p.payload_type === 4 && p.raw_hex) {
-                const pb = parseInt(p.raw_hex.slice(2, 4), 16);
-                if ((pb & 0x3F) !== 0) {
-                  const hs = ((pb >> 6) & 0x3) + 1;
-                  const hsColor = hs >= 3 ? '#16a34a' : hs === 2 ? '#86efac' : '#f97316';
-                  const hsFg = hs === 2 ? '#064e3b' : '#fff';
-                  hashSizeBadge = ` <span class="badge" style="background:${hsColor};color:${hsFg};font-size:9px;font-family:var(--mono)">${hs}B</span>`;
-                }
-              }
-              return `<div class="node-activity-item">
-                <span class="node-activity-time">${renderNodeTimestampHtml(p.timestamp)}</span>
-                <span>${typeLabel}${detail}${hashSizeBadge}${obsBadge}${obs ? ' via ' + escapeHtml(obs) : ''}${snr}${rssi}</span>
-                <a href="#/packets/${p.hash}" class="ch-analyze-link" style="margin-left:8px;font-size:0.8em">Analyze →</a>
-              </div>`;
-            }).join('') : '<div class="text-muted">No recent packets</div>'}
-          </div>
-        `; })()}
+          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: nodeData.recentAdvertsByRoute, advertCounts: nodeData.advertCounts, advertIntervals: nodeData.advertIntervals }, {
+            variant: 'full', idPrefix: 'nodeFullAdverts', tab: NodeAdverts.parseTab(location.hash),
+            timestampHtml: renderNodeTimestampHtml, hashSizeInconsistent: !!n.hash_size_inconsistent,
+          })}
         </div>
 
-        ${observers.length ? `<div class="node-full-card" id="node-observers">
-          ${(() => { const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))]; return regions.length ? `<div style="margin-bottom:8px"><strong>Regions:</strong> ${regions.map(r => '<span class="badge" style="margin:0 2px">' + escapeHtml(r) + '</span>').join(' ')}</div>` : ''; })()}
-          <h4>Heard By (${observers.length} observer${observers.length > 1 ? 's' : ''})</h4>
-          <table class="data-table observer-sort-table" style="font-size:12px">
-            <thead><tr>
-              <th scope="col" data-sort-key="observer">Observer</th>
-              <th scope="col" data-sort-key="region">Region</th>
-              <th scope="col" data-sort-key="packets" data-type="numeric" data-sort-default="desc">Packets</th>
-              <th scope="col" data-sort-key="snr" data-type="numeric" data-sort-default="desc">Avg SNR</th>
-              <th scope="col" data-sort-key="rssi" data-type="numeric" data-sort-default="desc">Avg RSSI</th>
-            </tr></thead>
-            <tbody>
-              ${observers.map(o => `<tr>
-                <td data-value="${escapeHtml((o.observer_name || o.observer_id || '').toLowerCase())}" style="font-weight:600">${escapeHtml(o.observer_name || o.observer_id)}${o.can_relay === false ? ' <span class="badge-listener" title="Firmware reported repeat:off — excluded from path-hop disambiguator (#1290)">listener</span>' : (o.can_relay === true ? ' <span class="badge-repeater" title="Firmware reported repeat:on — eligible as a path hop">repeater</span>' : '')}</td>
-                <td data-value="${escapeHtml((o.iata || '').toLowerCase())}">${o.iata ? escapeHtml(o.iata) : '—'}</td>
-                <td data-value="${o.packetCount || 0}">${o.packetCount}</td>
-                <td data-value="${o.avgSnr != null ? Number(o.avgSnr) : ''}">${o.avgSnr != null ? Number(o.avgSnr).toFixed(1) + ' dB' : '—'}</td>
-                <td data-value="${o.avgRssi != null ? Number(o.avgRssi) : ''}">${o.avgRssi != null ? Number(o.avgRssi).toFixed(0) + ' dBm' : '—'}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>
-        </div>` : ''}
+        ${heardByTotal ? `<div class="node-full-card heard-by" id="node-observers">${HeardBy.renderTables(h)}</div>` : ''}
 
         <div class="node-full-card" id="node-neighbors">
           <h4 id="fullNeighborsHeader">Neighbors</h4>
           <div id="fullNeighborsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading neighbors…</div></div>
         </div>
 
-        <div class="node-full-card" id="node-affinity-debug" style="display:none">
-          <h4 style="cursor:pointer" onclick="var body=this.parentElement.querySelector('.affinity-debug-body'); var hidden=body.style.display==='none'; body.style.display=hidden?'block':'none'; this.querySelector('.toggle-icon').innerHTML=body.style.display==='none'?'<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-down"/></svg>':'<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-up"/></svg>'"><span class="toggle-icon"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-down"/></svg></span> <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Affinity Debug</h4>
-          <div class="affinity-debug-body" style="display:none">
-            <div id="affinityDebugContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading debug data…</div></div>
-          </div>
-        </div>
+        ${renderAffinityDebugCard()}
 
         <div class="node-full-card" id="fullPathsSection">
           <h4>Paths Through This Node</h4>
@@ -867,7 +1198,9 @@
           <div id="fullPathsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading paths…</div></div>
         </div>
 
-        <div class="node-full-card skew-detail-section" id="node-clock-skew" style="display:none"></div>`;
+        <div class="node-full-card skew-detail-section" id="node-clock-skew" style="display:none"></div>
+
+        ${(n.role === 'repeater' || n.role === 'room') ? '<div class="node-full-card" id="node-antenna" hidden></div>' : ''}`;
 
       // Map -- shows the real fix (solid pin), the neighbor estimate
       // (dashed pin), or both at once (connected by a dashed line, fit to
@@ -904,15 +1237,7 @@
         } catch {}
       }
 
-      // Copy URL
-      const nodeUrl = location.origin + '/#/nodes/' + encodeURIComponent(n.public_key);
-      document.getElementById('copyUrlBtn')?.addEventListener('click', () => {
-        const btn = document.getElementById('copyUrlBtn');
-        window.copyToClipboard(nodeUrl, () => {
-          btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Copied!';
-          setTimeout(() => btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-clipboard-text"/></svg> Copy URL', 2000);
-        });
-      });
+      bindCopyUrl(document.getElementById('copyUrlBtn'), n);
 
       // Copy short URL — issue #772. Uses an 8-char pubkey prefix; the
       // backend resolves it to the canonical pubkey when unambiguous.
@@ -924,6 +1249,15 @@
           setTimeout(() => btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Copy short URL', 2000);
         });
       });
+
+      mountNodeActions(body.querySelector('.node-full-actions'), n);
+
+      // #789 M2b: shown only while owner claims are open on this site. A
+      // re-render of the same node keeps the owner's flow where it was.
+      if (window.AntennaClaims) antennaClaimView = window.AntennaClaims.mountOwnerSection(document.getElementById('node-antenna'), n, antennaClaimView);
+      else destroyAntennaClaimView();
+
+      bindNodeAdverts(document.getElementById('node-packets'));
 
       // Deep-link scroll: ?section=node-packets or ?section=node-packets
       const hashParams = location.hash.split('?')[1] || '';
@@ -950,12 +1284,13 @@
         } catch {}
       }
 
-      // Initialize TableSort on observer table (full detail page)
-      var observerTable = document.querySelector('#node-observers .observer-sort-table');
-      if (observerTable && window.TableSort) {
-        TableSort.init(observerTable, {
-          defaultColumn: 'packets',
-          defaultDirection: 'desc'
+      // Initialize TableSort on the Heard By tables (full detail page, #76)
+      if (window.TableSort) {
+        document.querySelectorAll('#node-observers .observer-sort-table').forEach(function (observerTable) {
+          TableSort.init(observerTable, {
+            defaultColumn: 'packets',
+            defaultDirection: 'desc'
+          });
         });
       }
 
@@ -1070,22 +1405,22 @@
         }
         document.querySelector('#fullPathsSection h4').textContent = `Paths Through This Node (${pathData.totalPaths} unique, ${pathData.totalTransmissions} transmissions)`;
         const COLLAPSE_LIMIT = 10;
+        const currentPubkey = n.public_key.toLowerCase();
         function renderPaths(paths) {
           return paths.map(p => {
             const chain = p.hops.map(h => {
-              const isThis = h.pubkey === n.public_key;
+              const isThis = h.pubkey && h.pubkey.toLowerCase() === currentPubkey;
               if (window.HopDisplay) {
                 const entry = { name: h.name, pubkey: h.pubkey, ambiguous: h.ambiguous, conflicts: h.conflicts, totalGlobal: h.totalGlobal, totalRegional: h.totalRegional, globalFallback: h.globalFallback, unreliable: h.unreliable };
-                const html = HopDisplay.renderHop(h.prefix, entry);
-                return isThis ? html.replace('class="', 'class="hop-current ') : html;
+                return HopDisplay.renderHop(h.prefix, entry, isThis ? { className: 'hop-current' } : undefined);
               }
               const name = escapeHtml(h.name || h.prefix);
-              const link = h.pubkey ? `<a href="#/nodes/${encodeURIComponent(h.pubkey)}" style="${isThis ? 'font-weight:700;color:var(--link-color, #3b82f6)' : ''}">${name}</a>` : `<span>${name}</span>`;
+              const link = h.pubkey ? `<a href="#/nodes/${encodeURIComponent(h.pubkey)}"${isThis ? ' class="hop-current"' : ''}>${name}</a>` : `<span>${name}</span>`;
               return link;
             }).join(' → ');
             return `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
               <div>${chain}</div>
-              <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${renderNodeTimestampHtml(p.lastSeen)} · <a href="#/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
+              <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${renderNodeTimestampHtml(p.lastSeen)} · ${renderExamplePacketLink(p.sampleHash)}</div>
             </div>`;
           }).join('');
         }
@@ -1113,6 +1448,13 @@
       const msg = (e && e.message) || '';
       const is404 = /\b404\b/.test(msg) || /not\s*found/i.test(msg);
       const titleEl = document.querySelector('.node-full-title');
+      const missing = is404 ? missingNodeView(pubkey, e && e.body) : null;
+      if (missing) {
+        if (titleEl) titleEl.textContent = missing.title;
+        removeDetailMap();
+        body.innerHTML = missing.html;
+        return;
+      }
       if (titleEl) {
         titleEl.textContent = is404
           ? 'Node not found — ' + (pubkey || '').slice(0, 12) + '…'
@@ -1146,11 +1488,23 @@
   }
 
   function destroy() {
+    if (packetCountHelpCleanup) { packetCountHelpCleanup(); packetCountHelpCleanup = null; }
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
+    // #259: both Escape handlers are document-level, so they outlive the
+    // page's DOM unless they are removed here -- _nodesEsc for the
+    // full-screen view, _nodesPanelEsc for the list view.
+    document.removeEventListener('keydown', _nodesEsc);
+    document.removeEventListener('keydown', _nodesPanelEsc);
     closeDetailView();
+    destroyAntennaClaimView();
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
+    if (areaChangeHandler) AreaFilter.offChange(areaChangeHandler);
+    areaChangeHandler = null;
+    if (dagiChangeHandler) DagiFilter.offChange(dagiChangeHandler);
+    dagiChangeHandler = null;
+    if (window.DagiFilter) DagiFilter.release(document.getElementById('nodesDagiFilter'));
     nodes = [];
     selectedKey = null;
   }
@@ -1158,6 +1512,14 @@
   let _themeRefreshHandler = null;
 
   let _allNodes = null; // cached full node list
+  // #740 M3a: the query _allNodes was fetched under (nodesQueryKey). The
+  // router applies a link's ?region= or DAGI param after destroy() has
+  // removed this page's onChange handlers, so no handler drops the cache;
+  // loadNodes compares this key instead.
+  let _allNodesKey = null;
+  // #740 M3a: the server's count of unpositioned nodes a DAGI filter hid
+  // from _allNodes (whole list, before the other filters), or 0.
+  let _dagiHidden = 0;
   let _fleetSkew = null; // cached clock skew map: pubkey → {severity, recentMedianSkewSec, medianSkewSec, ...}
 
   /**
@@ -1301,8 +1663,37 @@
     return ' <span class="dup-name-badge" title="' + escapeHtml(title) + '">(' + keys.length + ')</span>';
   }
 
-  async function loadNodes(refreshOnly) {
+  // #740 M3a: "N nodes have no position…" under an active DAGI filter.
+  function renderDagiNotice() {
+    const el = document.getElementById('nodesDagiNotice');
+    if (!el) return;
+    const text = window.DagiFilter && DagiFilter.queryString() ? DagiFilter.hiddenNotice(_dagiHidden) : '';
+    el.textContent = text;
+    el.hidden = !text;
+  }
+
+  // The selection a node list answers: region, area and DAGI choice. `dagi`
+  // is DagiFilter.hashParam() for the wanted choice, or the sent part of
+  // DagiFilter.queryString() for a fetched list, so a choice still waiting
+  // for its check does not match a list fetched without it.
+  function nodesQueryKey(rp, ap, dagi) {
+    return (rp || '') + '|' + (ap || '') + '|' + (dagi || '');
+  }
+
+  function wantedNodesQueryKey() {
+    return nodesQueryKey(RegionFilter.getRegionParam(), AreaFilter.getAreaParam(),
+      window.DagiFilter ? DagiFilter.hashParam() : '');
+  }
+
+  // opts.bust: fetch fresh pages even if the same request is in flight (#279).
+  async function loadNodes(refreshOnly, opts) {
     try {
+      // A list cached under another selection (a link opened in this tab) is
+      // stale; one still current is kept.
+      if (_allNodes && _allNodesKey !== wantedNodesQueryKey()) {
+        _allNodes = null;
+        _fleetSkew = null;
+      }
       // Fetch all nodes via pagination loop — server clamps /api/nodes ?limit
       // to 500 (PR #1540 / v3.8.3 DoS guard), so a single fetch silently
       // truncates large deployments. Loop exit uses data.nodes.length < PAGE_SIZE
@@ -1316,6 +1707,11 @@
         if (rp) baseParams.set('region', rp);
         const ap = AreaFilter.getAreaParam();
         if (ap) baseParams.set('area', ap);
+        // #740 M3a: a DAGI code is sent only once /api/config/dagi has
+        // checked it (an unknown one is dropped, never sent).
+        if (window.DagiFilter) await DagiFilter.ready();
+        const dq = window.DagiFilter ? DagiFilter.queryString() : '';
+        let dagiHidden = 0;
 
         // B1 fix: use local accumulator; only assign _allNodes on full success.
         const accumulated = [];
@@ -1326,7 +1722,10 @@
         const nodesBody = document.getElementById('nodesBody');
         while (offset < SAFETY_CAP) {
           baseParams.set('offset', String(offset));
-          const data = await api('/nodes?' + baseParams, { ttl: CLIENT_TTL.nodeList });
+          const data = await api('/nodes?' + baseParams + dq, { ttl: CLIENT_TTL.nodeList, bust: !!(opts && opts.bust) });
+          // Read before the null check: a filter nobody matches answers
+          // `nodes: null` with the count.
+          if (offset === 0 && dq && data && data.dagi) dagiHidden = Number(data.dagi.unpositionedHidden) || 0;
           if (!data || !Array.isArray(data.nodes)) break;
           accumulated.push.apply(accumulated, data.nodes);
           counts = data.counts || counts || {};
@@ -1348,6 +1747,8 @@
           seen.set(accumulated[i].public_key, accumulated[i]);
         }
         _allNodes = Array.from(seen.values());
+        _allNodesKey = nodesQueryKey(rp, ap, dq.slice(1));
+        _dagiHidden = dagiHidden;
         // m3: counts from first response only (subsequent pages may differ)
         await skewPromise;
       }
@@ -1417,6 +1818,7 @@
       syncClaimedToFavorites();
 
       renderCounts();
+      renderDagiNotice();
       updateExportBtn();
       if (refreshOnly) {
         renderRows();
@@ -1562,20 +1964,10 @@
       tbody.addEventListener('keydown', handler);
     }
 
-    // Escape to close node detail panel
-    document.addEventListener('keydown', function nodesPanelEsc(e) {
-      if (e.key === 'Escape') {
-        const panel = document.getElementById('nodesRight');
-        if (panel && !panel.classList.contains('empty')) {
-          closeDetailView();
-          panel.classList.add('empty');
-          panel.innerHTML = '<span>Select a node to view details</span>';
-          selectedKey = null;
-          history.replaceState(null, '', '#/nodes');
-          renderRows();
-        }
-      }
-    });
+    // Escape to close node detail panel. #259: one listener, not one per
+    // render -- _nodesPanelEsc is a stable module-level reference, so this add
+    // is a no-op on every render after the first, and destroy() removes it.
+    document.addEventListener('keydown', _nodesPanelEsc);
 
     // #630: Close button for node detail panel (important for mobile full-screen overlay)
     document.getElementById('nodesRight').addEventListener('click', function(e) {
@@ -1751,18 +2143,8 @@
         if (selectedKey !== pubkey) return;
         const n = (data && data.node) || data || {};
         const titleEl = document.querySelector('.slide-over-title');
-        if (titleEl) titleEl.textContent = n.advert_name || (n.public_key ? n.public_key.slice(0, 10) : 'Node');
-        var role = (n.role || '').toString();
-        var lastHeard = n.last_heard || n.last_seen;
-        so.innerHTML =
-          '<dl style="margin:0;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px">' +
-            '<dt>Name</dt><dd>' + escapeHtml(n.advert_name || '—') + '</dd>' +
-            '<dt>Role</dt><dd>' + escapeHtml(role || '—') + '</dd>' +
-            '<dt>Public key</dt><dd class="mono" style="word-break:break-all">' + escapeHtml(n.public_key || '—') + '</dd>' +
-            '<dt>Last heard</dt><dd>' + (lastHeard ? timeAgo(lastHeard) : '—') + '</dd>' +
-            '<dt>Adverts</dt><dd>' + (n.advert_count != null ? n.advert_count : '—') + '</dd>' +
-          '</dl>' +
-          '<p style="margin-top:14px"><a class="btn-primary" href="#/nodes/' + encodeURIComponent(pubkey) + '">Open full detail →</a></p>';
+        if (titleEl) titleEl.textContent = n.name || n.advert_name || (n.public_key ? n.public_key.slice(0, 10) : 'Node');
+        so.innerHTML = renderSlideOverBody(n);
       } catch (e) {
         so.innerHTML = '<div class="text-muted">Error: ' + (e && e.message ? e.message : String(e)) + '</div>';
       }
@@ -1787,22 +2169,29 @@
     }
   }
 
+  // #2073: the Recent Adverts tab lives in the URL (?adverts=) so it survives a
+  // reload and can be shared; replaceState, so switching never re-inits.
+  function bindNodeAdverts(el) {
+    NodeAdverts.bind(el, {
+      onTabChange: function (tab) { history.replaceState(null, '', NodeAdverts.hashWithTab(location.hash, tab)); },
+    });
+  }
+
   function renderDetail(panel, data) {
-    const n = data.node;
+    const n = nodeWithHealthActivity(data.node, (data.healthData && data.healthData.stats) || {}, data.recentAdverts || []);
     const adverts = (data.recentAdverts || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     const h = data.healthData || {};
     const stats = h.stats || {};
-    const observers = h.observers || [];
+    const heardByTotal = HeardBy.counts(h).total;
     const recent = h.recentPackets || [];
     // Same "real fix" convention and estimate-alongside-real-fix behavior
     // as loadFullNode above -- see its comments.
     const hasLoc = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
-    const hasEstLoc = n.estimated_lat != null && n.estimated_lon != null;
-    const nodeUrl = location.origin + '/#/nodes/' + encodeURIComponent(n.public_key);
+    const estimatesEnabled = window.EstimatedPositions?.enabled() !== false;
+    const hasEstLoc = estimatesEnabled && n.estimated_lat != null && n.estimated_lon != null;
 
     // Status calculation via shared helper
-    const lastHeard = stats.lastHeard;
-    n._lastHeard = lastHeard || n.last_seen;
+    const lastHeard = getLastAdvert(n, stats, adverts);
     const si = getStatusInfo(n);
     const roleColor = si.roleColor;
     const totalPackets = stats.totalTransmissions || stats.totalPackets || n.advert_count || 0;
@@ -1816,10 +2205,11 @@
       <div class="node-detail">
         <div class="node-detail-name">${escapeHtml(n.name || '(unnamed)')}${dupBadge}</div>
         <div class="node-detail-role">${renderNodeBadges(n, roleColor)}
-          <button class="btn-primary node-detail-btn" data-pubkey="${encodeURIComponent(n.public_key)}" aria-label="View details for ${escapeHtml(n.name || n.public_key)}" style="font-size:11px;padding:2px 8px;margin-left:8px;cursor:pointer"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Details</button>
-          <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:4px;text-decoration:none;font-size:11px;padding:2px 8px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-bar"/></svg> Analytics</a>
-          <a href="#/nodes/${encodeURIComponent(n.public_key)}/reach" class="btn-primary" style="display:inline-block;margin-left:4px;text-decoration:none;font-size:11px;padding:2px 8px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Reach</a>
+          <button class="btn-primary node-action-chip node-detail-btn" data-pubkey="${encodeURIComponent(n.public_key)}" aria-label="View details for ${escapeHtml(n.name || n.public_key)}" style="margin-left:8px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Details</button>
+          <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary node-action-chip" style="margin-left:4px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-bar"/></svg> Analytics</a>
+          <a href="#/nodes/${encodeURIComponent(n.public_key)}/reach" class="btn-primary node-action-chip" style="margin-left:4px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Reach</a>
         </div>
+        <div class="node-detail-actions"></div>
         ${renderStatusExplanation(n)}
 
         ${(hasLoc || hasEstLoc) ? `<div class="node-map-qr-wrap">
@@ -1829,63 +2219,34 @@
 
         <div class="node-detail-section">
           <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:4px">${n.public_key}</div>
+          <button class="btn-primary" id="panelCopyUrlBtn" style="font-size:11px;padding:2px 8px;cursor:pointer"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-clipboard-text"/></svg> Copy URL</button>
         </div>
 
         <div class="node-detail-section">
           <h4>Overview</h4>
           <dl class="detail-meta">
-            <dt>Last Heard</dt><dd>${renderNodeTimestampHtml(lastHeard || n.last_seen)}</dd>
+            <dt>Last Heard (advert)</dt><dd>${renderNodeTimestampHtml(lastHeard)}</dd>
+            ${(n.role === 'repeater' || n.role === 'room') ? `<dt>Last Relayed</dt><dd>${renderRelayActivity(n)}</dd>` : ''}
+            ${renderTrafficShare(n, false)}
             <dt>First Seen</dt><dd>${renderNodeTimestampHtml(n.first_seen)}</dd>
-            <dt>Total Packets</dt><dd>${totalPackets}</dd>
+            <dt>${renderPacketCountLabel('nodePacketCountHelp', { fallback: !(stats.totalTransmissions || stats.totalPackets), showSeen: false })}</dt><dd>${totalPackets}</dd>
             <dt>Packets Today</dt><dd>${stats.packetsToday || 0}</dd>
-            ${stats.avgSnr != null ? `<dt>Avg SNR</dt><dd>${Number(stats.avgSnr).toFixed(1)} dB</dd>` : ''}
             ${stats.avgHops ? `<dt>Avg Hops</dt><dd>${stats.avgHops}</dd>` : ''}
             ${hasLoc ? `<dt>Location</dt><dd>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</dd>` : ''}
             ${hasEstLoc ? `<dt>${hasLoc ? 'Neighbor Estimate' : 'Location'} <span class="text-muted" style="font-size:10px">(estimated)</span></dt><dd>~${Number(n.estimated_lat).toFixed(5)}, ~${Number(n.estimated_lon).toFixed(5)} <span class="text-muted" style="font-size:11px">(from ${n.estimated_contributor_count} neighbor${n.estimated_contributor_count === 1 ? '' : 's'}${hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix'})</span></dd>` : ''}
+            ${!estimatesEnabled ? `<dt>Position estimates</dt><dd>${window.EstimatedPositions.disabledNoticeHTML}</dd>` : ''}
+            ${renderHashPrefix(n, false)}
           </dl>
         </div>
 
-        <div class="node-detail-section">
-          ${(() => { const validPackets = adverts.filter(a => a.hash && a.timestamp); return `
-          <h4>Recent Packets (${validPackets.length})</h4>
-          <div id="advertTimeline">
-            ${validPackets.length ? validPackets.map(a => {
-              let decoded;
-              try { decoded = JSON.parse(a.decoded_json); } catch {}
-              const pType = PAYLOAD_TYPES[a.payload_type] || 'Packet';
-              const icon = a.payload_type === 4 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg>' : a.payload_type === 5 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chat-circle"/></svg>' : a.payload_type === 2 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-envelope"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-package"/></svg>';
-              const detail = decoded?.text ? ': ' + escapeHtml(truncate(decoded.text, 50)) : decoded?.name ? ' — ' + escapeHtml(decoded.name) : '';
-              const obs = a.observer_name || a.observer_id;
-              return `<div class="advert-entry">
-                <span class="advert-dot" style="background:${roleColor}"></span>
-                <div class="advert-info">
-                  <strong>${renderNodeTimestampHtml(a.timestamp)}</strong> ${icon} ${pType}${detail}
-                  ${a.observation_count > 1 ? ' <span class="badge badge-obs"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-eye"/></svg> ' + a.observation_count + '</span>' : ''}
-                  ${obs ? ' via ' + escapeHtml(obs) : ''}
-                  ${a.snr != null ? ` · SNR ${a.snr}dB` : ''}${a.rssi != null ? ` · RSSI ${a.rssi}dBm` : ''}
-                  <br><a href="#/packets/${a.hash}" class="ch-analyze-link">Analyze →</a>
-                </div>
-              </div>`;
-            }).join('') : '<div class="text-muted" style="padding:8px">No recent packets</div>'}
-          </div>
-          `; })()}
+        <div class="node-detail-section" id="node-pane-adverts">
+          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: data.recentAdvertsByRoute, advertCounts: data.advertCounts, advertIntervals: data.advertIntervals }, {
+            variant: 'pane', idPrefix: 'nodePaneAdverts', tab: NodeAdverts.parseTab(location.hash),
+            timestampHtml: renderNodeTimestampHtml, roleColor: roleColor,
+          })}
         </div>
 
-        ${observers.length ? `<div class="node-detail-section">
-          ${(() => { const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))]; return regions.length ? `<div style="margin-bottom:6px;font-size:12px"><strong>Regions:</strong> ${regions.join(', ')}</div>` : ''; })()}
-          <h4>Heard By (${observers.length} observer${observers.length > 1 ? 's' : ''})</h4>
-          <div class="observer-list">
-            ${observers.map(o => {
-              const stats = [`${o.packetCount} pkts`];
-              if (o.avgSnr != null) stats.push('SNR ' + Number(o.avgSnr).toFixed(1) + 'dB');
-              if (o.avgRssi != null) stats.push('RSSI ' + Number(o.avgRssi).toFixed(0));
-              return `<div class="observer-row" style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border);font-size:12px">
-              <span style="font-weight:600">${escapeHtml(o.observer_name || o.observer_id)}${o.iata ? ' <span class="badge" style="font-size:10px">' + escapeHtml(o.iata) + '</span>' : ''}</span>
-              <span style="color:var(--text-muted)">${stats.join(' · ')}</span>
-            </div>`;
-            }).join('')}
-          </div>
-        </div>` : ''}
+        ${heardByTotal ? `<div class="node-detail-section heard-by" id="panelObserversSection">${HeardBy.renderList(h)}</div>` : ''}
 
         <div class="node-detail-section" id="panelNeighborsSection">
           <h4 id="panelNeighborsHeader">Neighbors</h4>
@@ -1899,6 +2260,7 @@
 
         <div class="node-detail-section skew-detail-section" id="node-clock-skew" style="display:none"></div>
       </div>`;
+    bindNodeAdverts(document.getElementById('node-pane-adverts'));
 
     // Init map -- same real+estimate side-by-side treatment as loadFullNode.
     if (hasLoc || hasEstLoc) {
@@ -1959,6 +2321,9 @@
       } catch {}
     }
 
+    mountNodeActions(panel.querySelector('.node-detail-actions'), n);
+    bindCopyUrl(panel.querySelector('#panelCopyUrlBtn'), n);
+
     // Wire "Details" button via the unified navigateToNode helper
     var detailBtn = panel.querySelector('.node-detail-btn');
     if (detailBtn) {
@@ -1990,17 +2355,18 @@
       document.querySelector('#pathsSection h4').textContent = `Paths Through This Node (${pathData.totalPaths} unique path${pathData.totalPaths !== 1 ? 's' : ''}, ${pathData.totalTransmissions} transmissions)`;
       const COLLAPSE_LIMIT = 10;
       const showAll = pathData.paths.length <= COLLAPSE_LIMIT;
+      const currentPubkey = n.public_key.toLowerCase();
       function renderPaths(paths) {
         return paths.map(p => {
           const chain = p.hops.map(h => {
-            const isThis = h.pubkey === n.public_key;
+            const isThis = h.pubkey && h.pubkey.toLowerCase() === currentPubkey;
             const name = escapeHtml(h.name || h.prefix);
-            const link = h.pubkey ? `<a href="#/nodes/${encodeURIComponent(h.pubkey)}" style="${isThis ? 'font-weight:700;color:var(--link-color, #3b82f6)' : ''}">${name}</a>` : `<span>${name}</span>`;
+            const link = h.pubkey ? `<a href="#/nodes/${encodeURIComponent(h.pubkey)}"${isThis ? ' class="hop-current"' : ''}>${name}</a>` : `<span>${name}</span>`;
             return link;
           }).join(' → ');
           return `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
             <div>${chain}</div>
-            <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${renderNodeTimestampHtml(p.lastSeen)} · <a href="#/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
+            <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${renderNodeTimestampHtml(p.lastSeen)} · ${renderExamplePacketLink(p.sampleHash)}</div>
           </div>`;
         }).join('');
       }
@@ -2046,8 +2412,9 @@
 
   // Test hooks
   window._nodesIsAdvertMessage = isAdvertMessage;
+  window._nodesMissingNodeView = missingNodeView;
   window._nodesGetAllNodes = function() { return _allNodes; };
-  window._nodesSetAllNodes = function(n) { _allNodes = n; };
+  window._nodesSetAllNodes = function(n) { _allNodes = n; _allNodesKey = wantedNodesQueryKey(); };
   window._nodesGetFiltered = function() { return nodes; };
   window._nodesSetFiltered = function(arr) { nodes = arr; };
   window._nodesRenderRows = renderRows;
@@ -2066,6 +2433,10 @@
     localStorage.setItem('meshcore-nodes-sort', JSON.stringify(_fallbackSortState));
   };
   window._nodesSortNodes = sortNodes;
+  window._nodesRenderTrafficShare = renderTrafficShare;
+  window._nodesRenderHashPrefix = renderHashPrefix;
+  window._nodesRenderSlideOverBody = renderSlideOverBody;
+  window._nodesRenderExamplePacketLink = renderExamplePacketLink;
   window._nodesComputeDisplayOrder = computeDisplayOrder;
   window._nodesSortArrow = function(col) {
     var st = _getSortState();
@@ -2079,9 +2450,15 @@
   };
   window._nodesSyncClaimedToFavorites = syncClaimedToFavorites;
   window._nodesRenderNodeTimestampHtml = renderNodeTimestampHtml;
+  window._nodesGetLastAdvert = getLastAdvert;
+  window._nodesWithHealthActivity = nodeWithHealthActivity;
+  window._nodesRenderRelayActivity = renderRelayActivity;
   window._nodesRenderNodeTimestampText = renderNodeTimestampText;
   window._nodesGetStatusInfo = getStatusInfo;
   window._nodesGetStatusTooltip = getStatusTooltip;
+  window._nodesRenderAffinityDebugCard = renderAffinityDebugCard;
+  window._nodesToggleAffinityDebug = toggleAffinityDebug;
+  window._nodesOnFullBodyClick = onFullBodyClick;
 
   // #862: Expose search filter logic for testing
   window._nodesMatchesSearch = function(node, query) {

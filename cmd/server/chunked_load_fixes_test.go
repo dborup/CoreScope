@@ -24,7 +24,7 @@ func TestLoadChunked_MarksIndexesReady(t *testing.T) {
 	store := openChunkedTestStore(t, 100)
 	defer store.db.conn.Close()
 
-	if store.SubpathIndexReady() || store.PathHopIndexReady() {
+	if store.PathHopIndexReady() {
 		t.Fatal("indexes must start NOT ready")
 	}
 
@@ -32,9 +32,6 @@ func TestLoadChunked_MarksIndexesReady(t *testing.T) {
 		t.Fatalf("LoadChunked: %v", err)
 	}
 
-	if !store.SubpathIndexReady() {
-		t.Fatal("SubpathIndexReady() must be true after LoadChunked builds the index")
-	}
 	if !store.PathHopIndexReady() {
 		t.Fatal("PathHopIndexReady() must be true after LoadChunked builds the index")
 	}

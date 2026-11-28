@@ -47,6 +47,8 @@ window.ObserverDetailNaiveBanner = {
   let charts = [];
   let currentDays = 7;
   let currentId = null;
+  let detailGeneration = 0; // bumped per load and on leave; a response applies only if it still matches
+  let titleVisit = -1; // PageTitle token of the current visit (#563)
 
   function destroyCharts() {
     charts.forEach(c => { try { c.destroy(); } catch {} });
@@ -70,7 +72,9 @@ window.ObserverDetailNaiveBanner = {
   }
 
   function init(app, routeParam) {
+    currentDays = 7; // the selector always renders 7 days on a new visit
     currentId = routeParam;
+    titleVisit = window.PageTitle ? window.PageTitle.visit() : -1;
     if (!currentId) {
       app.innerHTML = '<div class="text-center text-muted" style="padding:40px">No observer ID specified.</div>';
       return;
@@ -135,27 +139,67 @@ window.ObserverDetailNaiveBanner = {
   }
 
   function destroy() {
+    detailGeneration++;
     destroyCharts();
     currentId = null;
+    airtimeSeq++;
   }
 
   async function loadDetail() {
+    const generation = ++detailGeneration;
+    const loadId = currentId;
+    const days = currentDays;
     try {
       destroyCharts();
       chartDefaults();
-      const [obs, analytics, obsSkewArr, neighborsData] = await Promise.all([
-        api('/observers/' + encodeURIComponent(currentId)),
-        api('/observers/' + encodeURIComponent(currentId) + '/analytics?days=' + currentDays),
-        api('/observers/clock-skew', { ttl: 30000 }).catch(function() { return []; }),
-        api('/observers/' + encodeURIComponent(currentId) + '/neighbors').catch(function() { return { neighbors: [], reportedAt: '' }; }),
-      ]);
-      // Find this observer's calibration data.
-      var obsSkew = null;
-      (Array.isArray(obsSkewArr) ? obsSkewArr : []).forEach(function(s) {
-        if (s && s.observerID === currentId) obsSkew = s;
+      // #634 (upstream 2339): start all four requests together, but render the
+      // observer's identity/status/radio as soon as its own request finishes.
+      // Analytics, clock skew and neighbors fill their own regions, in any order.
+      const obsP = api('/observers/' + encodeURIComponent(loadId));
+      const analyticsP = api('/observers/' + encodeURIComponent(loadId) + '/analytics?days=' + days);
+      const skewP = api('/observers/clock-skew', { ttl: 30000 }).catch(function() { return []; });
+      const neighborsP = api('/observers/' + encodeURIComponent(loadId) + '/neighbors').catch(function() { return { neighbors: [], reportedAt: '' }; });
+      // A rejection must not go unhandled while the observer request is pending.
+      analyticsP.catch(function() {});
+      const obs = await obsP;
+      // Only the latest load of the current visit owns the detail view.
+      if (generation !== detailGeneration) return;
+      // The page does not wait for the slow bulk summary (#497): the TX/RX
+      // cards start as dashes and are filled in below.
+      renderDetail(obs, window.ObserverAirtime.lookup());
+      loadAirtimeCards(loadId);
+      skewP.then(function(arr) {
+        if (generation !== detailGeneration) return;
+        var obsSkew = null;
+        (Array.isArray(arr) ? arr : []).forEach(function(s) {
+          if (s && s.observerID === loadId) obsSkew = s;
+        });
+        var region = document.getElementById('obsClockRegion');
+        if (region) region.innerHTML = renderClockSection(obsSkew);
       });
-      renderDetail(obs, analytics, obsSkew, neighborsData);
+      neighborsP.then(function(neighborsData) {
+        if (generation !== detailGeneration) return;
+        var region = document.getElementById('obsNeighborsRegion');
+        if (region) region.innerHTML = renderDirectNeighbors(neighborsData);
+        loadNeighborSnrSparklines(loadId, neighborsData);
+      });
+      try {
+        const analytics = await analyticsP;
+        if (generation !== detailGeneration) return;
+        renderAnalytics(analytics);
+      } catch (ae) {
+        if (generation !== detailGeneration) return;
+        destroyCharts();
+        var chartsRegion = document.getElementById('obsChartsRegion');
+        if (chartsRegion) {
+          chartsRegion.innerHTML = '<div class="text-muted" style="padding:12px"></div>';
+          chartsRegion.firstChild.textContent = 'Analytics unavailable: ' + (ae && ae.message ? ae.message : String(ae));
+        }
+        var recent = document.getElementById('obsRecentPackets');
+        if (recent) recent.innerHTML = '';
+      }
     } catch (e) {
+      if (generation !== detailGeneration) return;
       // SECURITY (OBS-2, PR #1539): use textContent for error messages.
       // Error.message is JS-controlled and shouldn't normally carry attacker
       // strings, but textContent is a one-line defense against an upstream
@@ -166,6 +210,28 @@ window.ObserverDetailNaiveBanner = {
         errEl.firstChild.textContent = 'Error: ' + e.message;
       }
     }
+  }
+
+  // #497 — same bulk URL and TTL as the observer list, so it is usually a cache
+  // hit. A late answer is dropped if the user has since left or switched
+  // observer (currentId changed) or reloaded the detail (new loadSeq).
+  let airtimeSeq = 0;
+  async function loadAirtimeCards(id) {
+    const seq = ++airtimeSeq;
+    let summary;
+    try {
+      summary = await api('/observers/metrics/summary?window=1h', { ttl: 30000 });
+    } catch (e) {
+      return; // the cards keep their dashes
+    }
+    if (seq !== airtimeSeq || id !== currentId) return;
+    const tx = document.querySelector('[data-testid="obs-detail-tx-airtime"]');
+    const rx = document.querySelector('[data-testid="obs-detail-rx-airtime"]');
+    if (!tx || !rx) return;
+    const tpl = document.createElement('div');
+    tpl.innerHTML = window.ObserverAirtime.statCards(window.ObserverAirtime.lookup(summary, id));
+    tx.replaceWith(tpl.children[0]);
+    rx.replaceWith(tpl.children[0]);
   }
 
   function directNeighborRoleIcon(role) {
@@ -339,12 +405,29 @@ window.ObserverDetailNaiveBanner = {
     if (el) openNeighborSnrModal(el.getAttribute('data-nb-pubkey'));
   });
 
-  function renderDetail(obs, analytics, obsSkew, neighborsData) {
+  function renderClockSection(obsSkew) {
+    if (!(obsSkew && obsSkew.samples > 0)) return '';
+    return `
+      <div class="node-full-card skew-detail-section" style="margin-bottom:20px;padding:12px">
+        <h4 style="margin:0 0 6px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-clock"/></svg> Clock Offset</h4>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <span style="font-size:18px;font-weight:700;font-family:var(--mono)">${formatSkew(obsSkew.offsetSec)}</span>
+          ${renderSkewBadge(observerSkewSeverity(obsSkew.offsetSec), obsSkew.offsetSec)}
+          <span class="text-muted" style="font-size:12px">${obsSkew.samples} sample${obsSkew.samples !== 1 ? 's' : ''}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:8px;max-width:600px">
+          <strong>How this is computed:</strong> when this observer and another observer see the same packet, we compare their receive timestamps. The median deviation across all multi-observer packets is this observer's offset.
+        </div>
+      </div>`;
+  }
+
+  function renderDetail(obs, airtime) {
     const el = document.getElementById('obsDetailContent');
     if (!el) return;
 
     const title = document.getElementById('obsTitle');
     if (title) title.textContent = obs.name || obs.id.substring(0, 16) + '…';
+    if (window.PageTitle) window.PageTitle.setEntity(obs.name || obs.id.substring(0, 16), titleVisit);
 
     // SECURITY (OBS-1, post-#1537 sweep): every MQTT-controlled string from
     // the observer's `status` topic (extractObserverMeta) must be escaped at
@@ -431,6 +514,7 @@ window.ObserverDetailNaiveBanner = {
           <div class="stat-label">Packets/Hour</div>
           <div class="stat-value">${(obs.packetsLastHour || 0).toLocaleString()}</div>
         </div>
+        ${window.ObserverAirtime.statCards(airtime || window.ObserverAirtime.lookup())}
         <div class="stat-card">
           <div class="stat-label">First Seen</div>
           <div class="stat-value" style="font-size:0.85em">${obs.first_seen ? new Date(obs.first_seen).toLocaleDateString() : '—'}</div>
@@ -451,23 +535,12 @@ window.ObserverDetailNaiveBanner = {
       <div class="mono" style="font-size:0.75em;color:var(--text-muted);margin-bottom:20px;word-break:break-all">
         ID: ${escapeHtml(obs.id)}
       </div>
-      ${obsSkew && obsSkew.samples > 0 ? `
-      <div class="node-full-card skew-detail-section" style="margin-bottom:20px;padding:12px">
-        <h4 style="margin:0 0 6px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-clock"/></svg> Clock Offset</h4>
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-          <span style="font-size:18px;font-weight:700;font-family:var(--mono)">${formatSkew(obsSkew.offsetSec)}</span>
-          ${renderSkewBadge(observerSkewSeverity(obsSkew.offsetSec), obsSkew.offsetSec)}
-          <span class="text-muted" style="font-size:12px">${obsSkew.samples} sample${obsSkew.samples !== 1 ? 's' : ''}</span>
-        </div>
-        <div style="font-size:12px;color:var(--text-muted);margin-top:8px;max-width:600px">
-          <strong>How this is computed:</strong> when this observer and another observer see the same packet, we compare their receive timestamps. The median deviation across all multi-observer packets is this observer's offset.
-        </div>
-      </div>` : ''}
+      <div id="obsClockRegion"></div>
       <div class="node-full-card" style="margin-bottom:20px;padding:12px">
         <h4 style="margin:0 0 6px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-share-network"/></svg> Direct Neighbors</h4>
-        ${renderDirectNeighbors(neighborsData)}
+        <div id="obsNeighborsRegion"><div class="text-muted" style="font-size:12px">Loading…</div></div>
       </div>
-      <div class="obs-charts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px">
+      <div id="obsChartsRegion" class="obs-charts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,400px),1fr));gap:16px">
         <div class="chart-card" style="padding:12px">
           <h3 style="margin:0 0 8px;font-size:0.95em">Packets Over Time</h3>
           <canvas id="obsTimeChart" role="img" aria-label="Packets over time chart"></canvas>
@@ -489,7 +562,9 @@ window.ObserverDetailNaiveBanner = {
         <h3 style="font-size:0.95em">Recent Packets</h3>
         <div id="obsRecentPackets"><div class="text-muted">Loading…</div></div>
       </div>`;
+  }
 
+  function renderAnalytics(analytics) {
     // Render charts
     if (analytics.timeline && analytics.timeline.length > 0) {
       renderTimelineChart(analytics.timeline);
@@ -506,7 +581,6 @@ window.ObserverDetailNaiveBanner = {
     if (analytics.recentPackets) {
       renderRecentPackets(analytics.recentPackets);
     }
-    loadNeighborSnrSparklines(currentId, neighborsData);
   }
 
   function renderTimelineChart(timeline) {

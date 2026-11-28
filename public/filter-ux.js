@@ -147,7 +147,7 @@
       '<h4>Examples</h4>',
       '<ul class="fux-examples">' + examples + '</ul>',
       '<h4>Tips</h4>',
-      '<ul>',
+      '<ul class="fux-examples">',
       '<li>Right-click any cell in the packet table to add a clause for that value.</li>',
       '<li>Type a partial field name to autocomplete; Tab/Enter accepts, Esc dismisses.</li>',
       '<li>Save commonly-used expressions via the <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-star"/></svg> Save button — they appear in the Saved dropdown.</li>',

@@ -19,14 +19,17 @@
 //
 // Two correctness invariants:
 //
-//   1. (#1688 munger #5) Only mark first-pass-done when BOTH:
+//   1. (#1688 munger #5, #116) Only mark first-pass-done when BOTH:
 //        a. a recomputer pass has completed, AND
-//        b. the chunked loader has finished (s.LoadComplete()).
+//        b. that pass STARTED after the whole startup load terminated,
+//           hot window and background fill (store.StartupLoadDone()).
 //      The gate's `readyGate` callback is wired by
-//      StartAnalyticsRecomputers to `store.LoadComplete`. Passes that
-//      complete while loadComplete is still false leave the gate in
-//      the warming-up state; the NEXT pass after loadComplete flips
-//      true is the one that opens the gate.
+//      StartAnalyticsRecomputers to that signal and sampled before
+//      each compute. Passes that start earlier leave the gate in the
+//      warming-up state; StartAnalyticsRecomputers recomputes as soon
+//      as the signal fires, and that pass opens the gate. (The gate
+//      used to be store.LoadComplete, which flips at the end of the
+//      hot window, before the background fill.)
 //
 //   2. (#1688 munger #2 + kent-beck #2) The gate MUST lift in bounded
 //      time. If compute() panics on every pass, hangs indefinitely,
@@ -40,7 +43,8 @@
 //           default) elapsed since the recomputer was constructed
 //           forces IsWarmingUp_1659() to false — degraded mode
 //           (serve whatever cache exists, possibly empty) is
-//           strictly better than a permanent 503.
+//           strictly better than a permanent 503. A snapshot served
+//           that way is replaced by the post-load recompute (#116).
 //
 // Concurrency (#1688 munger #3):
 //
@@ -105,24 +109,25 @@ func (r *analyticsRecomputer) loadWarmupReadyGate_1659() func() bool {
 }
 
 // markFirstPassDone_1659 is called from analyticsRecomputer.runOnce()
-// after every compute attempt (success OR nil result; panics are
-// caught upstream and never reach here).
-//
-// The gate flip is conditional on the readyGate (when set) reporting
-// true — this implements the munger #5 fix: first-pass-done must
-// require BOTH a recomputer pass complete AND the chunked loader to
-// have finished populating the in-RAM observation set.
+// after a compute attempt (success OR nil result; panics are caught
+// upstream and never reach here) that STARTED with the readyGate open
+// (see warmupReadyGateOpen_1659): first-pass-done requires a pass that
+// began after the startup load terminated (munger #5, #116).
 //
 // Idempotent: only the FIRST successful flip wins; subsequent calls
 // observe a non-zero firstPassDoneNs and return immediately.
 func (r *analyticsRecomputer) markFirstPassDone_1659() {
-	if r.firstPassDoneNs.Load() != 0 {
-		return
-	}
-	if gate := r.loadWarmupReadyGate_1659(); gate != nil && !gate() {
-		return
-	}
 	r.firstPassDoneNs.CompareAndSwap(0, time.Now().UnixNano())
+}
+
+// warmupReadyGateOpen_1659 reports whether the readyGate (when set) is
+// open. runOnce samples it BEFORE computing and calls
+// markFirstPassDone_1659 only when it was open (#116): a pass that began
+// on a partially loaded store must not end the warm-up just because the
+// load finished while it ran.
+func (r *analyticsRecomputer) warmupReadyGateOpen_1659() bool {
+	gate := r.loadWarmupReadyGate_1659()
+	return gate == nil || gate()
 }
 
 // FirstPassDoneAt_1659 reports the time the first full compute pass

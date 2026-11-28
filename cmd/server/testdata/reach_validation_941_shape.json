@@ -1,0 +1,90 @@
+{
+  "dataAsOf": "string",
+  "issue": "string",
+  "models": [
+    {
+      "bands": [
+        {
+          "auc": "number",
+          "band": "string",
+          "falseReachRate": "number",
+          "hitRate": "number",
+          "medianSnrOffsetDb": "number",
+          "negatives": "number",
+          "positives": "number",
+          "snrPairs": "number",
+          "spearman": "number"
+        }
+      ],
+      "id": "string",
+      "model": "string",
+      "overall": {
+        "auc": "number",
+        "falseReachRate": "number",
+        "hitRate": "number",
+        "medianSnrOffsetDb": "number",
+        "negatives": "number",
+        "positives": "number",
+        "snrPairs": "number",
+        "spearman": "number"
+      }
+    }
+  ],
+  "notes": [
+    "string"
+  ],
+  "pairs": {
+    "candidates": "number",
+    "droppedAmbiguousEdges": "number",
+    "droppedWeakEdges": "number",
+    "fromNeighborEdges": "number",
+    "fromObserverNeighbors": "number",
+    "hiddenNodes": "number",
+    "negatives": "number",
+    "noTerrain": "number",
+    "nodes": "number",
+    "positives": "number",
+    "positivesBeyondRadius": "number",
+    "scored": "number",
+    "withReportedNoise": "number",
+    "withSNR": "number"
+  },
+  "params": {
+    "budgetDb": "number",
+    "cableLossDb": "number",
+    "environmentLossDb": "number",
+    "freqMHz": "number",
+    "gainsDbi": "number",
+    "k": "number",
+    "minEdgeCount": "number",
+    "noiseFallbackDbm": "number",
+    "radiusKm": "number",
+    "reachedMarginDb": "number",
+    "resolutionM": "number",
+    "txPowerDbm": "number",
+    "windowDays": "number"
+  },
+  "references": [
+    {
+      "firmwareNeighbors": "number",
+      "models": [
+        {
+          "auc": "number",
+          "hitRate": "number",
+          "model": "string",
+          "pairs": "number",
+          "positives": "number"
+        }
+      ],
+      "name": "string",
+      "pubkey": "string"
+    }
+  ],
+  "terrain": {
+    "partial": "bool",
+    "source": "string",
+    "tilesGathered": "number",
+    "upstreamCalls": "number"
+  },
+  "version": "number"
+}

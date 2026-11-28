@@ -14,6 +14,7 @@
   let neighborPubkeys = null;        // Set of pubkeys that are direct neighbors of selected node
   let wsHandler = null;
   let heatLayer = null;
+  let routeViewOpen = false; // a route-style view hides the overlays (#929)
   let geoFilterLayer = null;
   let selectedAreaLayer = null;
   let affinityLayer = null;
@@ -29,6 +30,45 @@
   let topRoutesGeneration = 0;
   let userHasMoved = false;
   let controlsCollapsed = false;
+  // #123: lifecycle token. Bumped by every init() and destroy(), so work a
+  // mount started (a response, a timer) can tell it is stale and do nothing.
+  // A bare `if (map)` is not enough: after a quick return it sees the NEXT
+  // mount's map.
+  let mapGeneration = 0;
+  // #123: newest loadNodes() request of this mount; older ones never render.
+  let nodesLoadGeneration = 0;
+  let nodesLoadPromise = null;
+  const mapTimers = new Set(); // pending mapTimeout() ids, cleared by destroy()
+  let areaNodesHandler = null;   // AreaFilter listeners, removed by destroy()
+  let areaOutlineHandler = null;
+  let dagiChangeHandler = null;  // #740 M3b: DagiFilter listener and the
+  let dagiOutline = null;        // selected area's outline, both of this mount
+  // #740 M3b follow-up: one "selected boundary" on the map (plan §4.6): the
+  // Area outline while an Area with an outline is selected (or still loading
+  // it), otherwise the DAGI outline. One checkbox and storage key for both.
+  let areaBoundaryPending = false;
+  const BOUNDARY_KEY = 'meshcore-map-selected-area-outline';
+  let mapThemeObs = null;        // theme observer and tile-provider listener
+  let tileProviderHandler = null; // of this mount, removed by destroy()
+  let creditObs = null;          // #839 credit-height observer, removed by destroy()
+
+  // Returns alive(): true while the mount that called mapToken() is current.
+  function mapToken() {
+    const gen = mapGeneration;
+    return function alive() { return gen === mapGeneration; };
+  }
+
+  // setTimeout scoped to the current mount: cleared by destroy() and never
+  // runs on a later mount's map.
+  function mapTimeout(fn, ms) {
+    const alive = mapToken();
+    const id = setTimeout(function () {
+      mapTimers.delete(id);
+      if (alive() && map) fn();
+    }, ms);
+    mapTimers.add(id);
+    return id;
+  }
 
   // Safe escape — falls back to identity if app.js hasn't loaded yet.
   // Escape untrusted strings (mesh-advertised node names) before HTML interpolation
@@ -147,9 +187,14 @@
   }
 
   function makeRepeaterLabelIcon(node, isStale, isAlsoObserver, mbStatus) {
-    var hs = node.hash_size || 1;
+    // #807: an unknown size is drawn as the 1-byte prefix WITH an unknown
+    // marker (ellipsis, dashed outline, aria/tooltip text), never as a
+    // confirmed 1-byte label. "?" is already the multi-byte "suspected" glyph.
+    var knownHs = getKnownHashSize(node);
+    var hs = knownHs || 1;
     // Show the short mesh hash ID (first N bytes of pubkey, uppercased)
     var shortHash = node.public_key ? node.public_key.slice(0, hs * 2).toUpperCase() : '??';
+    var hsUnknown = knownHs === null;
     // #1356 V3: glyph is the primary non-color status carrier, hash is the data,
     // status color is a thin left-border (CSS class drives the hue).
     var status = mbStatus || null;
@@ -157,14 +202,17 @@
     var statusClass = status ? (' ' + (MB_STATUS_CLASS[status] || MB_STATUS_CLASS.unknown)) : '';
     var ariaStatus = status ? ('multi-byte ' + status + ', hash ' + shortHash)
                             : ('repeater hash ' + shortHash);
+    if (hsUnknown) ariaStatus += ', hash size unknown';
     // Observer indicator stays a star — it is an orthogonal signal, not a status color.
     var obsIndicator = isAlsoObserver
       ? ' <span aria-hidden="true" style="color:' + (ROLE_COLORS.observer || '#f1c40f') + ';font-size:13px;line-height:1;" title="Also an observer"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-star-fill"/></svg></span>'
       : '';
     // Glyph + thin-space (U+2009) + hash. Visible content is aria-hidden so AT
     // reads the aria-label only (avoids "check mark 3 E" literal announcements).
-    var visible = (glyph ? glyph + '\u2009' : '') + shortHash;
-    var html = '<div class="mc-mb-label' + statusClass + '" role="img" aria-label="' + ariaStatus + '">' +
+    var visible = (glyph ? glyph + '\u2009' : '') + shortHash + (hsUnknown ? '\u2026' : '');
+    var unknownClass = hsUnknown ? ' hs-unknown' : '';
+    var titleAttr = hsUnknown ? ' title="Hash size unknown \u2014 no size-declaring advert known"' : '';
+    var html = '<div class="mc-mb-label' + statusClass + unknownClass + '"' + titleAttr + ' role="img" aria-label="' + ariaStatus + '">' +
       '<span aria-hidden="true">' + visible + '</span>' + obsIndicator + '</div>';
     return L.divIcon({
       html: html,
@@ -176,6 +224,8 @@
   }
 
   async function init(container) {
+    mapGeneration++;
+    const alive = mapToken();
     container.innerHTML = `
       <div id="map-wrap" style="position:relative;width:100%;height:100%;display:flex;">
         <div id="leaflet-map" style="flex:1 1 0%;height:100%;"></div>
@@ -218,6 +268,7 @@
             <label id="mcSelectedAreaLabel" for="mcSelectedArea" style="display:none"><input type="checkbox" id="mcSelectedArea"> Selected area outline</label>
           </fieldset>
           <div id="mapAreaFilter"></div>
+          <div id="mapDagiFilter" class="dagi-filter-container" style="display:none"></div>
           <fieldset class="mc-section">
             <legend class="mc-label">Status</legend>
             <div class="filter-group" id="mcStatusFilter">
@@ -270,8 +321,15 @@
             <label for="mcLastHeard" class="sr-only">Filter by last heard time</label>
             <select id="mcLastHeard" aria-label="Filter by last heard time">
               <option value="1h">1 hour</option>
+              <option value="3h">3 hours</option>
               <option value="6h">6 hours</option>
+              <option value="12h">12 hours</option>
               <option value="24h">24 hours</option>
+              <option value="2d">2 days</option>
+              <option value="3d">3 days</option>
+              <option value="4d">4 days</option>
+              <option value="5d">5 days</option>
+              <option value="6d">6 days</option>
               <option value="7d">7 days</option>
               <option value="30d" selected>30 days</option>
             </select>
@@ -291,6 +349,8 @@
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) defaultCenter = mapCfg.center;
       if (typeof mapCfg.zoom === 'number') defaultZoom = mapCfg.zoom;
     } catch {}
+    // #123: the page was left (or left and re-entered) during the fetch.
+    if (!alive()) return;
     let initCenter = defaultCenter;
     let initZoom = defaultZoom;
     // Check URL query params first (from packet detail links). #1709: shared
@@ -308,6 +368,12 @@
       }
     }
     map = L.map('leaflet-map', { zoomControl: true }).setView(initCenter, initZoom);
+    // #959: the node popup's Terrain profile and Predicted reach, on open.
+    map.on('popupopen', onNodePopupOpen);
+    map.on('popupopen popupclose', onPopupSheet);
+    // #982: a finger beside a marker closes the open popup (onMapNearMiss).
+    map.getContainer().addEventListener('pointerdown', onMapPointerDown, true);
+    map.getContainer().addEventListener('click', onMapNearMiss, true);
 
     // If navigated with ?node=PUBKEY, highlight that node after markers load
     targetNodeKey = urlParams.get('node') || null;
@@ -316,21 +382,31 @@
       (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
     // #1420 — multi-provider dark-tile picker. Light mode unchanged.
     let _darkRefLayer = null;  // Esri-only: labels overlay
+    // #332 — every tile URL and attribution comes from the configured
+    // dark/light provider. The old body hard-coded CARTO in three places
+    // (the light-mode url fallback, the 'carto-dark' registry fallback and
+    // the '© OpenStreetMap © CartoDB' credit), so a map on an instance
+    // configured for Esri/OpenTopoMap still fetched keyless CARTO tiles —
+    // which have been stamped "API KEY REQUIRED" since August 2026.
     function _resolveTileUrl(dark) {
-      const reg = window.MC_TILE_PROVIDERS || {};
-      if (!dark) {
-        const lightId = (typeof window.MC_getLightTileProvider === 'function') ? window.MC_getLightTileProvider() : null;
-        const lp = lightId ? (reg[lightId] || null) : null;
-        if (lp && lp.url) {
-          return { url: (typeof lp.url === 'function' ? lp.url() : lp.url), attribution: lp.attribution || '© OpenStreetMap © CartoDB', refUrl: null };
+      // Preferred path: the registry's single resolver. It picks the
+      // provider for this theme and invokes lazy `url` functions, so url
+      // AND attribution always come from the configured provider.
+      // #741 M1b: a WMS style has no url, only its `wms` descriptor.
+      if (typeof window.MC_getTileSpec === 'function') {
+        const s = window.MC_getTileSpec(dark ? 'dark' : 'light');
+        if (s && (s.url || s.wms)) {
+          return { url: s.url, wms: s.wms || null, attribution: s.attribution || '© OpenStreetMap contributors', refUrl: s.refUrl || null };
         }
-        return { url: TILE_LIGHT, attribution: '© OpenStreetMap © CartoDB', refUrl: null };
       }
-      const id  = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : 'carto-dark';
-      const p   = reg[id] || reg['carto-dark'] || {};
+      // Legacy/partial registry: accessors without getTileSpec.
+      const reg = window.MC_TILE_PROVIDERS || {};
+      const getId = dark ? window.MC_getDarkTileProvider : window.MC_getLightTileProvider;
+      const id = (typeof getId === 'function') ? getId() : null;
+      const p = (id && reg[id]) || {};
       return {
-        url: (typeof p.url === 'function' ? p.url() : p.url) || (typeof p.baseUrl === 'function' ? p.baseUrl() : p.baseUrl) || TILE_DARK,
-        attribution: p.attribution || '© OpenStreetMap © CartoDB',
+        url: (typeof p.url === 'function' ? p.url() : p.url) || (typeof p.baseUrl === 'function' ? p.baseUrl() : p.baseUrl) || (dark ? TILE_DARK : TILE_LIGHT),
+        attribution: p.attribution || '© OpenStreetMap contributors',
         refUrl: p.refUrl || null
       };
     }
@@ -338,12 +414,14 @@
     
     function _syncDarkTiles(dark) {
       const r = _resolveTileUrl(dark);
-      tileLayer.setUrl(r.url);
+      // #741 M1b — a template changes in place; to or from a WMS style the
+      // registry swaps the layer inside the Auto group.
+      tileLayer = window.MC_syncBaseLayer(autoLayerGroup, tileLayer, r, { maxZoom: 19 });
       if (tileLayer.options) tileLayer.options.attribution = r.attribution;
       // Esri reference (labels) overlay: add when needed, remove otherwise.
       if (dark && r.refUrl) {
         if (!_darkRefLayer) {
-          _darkRefLayer = L.tileLayer(r.refUrl, { maxZoom: 19, attribution: r.attribution }).addTo(autoLayerGroup);
+          _darkRefLayer = window.MC_createBaseLayer({ url: r.refUrl, attribution: r.attribution }, { maxZoom: 19 }).addTo(autoLayerGroup);
         } else {
           _darkRefLayer.setUrl(r.refUrl);
           if (!autoLayerGroup.hasLayer(_darkRefLayer)) _darkRefLayer.addTo(autoLayerGroup);
@@ -359,12 +437,12 @@
       }
     }
     const _initTile = _resolveTileUrl(isDark);
-    const tileLayer = L.tileLayer(_initTile.url, {
-      attribution: _initTile.attribution,
-      maxZoom: 19,
-    }).addTo(autoLayerGroup);
+    // #741 — every base map goes through the registry's one factory, which
+    // builds a tile layer or a WMS layer from the spec it is given;
+    // _resolveTileUrl() carries the style's `wms` descriptor (M1b).
+    let tileLayer = window.MC_createBaseLayer(_initTile, { maxZoom: 19 }).addTo(autoLayerGroup);
     if (isDark && _initTile.refUrl) {
-      _darkRefLayer = L.tileLayer(_initTile.refUrl, { maxZoom: 19, attribution: _initTile.attribution }).addTo(autoLayerGroup);
+      _darkRefLayer = window.MC_createBaseLayer({ url: _initTile.refUrl, attribution: _initTile.attribution }, { maxZoom: 19 }).addTo(autoLayerGroup);
     }
     if (typeof window.MC_applyTileFilter === 'function') window.MC_applyTileFilter();
     
@@ -372,20 +450,26 @@
     if (typeof window.MC_createLayerControl === 'function') {
       window.MC_createLayerControl(map, autoLayerGroup, 'topleft');
     }
+    // #723 M2: click-for-info on the monuments overlay. The profile
+    // tool's picking and A/B dragging win over it.
+    if (window.HeritageInfo) {
+      window.HeritageInfo.attach(map, { isBusy: function () { return !!profileArm || !!profileDrag; } });
+    }
 
-    const _mapThemeObs = new MutationObserver(function () {
+    mapThemeObs = new MutationObserver(function () {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       _syncDarkTiles(dark);
     });
-    _mapThemeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    mapThemeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     // #1420 — re-render when the user picks a different dark provider in the customizer.
-    window.addEventListener('mc-tile-provider-changed', function (e) {
+    tileProviderHandler = function (e) {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       if (e && e.detail && e.detail.type && e.detail.type !== (dark ? 'dark' : 'light')) return;
       _syncDarkTiles(dark);
-    });
+    };
+    window.addEventListener('mc-tile-provider-changed', tileProviderHandler);
 
     // #1689 r1 (adv #4): live re-render when the customizer "hide 1-byte
     // path hops" toggle flips. Before this listener the toggle only took
@@ -407,10 +491,11 @@
       });
     }
 
-    // Save position on move
+    // Save position on move. A profile link's fit is the link's view, not
+    // the viewer's, so it is not saved (#765).
     map.on('moveend', () => {
       const c = map.getCenter();
-      localStorage.setItem('map-view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
+      if (!profileFitting) localStorage.setItem('map-view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
       userHasMoved = true;
     });
 
@@ -443,22 +528,28 @@
     }
 
     // Fix map size on SPA load
-    setTimeout(() => map.invalidateSize(), 100);
+    mapTimeout(() => map.invalidateSize(), 100);
 
     // Controls toggle
     const toggleBtn = document.getElementById('mapControlsToggle');
     const controlsPanel = document.getElementById('mapControls');
     // Default collapsed on mobile
-    if (window.innerWidth <= 640) {
-      controlsCollapsed = true;
-      controlsPanel.classList.add('collapsed');
-      toggleBtn.setAttribute('aria-expanded', 'false');
+    if (isPhoneControls()) setControlsCollapsed(true);
+    toggleBtn.addEventListener('click', () => setControlsCollapsed(!controlsCollapsed));
+
+    // #839: the panel reaches down to the bottom-right map credit, which ran
+    // under it. Publish the credit's height as --map-credit-height so the
+    // panel's max-height (style.css) stops above it; it follows the credit
+    // as overlays add and remove theirs.
+    const credit = map.attributionControl && map.attributionControl.getContainer();
+    if (credit) {
+      const publishCredit = () => controlsPanel.style.setProperty('--map-credit-height', Math.ceil(credit.getBoundingClientRect().height) + 'px');
+      publishCredit();
+      if (typeof ResizeObserver === 'function') {
+        creditObs = new ResizeObserver(publishCredit);
+        creditObs.observe(credit);
+      }
     }
-    toggleBtn.addEventListener('click', () => {
-      controlsCollapsed = !controlsCollapsed;
-      controlsPanel.classList.toggle('collapsed', controlsCollapsed);
-      toggleBtn.setAttribute('aria-expanded', String(!controlsCollapsed));
-    });
 
     // #1329: Map controls accordion. Make each section's legend a button-
     // style toggle with aria-expanded. On mobile (≤640px) only one section
@@ -607,7 +698,37 @@
     document.getElementById('mcConfiguredScopeFilter').addEventListener('change', e => { filters.configuredScope = e.target.value; localStorage.setItem('meshcore-map-configured-scope-filter', filters.configuredScope); renderMarkers(); });
 
     AreaFilter.init(document.getElementById('mapAreaFilter'));
-    AreaFilter.onChange(function () { loadNodes(); });
+    areaNodesHandler = AreaFilter.onChange(function () { loadNodes(); });
+
+    // #740 M3b: the Danish areas filter and its selected area's outline. A
+    // pick reloads the nodes and fits the map to the area; a cold link (or a
+    // return to the page) draws it where the map already looks, as the link
+    // may carry its own view (#740 owner decision 7).
+    if (window.DagiFilter && window.DagiOutline) {
+      DagiFilter.init(document.getElementById('mapDagiFilter'), { beside: document.getElementById('mapControls') });
+      dagiOutline = DagiOutline.create({
+        L, map,
+        fetchJson: function (q) {
+          return fetch('/api/config/dagi/polygons?' + q)
+            .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); });
+        },
+        decode: DagiFilter.decodeRings,
+        color: boundaryColor,
+        escape: safeEsc,
+      });
+      dagiChangeHandler = DagiFilter.onChange(function () {
+        loadNodes(); refreshBoundary(true);
+        // On a phone the open controls panel covers the whole map, so the
+        // fitted area could not be seen (#740 M3b review F1): a pick (not a
+        // clear) closes the panel, as the picker's sheet already has.
+        if (DagiFilter.polygonQuery() && isPhoneControls()) {
+          const inPanel = document.getElementById('mapControls').contains(document.activeElement);
+          setControlsCollapsed(true);
+          if (inPanel) document.getElementById('mapControlsToggle').focus();
+        }
+      });
+      DagiFilter.ready().then(function () { if (alive()) refreshBoundary(false); });
+    }
 
     // Status filter buttons
     document.querySelectorAll('#mcStatusFilter .btn').forEach(btn => {
@@ -636,6 +757,7 @@
     (async function () {
       try {
         const gf = await api('/config/geo-filter', { ttl: 3600 });
+        if (!alive()) return;
         if (!gf || !gf.polygon || gf.polygon.length < 3) return;
         const geoColor = getComputedStyle(document.documentElement).getPropertyValue('--geo-filter-color').trim() || '#3b82f6';
         const latlngs = gf.polygon.map(function (p) { return [p[0], p[1]]; });
@@ -678,13 +800,13 @@
     })();
 
     // Selected area outline — distinct from the geo filter boundary above:
-    // this draws whichever area is currently picked via the "Area: X ▾"
+    // this draws whichever area is currently picked via the "Area: X"
     // dropdown (AreaFilter, shared with Nodes/Live/Analytics), not
     // necessarily the homeArea-linked geo_filter. Falls back to a plain
     // box when the area has no polygon. Only one area can be selected at
-    // a time (AreaFilter is single-select), so at most one outline shows.
+    // a time (AreaFilter is single-select); refreshBoundary() then draws
+    // either it or the DAGI outline, never both.
     (function () {
-      var areaColor = getComputedStyle(document.documentElement).getPropertyValue('--geo-filter-color').trim() || '#3b82f6';
       var areaPolygonsCache = null;
       async function fetchAreaPolygons() {
         if (areaPolygonsCache) return areaPolygonsCache;
@@ -707,40 +829,40 @@
         }
         return null;
       }
+      var refreshGen = 0;
       async function refresh() {
-        var label = document.getElementById('mcSelectedAreaLabel');
-        var checkbox = document.getElementById('mcSelectedArea');
+        if (!alive() || !map) return;
+        var gen = ++refreshGen;
         if (selectedAreaLayer) { map.removeLayer(selectedAreaLayer); selectedAreaLayer = null; }
         var key = AreaFilter.getSelected();
-        if (!key) {
-          if (label) label.style.display = 'none';
-          return;
-        }
+        // While the Area's outline loads, it keeps the layer: no DAGI
+        // outline (or its request) in between.
+        areaBoundaryPending = !!key;
+        refreshBoundary(false);
+        if (!key) return;
         var areas = await fetchAreaPolygons();
+        // #123: only the newest refresh of the current mount draws.
+        if (!alive() || !map || gen !== refreshGen) return;
+        areaBoundaryPending = false;
         var entry = areas.find(function (a) { return a.key === key; });
         var latlngs = entry && latLngsFor(entry);
-        if (!latlngs) {
-          if (label) label.style.display = 'none';
-          return;
+        if (latlngs) {
+          var areaColor = boundaryColor() || '#3b82f6';
+          selectedAreaLayer = L.polygon(latlngs, {
+            color: areaColor, weight: 2, opacity: 0.8, dashArray: '2 4',
+            fillColor: areaColor, fillOpacity: 0.06, className: 'area-outline'
+          });
         }
-        selectedAreaLayer = L.polygon(latlngs, {
-          color: areaColor, weight: 2, opacity: 0.8, dashArray: '2 4',
-          fillColor: areaColor, fillOpacity: 0.06
-        });
-        if (label) label.style.display = '';
-        var saved = localStorage.getItem('meshcore-map-selected-area-outline') !== 'false';
-        if (checkbox) checkbox.checked = saved;
-        if (saved) selectedAreaLayer.addTo(map);
+        refreshBoundary(false);
       }
       var checkbox = document.getElementById('mcSelectedArea');
       if (checkbox) {
         checkbox.addEventListener('change', function (e) {
-          localStorage.setItem('meshcore-map-selected-area-outline', e.target.checked);
-          if (!selectedAreaLayer) return;
-          if (e.target.checked) { selectedAreaLayer.addTo(map); } else { map.removeLayer(selectedAreaLayer); }
+          localStorage.setItem(BOUNDARY_KEY, e.target.checked);
+          refreshBoundary(false);
         });
       }
-      AreaFilter.onChange(refresh);
+      areaOutlineHandler = AreaFilter.onChange(refresh);
       refresh();
     })();
 
@@ -752,6 +874,12 @@
     });
 
     loadNodes().then(() => {
+      if (!alive()) return;
+      // #681 M4 — offer the Path profile tool (and restore a ?profile= deep
+      // link) once the nodes are in, so endpoint names resolve immediately.
+      initProfileTool();
+      // #941 — the Predicted reach tool, and a #/map?reach=… link.
+      initReachTool();
       // Check for a wardriving GPS trail (via sessionStorage) — see
       // drawGPSTrail. Distinct from map-route-hops: these are raw shared
       // coordinates, not mesh hop keys needing node resolution.
@@ -805,6 +933,101 @@
     });
   }
 
+  // #598 — route hops for a path whose hops were inferred as a whole
+  // (inferObservationPath), aligned with hopKeys. opts.inferredHops on either
+  // renderer takes this path instead of /api/resolve-hops, which resolves each
+  // prefix on its own and so cannot tell two hops that share a prefix apart.
+  // #673: _hopHex is the raw prefix the observation carried (entry.hop), not
+  // hopKeys[i]: loadRouteFromDeepLink passes the inferred pubkeys as hopKeys,
+  // and a 64-char pubkey never reads as a 1-byte hop to MC_isVisibleHop.
+  function inferredRouteHops(hopKeys, inferred) {
+    const roles = new Map((nodes || []).map(n => [n.public_key, n.role]));
+    return hopKeys.map((hop, i) => Object.assign(
+      routeHopFromInferred(inferred[i].hop, inferred[i], roles.get(inferred[i].pubkey)),
+      { _hopHex: String(inferred[i].hop != null ? inferred[i].hop : hop) }));
+  }
+
+  // #1633 — render-time 1-byte hop filter (default OFF). Origin / destination
+  // positions carry no _hopHex (they came from the payload, not the outer path
+  // bytes) and therefore always survive. Intermediate hops with a 1-byte
+  // _hopHex are dropped when the customizer toggle is ON. Returns a new array;
+  // the caller's positions are not mutated.
+  //
+  // #1689 r1 (adv #2): if the filter drops every intermediate hop the result
+  // is a 2-point origin→dest polyline that is visually identical to a
+  // "direct delivery, no hops" route. Operators misread that as ground-truth
+  // direct path. To make the redaction LEGIBLE the renderer gets
+  // hopsHiddenCount so it can draw the polyline in a different style
+  // (dashed/lighter) and add a midpoint badge that reads "N hops hidden".
+  // #673: shared by drawPacketRoute and drawPacketRouteMulti.
+  function hide1ByteRoutePositions(positions) {
+    if (!(window.MC_isVisibleHop && window.MC_getHide1ByteHops && window.MC_getHide1ByteHops())) {
+      return { positions: positions, hopsHiddenCount: 0 };
+    }
+    const before = positions.filter(function (p) { return !!p._hopHex; }).length;
+    const kept = positions.filter(function (p) {
+      return !p._hopHex || window.MC_isVisibleHop(p._hopHex);
+    });
+    const after = kept.filter(function (p) { return !!p._hopHex; }).length;
+    if (kept.length < positions.length && kept.length >= 1) {
+      // Re-mark the last surviving hop as destination if the original got
+      // dropped — on a copy, so the caller's position objects stay untouched.
+      kept[kept.length - 1] = Object.assign({}, kept[kept.length - 1], { isDest: true });
+    }
+    return { positions: kept, hopsHiddenCount: before - after };
+  }
+
+  // #673: tag each canonical path hop with the token its observation carried,
+  // so hide1ByteRoutePositions can see it. Inferred hops already carry their
+  // raw prefix (inferredRouteHops); otherwise canonicalPath holds the raw
+  // prefixes. Mutates the freshly built positions in place.
+  function tagPathHopTokens(positions, canonicalPath) {
+    positions.forEach(function (p, i) {
+      if (p._hopHex == null) p._hopHex = String(canonicalPath[i]);
+    });
+    return positions;
+  }
+
+  // Observers per edge across all paths, for the multi-path stroke weights and
+  // the "All" overlay. #673: built from the hide-1-byte filtered hop lists, so
+  // a hidden hop neither draws a guessed node nor splits its neighbours' edge.
+  function routeEdgeCounts(paths) {
+    const edgeCounts = {};
+    paths.forEach(function (p) {
+      const raw = p.path || [];
+      const hops = window.MC_filterPathHops ? window.MC_filterPathHops(raw) : raw;
+      for (let i = 0; i < hops.length - 1; i++) {
+        const key = hops[i] + '\u2192' + hops[i + 1];
+        edgeCounts[key] = (edgeCounts[key] || 0) + 1;
+      }
+    });
+    return edgeCounts;
+  }
+
+  // #929: the route-style views (drawPacketRoute, drawGPSTrail,
+  // drawEstimatedNodes) hide the node overlays while they are open, and their
+  // close buttons restore them. The heat layer stays built off the map in
+  // between; toggleHeatmap keeps a rebuilt one off too.
+  function hideRouteViewOverlays() {
+    routeViewOpen = true;
+    if (markerLayer) map.removeLayer(markerLayer);
+    if (clusterGroup) map.removeLayer(clusterGroup);
+    if (heatLayer) map.removeLayer(heatLayer);
+  }
+  function restoreRouteViewOverlays() {
+    routeViewOpen = false;
+    if (markerLayer) map.addLayer(markerLayer);
+    if (clusterGroup) map.addLayer(clusterGroup);
+    if (heatLayer) map.addLayer(heatLayer);
+  }
+
+  // #673: nothing of the route survives the 1-byte filter. Clear the layer
+  // and the sidebar, so a live toggle does not leave the previous route up.
+  function clearRouteView() {
+    if (routeLayer) routeLayer.clearLayers();
+    if (window.MeshRouteView && typeof window.MeshRouteView.clear === 'function') window.MeshRouteView.clear();
+  }
+
   async function drawPacketRoute(hopKeys, origin, opts) {
     // Defensive: origin must be an object with pubkey/lat/lon/name. A bare
     // string slips through both branches at lines below and silently no-ops
@@ -822,21 +1045,27 @@
     // (unique_prefix vs multi-byte vs gps_preference vs affinity scoring).
     // Falls back to naive nodes.filter() scan if the API is unreachable.
     let serverResolved = null;
-    try {
-      const hopList = (hopKeys || []).join(',');
-      const apiUrl = '/api/resolve-hops?hops=' + encodeURIComponent(hopList);
-      const resp = await fetch(apiUrl, { cache: 'no-cache' });
-      if (resp.ok) {
-        const json = await resp.json();
-        serverResolved = json && json.resolved ? json.resolved : null;
+    const alive = mapToken();
+    // #598 — the inferred hops already answer every position; asking
+    // /api/resolve-hops per prefix would only contradict them.
+    const inferred = opts.inferredHops && opts.inferredHops.length === hopKeys.length ? opts.inferredHops : null;
+    if (!inferred) {
+      try {
+        const hopList = (hopKeys || []).join(',');
+        const apiUrl = '/api/resolve-hops?hops=' + encodeURIComponent(hopList);
+        const resp = await fetch(apiUrl, { cache: 'no-cache' });
+        if (resp.ok) {
+          const json = await resp.json();
+          serverResolved = json && json.resolved ? json.resolved : null;
+        }
+      } catch (e) {
+        console.warn('resolve-hops API call failed, falling back to local nodes scan', e);
       }
-    } catch (e) {
-      console.warn('resolve-hops API call failed, falling back to local nodes scan', e);
     }
+    // #123: the map this route was requested for is gone.
+    if (!alive() || !map) return;
     // Hide default markers so only the route is visible
-    if (markerLayer) map.removeLayer(markerLayer);
-    if (clusterGroup) map.removeLayer(clusterGroup);
-    if (heatLayer) map.removeLayer(heatLayer);
+    hideRouteViewOverlays();
 
     routeLayer.clearLayers();
 
@@ -848,8 +1077,7 @@
       L.DomEvent.on(div, 'click', function (e) {
         L.DomEvent.preventDefault(e);
         routeLayer.clearLayers();
-        if (markerLayer) map.addLayer(markerLayer);
-        if (clusterGroup) map.addLayer(clusterGroup);
+        restoreRouteViewOverlays();
         map.removeControl(closeBtn);
         var container = map.getContainer();
         var legend = container.querySelector('.mc-route-legend');
@@ -875,7 +1103,7 @@
     // prefix/pubkey but has no GPS coords, we still want its name/role/pubkey
     // for the sidebar — flag it as {resolved:false, gpsless:true} so the
     // renderer can label it "no GPS" instead of "unresolved prefix".
-    const raw = hopKeys.map(hop => {
+    const raw = inferred ? inferredRouteHops(hopKeys, inferred) : hopKeys.map(hop => {
       const hopLower = String(hop).toLowerCase();
       // #1633 — tag the original hex token so MC_isVisibleHop can filter
       // 1-byte hops out of the polyline/sidebar when the customizer toggle
@@ -974,33 +1202,11 @@
     // Mark final hop as destination so the renderer applies the dest glyph.
     positions[positions.length - 1].isDest = true;
 
-    // #1633 — render-time 1-byte hop filter (default OFF). Origin / destination
-    // positions are added without _hopHex (they came from the payload, not the
-    // outer path bytes) and therefore always survive. Intermediate hops with a
-    // 1-byte _hopHex are dropped when the customizer toggle is ON.
-    //
-    // #1689 r1 (adv #2): if the filter drops every intermediate hop the result
-    // is a 2-point origin→dest polyline that is visually identical to a
-    // "direct delivery, no hops" route. Operators misread that as ground-truth
-    // direct path. To make the redaction LEGIBLE we tag the surviving
-    // positions with `_hopsHiddenCount` so the renderer can draw the polyline
-    // in a different style (dashed/lighter) and add a midpoint badge that
-    // reads "N hops hidden (1-byte)".
-    var hopsHiddenCount = 0;
-    if (window.MC_isVisibleHop && window.MC_getHide1ByteHops && window.MC_getHide1ByteHops()) {
-      var beforeCount = positions.length;
-      var beforeIntermediate = positions.filter(function (p) { return !!p._hopHex; }).length;
-      positions = positions.filter(function (p) {
-        return !p._hopHex || window.MC_isVisibleHop(p._hopHex);
-      });
-      var afterIntermediate = positions.filter(function (p) { return !!p._hopHex; }).length;
-      hopsHiddenCount = beforeIntermediate - afterIntermediate;
-      if (positions.length < beforeCount && positions.length >= 1) {
-        // Re-mark last surviving hop as destination if the original got dropped.
-        positions[positions.length - 1].isDest = true;
-      }
-      if (positions.length < 1) return;
-    }
+    // #1633 / #673 — drop 1-byte hops when the customizer toggle is ON.
+    const hidden = hide1ByteRoutePositions(positions);
+    positions = hidden.positions;
+    const hopsHiddenCount = hidden.hopsHiddenCount;
+    if (positions.length < 1) { clearRouteView(); return; }
 
     // Hand off to sequence-primary sequence-primary renderer (#1418), falling
     // back to the legacy role-aware MeshRoute (#1374), then to the minimal
@@ -1055,9 +1261,7 @@
   //    nearest-repeater proxy was from the sender's real position.
   function drawGPSTrail(points, opts) {
     opts = opts || {};
-    if (markerLayer) map.removeLayer(markerLayer);
-    if (clusterGroup) map.removeLayer(clusterGroup);
-    if (heatLayer) map.removeLayer(heatLayer);
+    hideRouteViewOverlays();
     routeLayer.clearLayers();
 
     const closeBtn = L.control({ position: 'topright' });
@@ -1067,8 +1271,7 @@
       L.DomEvent.on(div, 'click', function (e) {
         L.DomEvent.preventDefault(e);
         routeLayer.clearLayers();
-        if (markerLayer) map.addLayer(markerLayer);
-        if (clusterGroup) map.addLayer(clusterGroup);
+        restoreRouteViewOverlays();
         map.removeControl(closeBtn);
         const label = map.getContainer().querySelector('.mc-gps-trail-label');
         if (label) label.remove();
@@ -1157,9 +1360,11 @@
     return Math.min(0.75, 0.35 + contributorCount * 0.08);
   }
   function drawEstimatedNodes(points) {
-    if (markerLayer) map.removeLayer(markerLayer);
-    if (clusterGroup) map.removeLayer(clusterGroup);
-    if (heatLayer) map.removeLayer(heatLayer);
+    if (window.EstimatedPositions?.enabled() === false) {
+      showEstimatedPositionsDisabled();
+      return;
+    }
+    hideRouteViewOverlays();
     routeLayer.clearLayers();
 
     const closeBtn = L.control({ position: 'topright' });
@@ -1169,8 +1374,7 @@
       L.DomEvent.on(div, 'click', function (e) {
         L.DomEvent.preventDefault(e);
         routeLayer.clearLayers();
-        if (markerLayer) map.addLayer(markerLayer);
-        if (clusterGroup) map.addLayer(clusterGroup);
+        restoreRouteViewOverlays();
         map.removeControl(closeBtn);
         const label = map.getContainer().querySelector('.mc-estimated-nodes-label');
         if (label) label.remove();
@@ -1254,28 +1458,30 @@
 
     // Count hop & edge occurrences across all paths.
     const hopCounts = {};
-    const edgeCounts = {};
     paths.forEach(p => {
-      const hops = p.path || [];
-      hops.forEach(h => { hopCounts[h] = (hopCounts[h] || 0) + 1; });
-      for (let i = 0; i < hops.length - 1; i++) {
-        const key = hops[i] + '\u2192' + hops[i + 1];
-        edgeCounts[key] = (edgeCounts[key] || 0) + 1;
-      }
+      (p.path || []).forEach(h => { hopCounts[h] = (hopCounts[h] || 0) + 1; });
     });
+    const edgeCounts = routeEdgeCounts(paths);
 
-    // Resolve canonical hops via /api/resolve-hops + naive fallback.
+    // Resolve canonical hops: the inferred hops when given (#598), else
+    // /api/resolve-hops + naive fallback.
+    const inferred = opts.inferredHops && opts.inferredHops.length === canonicalPath.length ? opts.inferredHops : null;
+    const inferredRaw = inferred ? inferredRouteHops(canonicalPath, inferred) : null;
     let serverResolved = null;
-    try {
-      const apiUrl = '/api/resolve-hops?hops=' + encodeURIComponent(canonicalPath.join(','));
-      const resp = await fetch(apiUrl, { cache: 'no-cache' });
-      if (resp.ok) {
-        const json = await resp.json();
-        serverResolved = json && json.resolved ? json.resolved : null;
-      }
-    } catch (e) {}
+    const alive = mapToken();
+    if (!inferred) {
+      try {
+        const apiUrl = '/api/resolve-hops?hops=' + encodeURIComponent(canonicalPath.join(','));
+        const resp = await fetch(apiUrl, { cache: 'no-cache' });
+        if (resp.ok) {
+          const json = await resp.json();
+          serverResolved = json && json.resolved ? json.resolved : null;
+        }
+      } catch (e) {}
+    }
+    if (!alive() || !map) return; // #123
 
-    const raw = canonicalPath.map(hop => {
+    const raw = canonicalPath.map((hop, hopIdx) => {
       const hopLower = String(hop).toLowerCase();
       const srv = serverResolved && (serverResolved[hop] || serverResolved[hopLower] || serverResolved[hop.toUpperCase()]);
       // hopCounts is keyed on the SHORT prefix from observation paths (e.g. "37"),
@@ -1285,13 +1491,15 @@
       // contains an entry that is either an exact match OR a prefix of the hop's
       // full pubkey.
       let coverage = 0;
-      const hopFullKey = (srv && srv.pubkey) ? srv.pubkey.toLowerCase() : hopLower;
+      const hopFullKey = inferred ? String(inferred[hopIdx].pubkey || hop).toLowerCase()
+        : (srv && srv.pubkey) ? srv.pubkey.toLowerCase() : hopLower;
       paths.forEach(pth => {
         const phops = (pth.path || []).map(h => String(h).toLowerCase());
         const matches = phops.some(ph => ph === hopFullKey || hopFullKey.startsWith(ph) || ph.startsWith(hopFullKey));
         if (matches) coverage++;
       });
       const obsInfo = { observerCount: coverage || (hopCounts[hop] || 1), observerTotal: totalObservers };
+      if (inferredRaw) return Object.assign(inferredRaw[hopIdx], obsInfo);
       if (srv && srv.pubkey) {
         const c = srv.candidates && srv.candidates[0];
         if (c && c.lat != null && c.lon != null && !(c.lat === 0 && c.lon === 0)) {
@@ -1316,18 +1524,19 @@
     });
 
     if (raw.length < 1) return;
+    tagPathHopTokens(raw, canonicalPath); // #673
     if (origin && origin.pubkey) {
       const op = nodes.find(n => n.public_key.toLowerCase() === origin.pubkey.toLowerCase() ||
                                   n.public_key.toLowerCase().startsWith(origin.pubkey.toLowerCase()));
       if (op) {
         const hasGps = op.lat != null && op.lon != null && !(op.lat === 0 && op.lon === 0);
         if (hasGps) {
-          raw.unshift({ lat: op.lat, lon: op.lon, name: origin.name || op.name || 'Sender', pubkey: op.public_key, role: op.role || 'companion', resolved: true, isOrigin: true, observerCount: totalObservers, observerTotal: totalObservers });
+          raw.unshift({ lat: op.lat, lon: op.lon, name: origin.name || op.name || 'Sender', pubkey: op.public_key, role: op.role || 'companion', resolved: true, isOrigin: true, _fromPayload: true, observerCount: totalObservers, observerTotal: totalObservers });
         } else {
-          raw.unshift({ name: origin.name || op.name || 'Sender', pubkey: op.public_key, role: op.role || 'companion', resolved: false, gpsless: true, isOrigin: true, observerCount: totalObservers, observerTotal: totalObservers });
+          raw.unshift({ name: origin.name || op.name || 'Sender', pubkey: op.public_key, role: op.role || 'companion', resolved: false, gpsless: true, isOrigin: true, _fromPayload: true, observerCount: totalObservers, observerTotal: totalObservers });
         }
       } else if (origin.name) {
-        raw.unshift({ name: origin.name, pubkey: origin.pubkey, role: 'companion', resolved: false, isOrigin: true, observerCount: totalObservers, observerTotal: totalObservers });
+        raw.unshift({ name: origin.name, pubkey: origin.pubkey, role: 'companion', resolved: false, isOrigin: true, _fromPayload: true, observerCount: totalObservers, observerTotal: totalObservers });
       }
     }
     // #1418 Phase D: append destination (recipient from decoded.destHash) so
@@ -1341,21 +1550,26 @@
       if (dp) {
         const hasGps = dp.lat != null && dp.lon != null && !(dp.lat === 0 && dp.lon === 0);
         if (hasGps) {
-          raw.push({ lat: dp.lat, lon: dp.lon, name: opts.destination.name || dp.name || 'Recipient', pubkey: dp.public_key, role: dp.role || 'companion', resolved: true, observerCount: totalObservers, observerTotal: totalObservers });
+          raw.push({ lat: dp.lat, lon: dp.lon, name: opts.destination.name || dp.name || 'Recipient', pubkey: dp.public_key, role: dp.role || 'companion', resolved: true, _fromPayload: true, observerCount: totalObservers, observerTotal: totalObservers });
         } else {
-          raw.push({ name: opts.destination.name || dp.name || 'Recipient', pubkey: dp.public_key, role: dp.role || 'companion', resolved: false, gpsless: true, observerCount: totalObservers, observerTotal: totalObservers });
+          raw.push({ name: opts.destination.name || dp.name || 'Recipient', pubkey: dp.public_key, role: dp.role || 'companion', resolved: false, gpsless: true, _fromPayload: true, observerCount: totalObservers, observerTotal: totalObservers });
         }
       }
     }
-    raw[raw.length - 1].isDest = true;
-    if (raw[0]) raw[0].isOrigin = true;
+    // #673 — the same 1-byte filter as drawPacketRoute; before this the
+    // multi-observer route ignored the toggle entirely.
+    // MeshRouteView.render marks origin/destination by position index.
+    const hidden = hide1ByteRoutePositions(raw);
+    const routePositions = hidden.positions;
+    if (routePositions.length < 1) { clearRouteView(); return; }
 
     if (routeLayer) routeLayer.clearLayers();
 
     if (window.MeshRouteView && typeof window.MeshRouteView.render === 'function') {
-      window.MeshRouteView.render(map, routeLayer, raw, {
+      window.MeshRouteView.render(map, routeLayer, routePositions, {
         timestamp: opts.timestamp || Date.now(),
         multiPath: true,
+        hopsHiddenCount: hidden.hopsHiddenCount,
         totalObservers: totalObservers,
         edgeCounts: edgeCounts,
         packetHash: opts.packetHash || null,
@@ -1366,6 +1580,10 @@
     }
   }
   window.drawPacketRouteMulti = drawPacketRouteMulti;
+  // #673: the mc-hide-1byte-hops-changed listener re-issues single-observer
+  // routes through window.drawPacketRoute; without this export a live toggle
+  // never redrew them.
+  window.drawPacketRoute = drawPacketRoute;
 
   // #1418/#1419: deep-link loader. Reads URL params
   //   #/map?packet=<hash>&obs=<observation_id>
@@ -1373,7 +1591,47 @@
   // selected observation as canonical, and dispatches the same payload that
   // the packets-page 'View on map' button would have set in sessionStorage.
   // Without an obs param, the first observation is used.
+  // #608: extracted out of loadRouteFromDeepLink so the real production
+  // slicing is what a unit test exercises (window.__meshcoreMapInternals),
+  // not a hand-copied replica. #594: rawPayloadOffset (app.js) reads path_len
+  // behind the transport codes and rejects a path the firmware would not
+  // accept, so a crafted path_len cannot slice random body bytes into the
+  // srcHash/destHash UI fields.
+  // RESPONSE=1, TXT_MSG=2, ANON_REQ=7, PATH=8 — all carry hashes after the path.
+  const TYPES_WITH_DST_SRC = [1, 2, 7, 8];
+  function extractSrcDstFromRawHex(hex, payloadType) {
+    if (!hex || TYPES_WITH_DST_SRC.indexOf(payloadType) < 0) return { src: null, dst: null };
+    try {
+      const payOff = rawPayloadOffset(hex);
+      if (payOff == null) return { src: null, dst: null };
+      const destOff = payOff * 2;
+      if (hex.length < destOff + 2) return { src: null, dst: null };
+      const dst = hex.slice(destOff, destOff + 2).toUpperCase();
+      // ANON_REQ has no srcHash
+      let src = null;
+      if (payloadType !== 7 && hex.length >= destOff + 4) {
+        src = hex.slice(destOff + 2, destOff + 4).toUpperCase();
+      }
+      return { src, dst };
+    } catch (_) {
+      return { src: null, dst: null };
+    }
+  }
+  function extractChannelHashFromRawHex(hex, payloadType) {
+    if (!hex || payloadType !== 5) return null;
+    try {
+      const payOff = rawPayloadOffset(hex);
+      if (payOff == null) return null;
+      const chOff = payOff * 2;
+      if (hex.length < chOff + 2) return null;
+      return hex.slice(chOff, chOff + 2).toUpperCase();
+    } catch (_) {
+      return null;
+    }
+  }
+
   async function loadRouteFromDeepLink() {
+    const alive = mapToken();
     try {
       const hash = location.hash || '';
       const qs = hash.split('?')[1];
@@ -1393,6 +1651,7 @@
         return;
       }
       const data = await resp.json();
+      if (!alive()) return; // #123
       const pkt = data.packet || data;
       const observations = data.observations || pkt.observations || [];
       if (!observations.length) return;
@@ -1419,53 +1678,45 @@
       else if (decoded.srcHash) origin.pubkey = decoded.srcHash;
       if (decoded.adName || decoded.name) origin.name = decoded.adName || decoded.name;
       const destination = decoded.destHash ? { pubkey: decoded.destHash } : null;
-      // Resolve the chosen observation's hops (canonical path).
-      // Priority: 1) server-side `resolved_path` (authoritative, eyeball-
-      // validated against packet detail), 2) client-side HopResolver (used
-      // by packets.js — does observer-IATA-aware geographic disambiguation),
-      // 3) raw prefixes (worst case, leaves naive lookup to drawPacketRoute).
-      let chosenPath = [];
+      // #598 — infer the chosen observation's hops as ONE path, anchored on
+      // the observer that heard it: the same shared helper the packet detail
+      // pane uses (inferObservationPath), with the observation's own
+      // resolved_path as a hint. So the map and the detail pane name the same
+      // node at every position, and a hop no listed node fits stays an
+      // `unlisted` placeholder instead of the nearest node sharing its prefix.
+      // Without the resolver the raw prefixes go to the renderers' own lookup.
       let rawHops = [];
       try { rawHops = JSON.parse(chosen.path_json || '[]'); } catch (_) {}
-      let resolvedHops = null;
-      try {
-        if (chosen.resolved_path) {
-          resolvedHops = typeof chosen.resolved_path === 'string' ? JSON.parse(chosen.resolved_path) : chosen.resolved_path;
-        }
-      } catch (_) {}
-      if (Array.isArray(resolvedHops) && resolvedHops.length === rawHops.length) {
-        chosenPath = rawHops.map((h, i) => resolvedHops[i] || h);
-      } else if (window.HopResolver && typeof window.HopResolver.resolve === 'function' && rawHops.length) {
-        // Use the SAME resolver the packets page uses, so route view and
-        // packet detail agree on hop identities.
+      let inferredHops = null;
+      if (rawHops.length && window.HopResolver && window.inferObservationPath) {
         try {
-          // Sender + observer hints help disambiguation
-          const senderLat = decoded.lat || decoded.latitude || null;
-          const senderLon = decoded.lon || decoded.longitude || null;
-          let obsLat = null, obsLon = null;
-          // Try to find observer's coords for geographic affinity scoring
-          if (chosen.observer_id && Array.isArray(nodes)) {
-            const obs = nodes.find(n => (n.public_key || '').toLowerCase() === String(chosen.observer_id).toLowerCase());
-            if (obs && obs.lat != null && obs.lon != null) { obsLat = obs.lat; obsLon = obs.lon; }
-          }
-          // HopResolver.init may already have been done by packets.js; if not,
-          // do a minimal init from window data we have.
-          if (!window.HopResolver.ready || !window.HopResolver.ready()) {
-            try {
-              window.HopResolver.init(nodes || [], { observers: [], iataCoords: {} });
-            } catch (_) {}
-          }
-          const resolveResult = window.HopResolver.resolve(rawHops, senderLat, senderLon, obsLat, obsLon, chosen.observer_id);
-          chosenPath = rawHops.map(h => {
-            const r = resolveResult ? resolveResult[h] : null;
-            return r && r.pubkey ? r.pubkey : h;
-          });
-        } catch (_) {
-          chosenPath = rawHops;
+          // #598 r2 F5 — the FULL catalogue, through the shared helper. `nodes`
+          // here is the map's own filtered list (lastHeard + area), and
+          // indexing that would have left a packets page visited afterwards
+          // inferring hops from a narrower catalogue than a cold visit.
+          await window.ensureHopCatalogue();
+          if (!alive()) return; // #123
+          // The neighbour graph is evidence, not a prerequisite. A fresh map
+          // page waits for it so its route matches a detail pane opened later;
+          // arriving from a packet detail it is already loaded.
+          await window.ensureHopAffinity();
+          if (!alive()) return; // #123
+          const obsKey = String(chosen.observer_id || '').toLowerCase();
+          const ob = (observers || []).find(o => String(o.id).toLowerCase() === obsKey) ||
+            window.hopObservers().find(o => String(o.id).toLowerCase() === obsKey) ||
+            (nodes || []).find(n => (n.public_key || '').toLowerCase() === obsKey);
+          const obsPos = ob && ob.lat != null && ob.lon != null ? { lat: ob.lat, lon: ob.lon } : null;
+          // #598 r2 F5 — the same sender resolution the detail pane does, not
+          // decoded.lat alone: a GRP_TXT or TXT_MSG carries no GPS, so the two
+          // views anchored hop 0 differently.
+          const originPos = await window.senderPosition(decoded);
+          if (!alive()) return; // #123
+          inferredHops = inferObservationPath(chosen, obsPos, originPos);
+        } catch (e) {
+          console.warn('[deep-link] path inference failed', e);
         }
-      } else {
-        chosenPath = rawHops;
       }
+      const chosenPath = inferredHops ? rawHops.map((h, i) => inferredHops[i].pubkey || h) : rawHops;
       // All observation paths for multi-path stroke weighting
       const allPaths = observations.map(o => {
         let p = [];
@@ -1493,46 +1744,21 @@
       const inferredType = decoded.type || PAYLOAD_TYPE_MAP[pkt.payload_type] || 'OTHER';
       // Try to peek at raw_hex bytes to extract src/destHash when decoded is empty.
       // TXT_MSG/REQ/RESPONSE/ANON_REQ all have the same wire layout:
-      //   byte0=route+type, byte1=path_len, then path bytes, then destHash + srcHash + encrypted body.
+      //   header, [4 transport-code bytes on routes 0/3], path_len, path bytes,
+      //   then destHash + srcHash + encrypted body.
       // ANON_REQ doesn't have a srcHash byte (sender is anonymous), only destHash.
       let inferredSrc = decoded.srcHash || null;
       let inferredDst = decoded.destHash || null;
-      const TYPES_WITH_DST_SRC = [1, 2, 7, 8]; // RESPONSE=1, TXT_MSG=2, ANON_REQ=7, PATH=8 — all carry hashes
-      if ((!inferredSrc || !inferredDst) && chosen.raw_hex && TYPES_WITH_DST_SRC.indexOf(pkt.payload_type) >= 0) {
-        try {
-          const hex = chosen.raw_hex;
-          // MeshCore wire max for path length is 64 hops. Cap defensively:
-          // a crafted ingest packet with pathLen=200 would slice random body
-          // bytes into the srcHash/destHash UI fields. Guard before use.
-          const pathLen = parseInt(hex.slice(2, 4), 16);
-          if (!Number.isFinite(pathLen) || pathLen < 0 || pathLen > 64) {
-            throw new Error('pathLen out of range: ' + pathLen);
-          }
-          const destOff = 4 + pathLen * 2;
-          if (hex.length >= destOff + 2) {
-            inferredDst = inferredDst || hex.slice(destOff, destOff + 2).toUpperCase();
-            // ANON_REQ has no srcHash
-            if (pkt.payload_type !== 7 && hex.length >= destOff + 4) {
-              inferredSrc = inferredSrc || hex.slice(destOff + 2, destOff + 4).toUpperCase();
-            }
-          }
-        } catch (_) {}
+      if ((!inferredSrc || !inferredDst) && chosen.raw_hex) {
+        const r = extractSrcDstFromRawHex(chosen.raw_hex, pkt.payload_type);
+        inferredDst = inferredDst || r.dst;
+        inferredSrc = inferredSrc || r.src;
       }
       // GRP_TXT: channel_hash byte sits right after path bytes in raw_hex.
-      // Layout: byte0=route+type, byte1=path_len, path bytes, channel_hash, encrypted body.
+      // Layout: header, [transport codes], path_len, path bytes, channel_hash, encrypted body.
       let inferredChannelHash = decoded.channelHashHex || null;
-      if (!inferredChannelHash && chosen.raw_hex && pkt.payload_type === 5) {
-        try {
-          const hex = chosen.raw_hex;
-          const pathLen = parseInt(hex.slice(2, 4), 16);
-          if (!Number.isFinite(pathLen) || pathLen < 0 || pathLen > 64) {
-            throw new Error('pathLen out of range: ' + pathLen);
-          }
-          const chOff = 4 + pathLen * 2;
-          if (hex.length >= chOff + 2) {
-            inferredChannelHash = hex.slice(chOff, chOff + 2).toUpperCase();
-          }
-        } catch (_) {}
+      if (!inferredChannelHash && chosen.raw_hex) {
+        inferredChannelHash = extractChannelHashFromRawHex(chosen.raw_hex, pkt.payload_type);
       }
       const pktCtx = {
         type: inferredType,
@@ -1541,7 +1767,10 @@
         srcResolvedName: inferredSrc ? resolveNameByHash(inferredSrc) : null,
         destResolvedName: inferredDst ? resolveNameByHash(inferredDst) : null,
         observedHops: chosenPath.length,
-        observationCount: observations.length
+        observationCount: observations.length,
+        // #674: the route view's Mark-mode badge reads the hash size from the
+        // chosen observation's own header byte.
+        pathHashSize: window.MC_packetHashSize ? window.MC_packetHashSize(chosen.raw_hex || pkt.raw_hex) : 0
       };
       // GRP_TXT: try to resolve the channel name from /api/channels.
       if (inferredType === 'GRP_TXT' && inferredChannelHash) {
@@ -1605,6 +1834,7 @@
           } catch (_) {}
         }
       }
+      if (!alive()) return; // #123: left during the channel lookups
       if (allPaths.length === 0) {
         // Polish review (doshi #1423): operator clicked a ?packet=<hash> URL
         // but every observation had an empty path. Previously this bailed
@@ -1628,12 +1858,13 @@
         return;
       }
       if (allPaths.length === 1) {
-        drawPacketRoute(chosenPath, origin, { destination: destination, packetHash: packetHash, observationId: obsId, packetContext: pktCtx });
+        drawPacketRoute(chosenPath, origin, { destination: destination, packetHash: packetHash, observationId: obsId, packetContext: pktCtx, inferredHops: inferredHops });
       } else {
         drawPacketRouteMulti(allPaths, origin, {
           packetHash: packetHash,
           observationId: obsId,
           canonicalPath: chosenPath,
+          inferredHops: inferredHops,
           destination: destination,
           packetContext: pktCtx
         });
@@ -1651,13 +1882,26 @@
   // deployment's current estimate), the URL alone is enough to
   // reproduce the view -- share/bookmark/reload all just work.
   async function loadEstimatedNodesFromDeepLink() {
+    const alive = mapToken();
     try {
+      if (window.MeshConfigReady) await window.MeshConfigReady;
+      if (!alive()) return;
+      if (window.EstimatedPositions?.enabled() === false) {
+        showEstimatedPositionsDisabled();
+        return;
+      }
       const resp = await fetch('/api/analytics/areas');
+      if (!alive()) return; // #123
       if (!resp.ok) {
         console.warn('[deep-link] /api/analytics/areas returned ' + resp.status);
         return;
       }
       const data = await resp.json();
+      if (!alive()) return;
+      if (window.EstimatedPositions?.enabled(data) === false) {
+        showEstimatedPositionsDisabled();
+        return;
+      }
       const points = (data && Array.isArray(data.estimatedNodes)) ? data.estimatedNodes : [];
       drawEstimatedNodes(points);
     } catch (e) {
@@ -1665,20 +1909,102 @@
     }
   }
 
-  async function loadNodes() {
+  // Keep the ordinary, reported-GPS markers visible for a disabled deep link.
+  // This is not the empty-estimates state, and must not replace the base map.
+  function showEstimatedPositionsDisabled() {
+    const container = map.getContainer();
+    let label = container.querySelector('.mc-estimated-nodes-label');
+    if (!label) {
+      label = document.createElement('div');
+      label.className = 'mc-estimated-nodes-label';
+      label.style.cssText = 'position:absolute;top:10px;left:50px;right:10px;z-index:1000;background:var(--input-bg);color:var(--text);padding:4px 10px;border-radius:4px;font-size:12px';
+      container.appendChild(label);
+    }
+    label.textContent = window.EstimatedPositions.disabledMessage;
+  }
+
+  // #123: every call is a new request generation; only the newest request
+  // of the current mount renders. A superseded call resolves when the newest
+  // one does, so callers chaining on loadNodes() still see loaded nodes.
+  function loadNodes() {
+    const p = loadNodesRequest(++nodesLoadGeneration, mapToken());
+    nodesLoadPromise = p;
+    return p;
+  }
+
+  // The boundary colour, from the theme ('' leaves Leaflet's default).
+  function boundaryColor() {
+    return getComputedStyle(document.documentElement).getPropertyValue('--geo-filter-color').trim();
+  }
+
+  // On a phone (the width the panel starts collapsed at) the controls panel
+  // covers the map.
+  function isPhoneControls() { return window.innerWidth <= 640; }
+
+  function setControlsCollapsed(v) {
+    const panel = document.getElementById('mapControls');
+    const toggle = document.getElementById('mapControlsToggle');
+    controlsCollapsed = !!v;
+    if (panel) panel.classList.toggle('collapsed', controlsCollapsed);
+    if (toggle) toggle.setAttribute('aria-expanded', String(!controlsCollapsed));
+  }
+
+  // The one selected boundary (#740 plan §4.6): the Area outline if an Area
+  // is set, otherwise the DAGI one (polygonQuery() is '' for none or an
+  // unchecked code), shown or hidden by the one checkbox. fit: only on a
+  // user's DAGI pick, and only when the DAGI outline is the one drawn.
+  function refreshBoundary(fit) {
+    if (!map) return;
+    const dagiQ = dagiOutline && window.DagiFilter ? DagiFilter.polygonQuery() : '';
+    const sel = { area: !!selectedAreaLayer || areaBoundaryPending, dagi: dagiQ };
+    const which = window.DagiOutline ? DagiOutline.chooseBoundary(sel) : (sel.area ? 'area' : 'none');
+    const on = localStorage.getItem(BOUNDARY_KEY) !== 'false';
+    const label = document.getElementById('mcSelectedAreaLabel');
+    const checkbox = document.getElementById('mcSelectedArea');
+    const drawable = which === 'dagi' || (which === 'area' && !!selectedAreaLayer);
+    if (label) label.style.display = drawable ? '' : 'none';
+    if (checkbox) checkbox.checked = on;
+    if (selectedAreaLayer) {
+      if (which === 'area' && on) selectedAreaLayer.addTo(map);
+      else map.removeLayer(selectedAreaLayer);
+    }
+    if (!dagiOutline) return;
+    if (which === 'dagi') {
+      dagiOutline.setVisible(on);
+      dagiOutline.show(dagiQ, { fit: fit });
+    } else {
+      dagiOutline.clear();
+    }
+  }
+
+  async function loadNodesRequest(req, alive) {
+    const current = () => alive() && req === nodesLoadGeneration && !!map;
+    const stale = () => (alive() ? nodesLoadPromise : undefined);
+    if (!map) return;
     try {
       // Load regions from config + observed IATAs
-      try { REGION_NAMES = await api('/config/regions', { ttl: 3600 }); } catch {}
+      let regions = REGION_NAMES;
+      try { regions = await api('/config/regions', { ttl: 3600 }); } catch {}
+      if (!current()) return stale();
+      REGION_NAMES = regions;
 
       const aqs = AreaFilter.areaQueryString();
+      // #740 M3b: a DAGI code is sent only once /api/config/dagi has checked it.
+      if (window.DagiFilter) {
+        await DagiFilter.ready();
+        if (!current()) return stale();
+      }
+      const dqs = window.DagiFilter ? DagiFilter.queryString() : '';
       // Paginate past the server's per-request node cap (listLimits.nodesMax)
       // so actively-relaying repeaters that last advertised hours ago still
       // appear instead of being truncated by the top-N window. See fetchAllNodes.
-      const data = await fetchAllNodes(`&lastHeard=${filters.lastHeard}${aqs}`, { ttl: CLIENT_TTL.nodeList });
-      nodes = data.nodes || [];
+      const data = await fetchAllNodes(`&lastHeard=${filters.lastHeard}${aqs}${dqs}`, { ttl: CLIENT_TTL.nodeList });
+      if (!current()) return stale();
 
       // Load observers for jump buttons + map markers
       const obsData = await api('/observers', { ttl: CLIENT_TTL.observers });
+      if (!current()) return stale();
+      nodes = data.nodes || [];
       observers = obsData.observers || [];
 
       buildRoleChecks(data.counts || {});
@@ -1707,15 +2033,19 @@
       if (targetNodeKey) {
         const targetNode = nodes.find(n => n.public_key === targetNodeKey);
         if (targetNode && targetNode.lat && targetNode.lon) {
+          // #979: once. A later reload (every ADVERT batch) would move the
+          // view back and take over the popup the user has opened since.
+          const targetKey = targetNodeKey;
+          targetNodeKey = null;
           map.setView([targetNode.lat, targetNode.lon], 14);
           // Delay popup open slightly — Leaflet needs the map to settle after setView
-          setTimeout(() => {
+          mapTimeout(() => {
             let found = false;
             const findIn = function (layer) {
               if (found || !layer || !layer.eachLayer) return;
               layer.eachLayer(m => {
                 if (found) return;
-                if (m._nodeKey === targetNodeKey && m.openPopup) {
+                if (m._nodeKey === targetKey && m.openPopup) {
                   m.openPopup();
                   found = true;
                 }
@@ -1723,7 +2053,7 @@
             };
             findIn(markerLayer);
             if (!found) findIn(clusterGroup);
-            if (!found) console.warn('[map] Target node marker not found:', targetNodeKey);
+            if (!found) console.warn('[map] Target node marker not found:', targetKey);
           }, 500);
         }
       }
@@ -1748,12 +2078,14 @@
       // Don't fitBounds on initial load — respect the Bay Area default or saved view
       // Only fitBounds on subsequent data refreshes if user hasn't manually panned
     } catch (e) {
+      if (!current()) return stale();
       console.error('Map load error:', e);
     } finally {
       // Always signal data-loaded — even on error — so E2E tests can proceed.
-      // Otherwise an api() failure leaves the test waiting forever.
+      // Otherwise an api() failure leaves the test waiting forever. Only the
+      // current request signals it (#123).
       var mapContainer = document.getElementById('leaflet-map');
-      if (mapContainer) mapContainer.setAttribute('data-loaded', 'true');
+      if (mapContainer && current()) mapContainer.setAttribute('data-loaded', 'true');
     }
   }
 
@@ -1806,12 +2138,13 @@
   // Pure predicate for the Byte Size filter — shared by renderMarkers and
   // the Important Links overlay (renderTopRoutes) so the two never drift.
   // Applies only to the repeater role (byteSize is a repeater-only concept);
-  // every other role always passes. Missing hash_size falls back to 1,
-  // matching makeRepeaterLabelIcon's hash-length fallback.
+  // every other role always passes. An unknown hash size is bucketed with
+  // 1-byte, as before #807: the label shows its 1-byte prefix (marked as
+  // unknown), and this filter selects, it does not claim a size.
   function nodePassesByteSizeFilter(node, byteSize) {
     if (byteSize === 'all') return true;
     if ((node.role || 'companion') !== 'repeater') return true;
-    const hs = node.hash_size || 1;
+    const hs = getKnownHashSize(node) || 1;
     return String(hs) === byteSize;
   }
 
@@ -1990,6 +2323,8 @@
   }
 
   var _renderingMarkers = false;
+  var _clusterAdd = null;      // #979: the cluster group's chunked add in flight
+  var _renderQueued = false;   // #979: renderMarkers was called during it
   var _lastDeconflictZoom = null;
   var _currentMarkerData = []; // stored marker data for zoom-only repositioning
   var _observerByPubkey = new Map(); // observer id (pubkey) → observer object, rebuilt on each render
@@ -2105,11 +2440,118 @@
 
   function renderMarkers() {
     if (_renderingMarkers) return;
+    // #979: a reload (an ADVERT batch → loadNodes) or a filter change must
+    // not close the popup the user has open. Leaflet closes a popup when its
+    // marker leaves the map (bindPopup's remove handler), and the rebuild
+    // below takes every marker off; for the open one that handler is off
+    // meanwhile, and the marker is put back in its node's place. The popup
+    // closes after all if its node is gone, filtered out or clustered.
+    // With clustering on, the markers go on the map at the end of the
+    // cluster group's chunked add, which may be a few chunks later: the
+    // popup is settled then (endClusterAdd).
+    if (_clusterAdd) {
+      // A rebuild now would clear the group under that add, and the add
+      // would go on putting the old markers in. It runs when the add ends,
+      // once for any number of calls. An add whose group has left the map
+      // (clustering off, the page gone) never ends: it is dropped.
+      if (clusterGroup && map && map.hasLayer(clusterGroup)) { _renderQueued = true; return; }
+      dropClusterAdd();
+      _renderQueued = false;
+    }
     _renderingMarkers = true;
-    try { _renderMarkersInner(); } finally { _renderingMarkers = false; }
+    var keep = openPopupMarker();
+    // #982: clearLayers() folds a spider back into its cluster; the popup's
+    // marker goes back in there too, and the spider is opened again for it.
+    var spider = !!(keep && keep._preSpiderfyLatlng);
+    if (keep) keep.off('remove', keep.closePopup);
+    try { _renderMarkersInner(keep); } finally {
+      _renderingMarkers = false;
+      if (_clusterAdd) { _clusterAdd.keep = keep; _clusterAdd.spider = spider; }
+      else settleKeptPopup(keep, spider);
+    }
+    // #681 M4: markers are rebuilt on every filter change; re-attach the
+    // profile pickers to the new ones. A no-op unless the tool is armed.
+    profileSyncPickers();
   }
 
-  function _renderMarkersInner() {
+  /* #979: Leaflet's close goes back on the kept marker, and the popup
+   * closes after all if its marker is not on the map (its node gone,
+   * filtered out or clustered). #982: a marker that was a spiderfied
+   * cluster child gets its spider back first. */
+  function settleKeptPopup(keep, spider) {
+    if (!keep) return;
+    keep.on('remove', keep.closePopup);
+    if (spider && map && !map.hasLayer(keep) && clusterGroup && map.hasLayer(clusterGroup)) {
+      var cluster = clusterGroup.getVisibleParent(keep);
+      if (cluster && cluster !== keep && cluster.spiderfy) cluster.spiderfy();
+    }
+    if (!map || !map.hasLayer(keep)) keep.closePopup();
+  }
+
+  /* #979: adds a rebuild's markers to the cluster group. Its chunked add
+   * puts in up to chunkInterval ms of markers, then the rest from a timeout
+   * (2,000 nodes on a slow phone take several), and the markers go on the
+   * map after its chunkProgress(total, total) call. markercluster reads that
+   * callback when the add starts, so each add gets its own, and _clusterAdd
+   * is that add's until it ends. */
+  function addClusterMarkers(markers) {
+    var add = { keep: null, spider: false, done: false, chunks: 0 };
+    clusterGroup.options.chunkProgress = function (processed, total) {
+      add.chunks++;
+      if (processed !== total) { watchClusterChunk(add); return; }
+      if (add.done) return;
+      add.done = true;
+      Promise.resolve().then(function () { endClusterAdd(add); });
+    };
+    clusterGroup.addLayers(markers);
+    // All in the first chunk: on the map already, renderMarkers settles it.
+    if (!add.done) _clusterAdd = add;
+  }
+
+  function endClusterAdd(add) {
+    if (_clusterAdd !== add) return;
+    _clusterAdd = null;
+    settleKeptPopup(add.keep, add.spider);
+    if (_renderQueued) { _renderQueued = false; renderMarkers(); }
+  }
+
+  /* #982: markercluster runs an add's next chunk from a timeout it sets
+   * just after this chunk's chunkProgress. A check set after that one, from
+   * a microtask, with the same delay, runs after that chunk; if the chunk
+   * threw (a bug in marker or icon code), it never reported, and the add
+   * would stay in flight for good, every later rebuild queued behind it.
+   * The dead add is let go: the rebuild asked for meanwhile runs, or else
+   * the popup is settled. One timeout per chunk; none for a one-chunk add. */
+  function watchClusterChunk(add) {
+    var seen = add.chunks, delay = clusterGroup.options.chunkDelay;
+    Promise.resolve().then(function () {
+      setTimeout(function () {
+        if (add.chunks !== seen || add.done || _clusterAdd !== add) return;
+        dropClusterAdd();
+        if (_renderQueued) { _renderQueued = false; renderMarkers(); }
+        else settleKeptPopup(add.keep, add.spider);
+      }, delay);
+    });
+  }
+
+  /* dropClusterAdd lets go of the add in flight, which will never end: its
+   * kept marker gets Leaflet's close back. */
+  function dropClusterAdd() {
+    var keep = _clusterAdd.keep;
+    _clusterAdd = null;
+    if (keep) keep.on('remove', keep.closePopup);
+  }
+
+  /* #979: the marker whose popup is open, if it is a node's or an
+   * observer's, else null. */
+  function openPopupMarker() {
+    var p = map && map._popup;
+    var src = p && p.isOpen() && p._source;
+    return src && src._nodeKey ? src : null;
+  }
+
+  /* keep: the open popup's marker (renderMarkers), reused for its node. */
+  function _renderMarkersInner(keep) {
     // Don't clear what doesn't exist (map first loading will throw null error)
     if (markerLayer) {
       markerLayer.clearLayers();
@@ -2203,12 +2645,28 @@
 
     var useCluster = filters.clustering && clusterGroup;
     var clusterMarkers = [];
+    var kept = null;
     for (const m of allMarkers) {
       const pos = (useCluster ? m.latLng : (m.adjustedLatLng || m.latLng));
-      const marker = L.marker(pos, { icon: m.icon, alt: m.alt });
-      marker._nodeKey = m.node.public_key || m.node.id || null;
-      marker._role = (m.node && m.node.role) || 'companion';
-      marker.bindPopup(m.popupFn(), { maxWidth: 280 });
+      const key = m.node.public_key || m.node.id || null;
+      let marker;
+      if (keep && !kept && key === keep._nodeKey) {
+        // #979: the open popup's marker takes this node's place and look
+        // (it is off the map, so the icon is only noted until it is added).
+        // Its popup is left as it is, actions and all; the new content goes
+        // in on its next open (onNodePopupOpen).
+        marker = kept = keep;
+        if (!marker.getLatLng().equals(pos)) marker.setLatLng(pos);
+        marker.options.alt = m.alt;
+        marker.setIcon(m.icon);
+        marker._role = (m.node && m.node.role) || 'companion';
+        marker._stalePopupFn = m.popupFn;
+      } else {
+        marker = L.marker(pos, { icon: m.icon, alt: m.alt });
+        marker._nodeKey = key;
+        marker._role = (m.node && m.node.role) || 'companion';
+        marker.bindPopup(m.popupFn(), { maxWidth: 280 });
+      }
       m._leafletMarker = marker;
       m._leafletLine = null;
       m._leafletDot = null;
@@ -2221,7 +2679,7 @@
       }
     }
     if (useCluster && clusterMarkers.length > 0) {
-      clusterGroup.addLayers(clusterMarkers);
+      addClusterMarkers(clusterMarkers);
     }
   }
 
@@ -2252,33 +2710,39 @@
   async function selectReferenceNode(pubkey, name) {
     selectedReferenceNode = pubkey;
     neighborPubkeys = new Set();
+    // #123: fill a local set and publish it only if this mount and this
+    // selection are still current when the lookups return.
+    const alive = mapToken();
+    const found = new Set();
     try {
       // Use affinity-based neighbor API (server-side disambiguation) instead of
       // client-side path walking which fails on hash collisions (#484)
       const data = await api('/nodes/' + pubkey + '/neighbors?min_count=3');
       for (const n of (data.neighbors || [])) {
-        if (n.pubkey) neighborPubkeys.add(n.pubkey);
+        if (n.pubkey) found.add(n.pubkey);
         // For ambiguous edges, include all candidates (better to show extra than miss)
-        if (n.candidates) n.candidates.forEach(function(c) { if (c.pubkey) neighborPubkeys.add(c.pubkey); });
+        if (n.candidates) n.candidates.forEach(function(c) { if (c.pubkey) found.add(c.pubkey); });
       }
       // If affinity data is insufficient, fall back to client-side path walking
-      if (neighborPubkeys.size === 0) {
+      if (found.size === 0) {
         const pathData = await api('/nodes/' + pubkey + '/paths');
         const paths = pathData.paths || [];
         for (const p of paths) {
           const hops = p.hops || [];
           for (var i = 0; i < hops.length; i++) {
             if (hops[i].pubkey === pubkey) {
-              if (i > 0 && hops[i - 1].pubkey) neighborPubkeys.add(hops[i - 1].pubkey);
-              if (i < hops.length - 1 && hops[i + 1].pubkey) neighborPubkeys.add(hops[i + 1].pubkey);
+              if (i > 0 && hops[i - 1].pubkey) found.add(hops[i - 1].pubkey);
+              if (i < hops.length - 1 && hops[i + 1].pubkey) found.add(hops[i + 1].pubkey);
             }
           }
         }
       }
     } catch (e) {
       console.warn('Failed to fetch neighbors for', pubkey, ':', e);
-      neighborPubkeys = new Set();
+      found.clear();
     }
+    if (!alive() || selectedReferenceNode !== pubkey) return;
+    neighborPubkeys = found;
     // Update sidebar UI
     const refEl = document.getElementById('mcNeighborRef');
     const refNameEl = document.getElementById('mcNeighborRefName');
@@ -2297,6 +2761,9 @@
     var link = e.target.closest('[data-show-neighbors]');
     if (link) {
       e.preventDefault();
+      // #979: the popup has done its job; on a phone it would cover half
+      // of the neighbours shown (a refresh no longer closes it).
+      if (map) map.closePopup();
       selectReferenceNode(link.dataset.pubkey, link.dataset.name);
     }
   });
@@ -2312,10 +2779,13 @@
     // Check if this node is also an observer (combined repeater+observer)
     const matchingObs = node.public_key ? _observerByPubkey.get(node.public_key.toLowerCase()) : null;
     const obsBadge = matchingObs ? ` <span style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;background:${ROLE_COLORS.observer || '#f1c40f'};color:#fff;">OBSERVER</span>` : '';
-    const hs = node.hash_size || 1;
+    // #807: unknown size shows the 1-byte prefix and says the size is unknown.
+    const knownHs = getKnownHashSize(node);
+    const hs = knownHs || 1;
     const hashPrefix = node.public_key ? node.public_key.slice(0, hs * 2).toUpperCase() : '—';
+    const hsNote = knownHs ? `(${knownHs}B)` : '(size unknown)';
     const hashPrefixRow = `<dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Hash Prefix</dt>
-          <dd style="font-family:var(--mono);font-size:11px;font-weight:700;margin-left:88px;padding:2px 0;">${safeEsc(hashPrefix)} <span style="font-weight:400;color:var(--text-muted);">(${hs}B)</span></dd>`;
+          <dd style="font-family:var(--mono);font-size:11px;font-weight:700;margin-left:88px;padding:2px 0;">${safeEsc(hashPrefix)} <span style="font-weight:400;color:var(--text-muted);">${hsNote}</span></dd>`;
     // Multi-byte support indicator for repeaters
     var mbRow = '';
     if (node.role === 'repeater' && node.multi_byte_status) {
@@ -2326,7 +2796,7 @@
     }
 
     return `
-      <div class="map-popup" style="font-family:var(--font);min-width:180px;">
+      <div class="map-popup" data-node-popup style="font-family:var(--font);min-width:180px;">
         <h3 style="font-weight:700;font-size:14px;margin:0 0 4px;">${safeEsc(node.name || 'Unknown')}</h3>
         ${roleBadge}${obsBadge}
         <dl style="margin-top:8px;font-size:12px;">
@@ -2341,11 +2811,125 @@
           <dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Adverts</dt>
           <dd style="margin-left:88px;padding:2px 0;">${node.advert_count || 0}</dd>
         </dl>
-        <div style="margin-top:8px;clear:both;">
+        <div class="map-popup-links" style="margin-top:8px;clear:both;">
           <a href="#/nodes/${node.public_key}" style="color:var(--link-color);font-size:12px;">View Node →</a>
           ${node.public_key ? ` · <a href="javascript:void(0)" role="button" data-show-neighbors data-pubkey="${escapeHtml(node.public_key)}" data-name="${escapeHtml(node.name || 'Unknown')}" style="color:var(--link-color);font-size:12px;cursor:pointer;">Show Neighbors</a>` : ''}
         </div>
       </div>`;
+  }
+
+  /* findNodeByKey answers the Map page's node with that public key, any
+   * case, or null. One O(n) scan, only ever on a user's action. */
+  function findNodeByKey(key) {
+    var want = String(key || '').toLowerCase();
+    for (var i = 0; i < nodes.length; i++) {
+      if ((nodes[i].public_key || '').toLowerCase() === want) return nodes[i];
+    }
+    return null;
+  }
+
+  /* #959: the node popup offers node detail's Terrain profile and
+   * Predicted reach (roles.js nodeToolActions), built as DOM when a popup
+   * opens: the popup string never carries a node field into an action, and
+   * a marker that is never opened costs nothing. One lookup per open. */
+  function onNodePopupOpen(e) {
+    refreshStalePopup(e.popup);
+    var box = e.popup && e.popup.getElement() && e.popup.getElement().querySelector('.map-popup[data-node-popup]');
+    var key = e.popup && e.popup._source && e.popup._source._nodeKey;
+    if (!box || !key || typeof window.nodeToolActions !== 'function') return;
+    var node = findNodeByKey(key);
+    if (!node) return;
+    var popup = e.popup, row = document.createElement('div');
+    row.className = 'map-popup-tools';
+    box.appendChild(row);
+    Promise.all(window.nodeToolActions(node).map(function (a) {
+      return window.mountConfigAction(row, a.testid, function () {
+        var action = a.build();
+        if (action) action.addEventListener('click', function (ev) { onPopupToolClick(ev, a.testid, action); });
+        return action;
+      });
+    })).then(function () {
+      if (row.firstChild && popup.isOpen()) popupRefit(popup);
+    });
+  }
+
+  /* #979: a popup kept open through a reload went on showing the data it
+   * opened with; the reload left the newer content on its marker, and it
+   * goes in now, before the actions are added. */
+  function refreshStalePopup(popup) {
+    var src = popup && popup._source;
+    if (!src || typeof src._stalePopupFn !== 'function') return;
+    var fn = src._stalePopupFn;
+    src._stalePopupFn = null;
+    popup.setContent(fn());
+  }
+
+  /* onPopupSheet marks #map-wrap while a popup is open. On a phone the
+   * reach's bottom sheet (z-index above Leaflet's panes) covers the lower
+   * half of the map, and a node popup with its actions is taller than the
+   * map left above the sheet, so no pan can clear it: the sheet steps aside
+   * (style.css) until the popup closes, and the reach stays on the map. */
+  function onPopupSheet(e) {
+    var wrap = document.getElementById('map-wrap');
+    if (wrap) wrap.classList.toggle('has-map-popup', e.type === 'popupopen');
+  }
+
+  /* #982: a phone's browser moves a tap that lands beside a tappable
+   * element onto it (touch adjustment), so a finger on bare map next to a
+   * marker opens that marker. With a popup open, on a map dense enough to
+   * leave little bare map, that tap is the user closing it: it closes the
+   * popup instead. The finger's own point comes with the pointerdown; a
+   * tap on the marker's icon, and any tap with no popup open, is left as
+   * it was. */
+  var _touchDown = null;
+  function onMapPointerDown(e) {
+    _touchDown = e.pointerType === 'touch' ? { x: e.clientX, y: e.clientY } : null;
+  }
+  function onMapNearMiss(e) {
+    var down = _touchDown;
+    _touchDown = null;
+    if (!down || !e.isTrusted || !map || !(map._popup && map._popup.isOpen())) return;
+    var icon = e.target.closest && e.target.closest('.leaflet-marker-icon');
+    if (!icon) return;
+    var r = icon.getBoundingClientRect();
+    if (down.x >= r.left && down.x <= r.right && down.y >= r.top && down.y <= r.bottom) return;
+    e.stopPropagation();
+    map.closePopup();
+  }
+
+  /* popupRefit is Leaflet 1.9.4's Popup.update() without its content step,
+   * which would render the string again and drop the actions: the popup
+   * grew after Leaflet had laid it out and panned it into view, so it is
+   * sized, placed and panned again, or its top is cut off on a phone. */
+  function popupRefit(popup) {
+    popup._updateLayout();
+    popup._updatePosition();
+    popup._adjustPan();
+  }
+
+  /* onPopupToolClick opens the tool in place. Following the action's
+   * #/map?… link from #/map would rebuild the page (app.js navigate()
+   * re-inits a page on every hashchange) and lose the view, so the link is
+   * read instead: the module stays the one owner of its parameters. The
+   * reach opens as the tool's own map pick does, in the current view; the
+   * profile starts as node detail's half link does. A click for a new tab,
+   * or a tool that is not there, follows the link. */
+  function onPopupToolClick(e, testid, action) {
+    if (e.button > 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || !map) return;
+    var qs = (action.getAttribute('href') || '').split('?')[1] || '';
+    if (testid === 'node-predicted-reach') {
+      var st = reachTool && window.PredictedReach.parseState(qs);
+      if (!st) return;
+      e.preventDefault();
+      map.closePopup();
+      reachTool.open(st);
+    } else if (testid === 'node-terrain-profile') {
+      var start = window.TerrainProfile.parseStart(qs);
+      if (!start || !ensureProfileTool()) return;
+      e.preventDefault();
+      map.closePopup();
+      profileStartAt(start);
+    }
   }
 
   function fitBounds() {
@@ -2366,6 +2950,10 @@
     var input = document.getElementById('mapPiInput');
     var btn = document.getElementById('mapPiSubmit');
     if (!pane || !toggle) return;
+    // #123: loadNodes() calls this on every reload; wire each mount's pane
+    // only once or one click toggles it several times.
+    if (pane.dataset.wired === 'true') return;
+    pane.dataset.wired = 'true';
 
     toggle.addEventListener('click', function () {
       pane.classList.toggle('expanded');
@@ -2373,7 +2961,7 @@
       toggle.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#' +
         (pane.classList.contains('expanded') ? 'ph-caret-right' : 'ph-caret-left') + '"/></svg>';
       // Invalidate map size after transition.
-      setTimeout(function () { if (map) map.invalidateSize(); }, 220);
+      mapTimeout(function () { map.invalidateSize(); }, 220);
     });
 
     if (btn && input) {
@@ -2390,7 +2978,7 @@
       pane.classList.add('expanded');
       toggle.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-right"/></svg>';
       input.value = prefixParam;
-      setTimeout(function () { if (map) map.invalidateSize(); }, 220);
+      mapTimeout(function () { map.invalidateSize(); }, 220);
       mapPiSubmit(prefixParam);
     }
   }
@@ -2477,7 +3065,735 @@
     });
   }
 
+  // ── #681 M4: Path profile measure tool ──────────────────────────────────
+  // Pick two nodes, or a node and any map point, and read the terrain, the
+  // line of sight and the first Fresnel zone between them. The chart and the
+  // panel live in public/terrain-profile.js; this is only the map half —
+  // the toggle, the picking, the preview line and the deep link.
+  //
+  // Offered only when /api/config/client carries an enabled `dhm` block with
+  // `profile: true`; the server omits the block entirely without a token and
+  // drops the flag unless map.dhm.profile.enabled is set, so a disabled
+  // instance never builds any of this.
+  //
+  // Inert until armed: no request, no map listener and no marker handler
+  // exists before the user presses the toggle.
+  var profileTool = null;     // the terrain-profile.js controller
+  var profileMastHint = null; // #724 M4: masts-hint.js, null unless the masts layer is offered
+  var profileArm = null;      // 'a' | 'b' while picking, else null
+  var profileLine = null;     // the measured path
+  var profileGhost = null;    // live preview from A to the pointer
+  var profileFirstEnd = null; // #839 §1: the lone A while B is still to be picked
+  var profileCursorDot = null; // #781: the chart cursor's point on profileLine
+  var profileBtn = null;
+  var profileHintEl = null;
+  var profileKeyHandler = null;
+  var profileAnchor = null;   // [lat, lon] of the fixed end while picking the other
+  // #721: move one end of an open measurement without starting over.
+  var profileEnds = { a: null, b: null }; // draggable A/B markers
+  var profileMoving = null;   // 'a' | 'b' while a Move button has the picker armed
+  var profileDrag = null;     // { side } while an end is dragged
+  // A drop this close to a marker lands on it: half the 48px touch target.
+  var PROFILE_SNAP_PX = 24;
+  // A linked path is fitted no closer than this: a 20 m path at zoom 19
+  // would show nothing around it (#746).
+  var PROFILE_FIT_MAX_ZOOM = 16;
+  // True only while a profile link moves the map (the fit of a full link,
+  // the pan to A of a half link), so the moveend handler leaves the
+  // viewer's stored view alone (#765, #794). See profileLinkMove.
+  var profileFitting = false;
+  // #711: the one node a half link named that the Map page's own list does
+  // not hold (an area filter or the last-heard window left it out). One
+  // entry, replaced by the next half link, so it cannot grow.
+  var profileExtraNode = null;
+
+  // One gate, shared with the node-detail entry point (TerrainProfile.offered).
+  function profileOffered() {
+    var tp = window.TerrainProfile;
+    return !!(tp && typeof tp.create === 'function' && tp.offered(window.MC_DHM_CFG));
+  }
+
+  // resolveNode is the only thing terrain-profile.js asks the map for: a
+  // display name and a position for a public key. Observers count as nodes
+  // here because they carry a marker and a key just the same.
+  function profileResolveNode(pubkey) {
+    if (!pubkey) return null;
+    var want = String(pubkey).toLowerCase();
+    var i, n = findNodeByKey(want);
+    if (n) return { name: n.name || n.adv_name || null, lat: n.lat, lon: n.lon, role: n.role || null };
+    for (i = 0; i < observers.length; i++) {
+      n = observers[i];
+      if ((n.id || '').toLowerCase() === want) {
+        return { name: n.name || n.id || null, lat: n.lat, lon: n.lon, role: 'observer' };
+      }
+    }
+    if (profileExtraNode && profileExtraNode.pubkey === want) return profileExtraNode.node;
+    return null;
+  }
+
+  /* profileLoadExtraNode looks up a half link's A in the full node store
+   * when the Map page's filtered list does not hold it, so A is named and
+   * the map can pan to it. One request per half link, never per marker; a
+   * failure leaves A as its key prefix, which the measurement does not need. */
+  async function profileLoadExtraNode(pubkey) {
+    if (profileResolveNode(pubkey)) return;
+    try {
+      var data = await api('/nodes/' + encodeURIComponent(pubkey), { ttl: CLIENT_TTL.nodeDetail });
+      var n = data && data.node;
+      if (!n || String(n.public_key || '').toLowerCase() !== pubkey) return;
+      profileExtraNode = { pubkey: pubkey, node: { name: n.name || n.adv_name || null, lat: n.lat, lon: n.lon, role: n.role || null } };
+    } catch (_) { /* named by its key prefix instead */ }
+  }
+
+  /* An observer-only marker carries obs.id in _nodeKey, which is 64 hex
+   * just like a node public key — but /api/terrain/profile resolves `a`
+   * and `b` against the node store only, so sending one back would come
+   * home as 404 "node not found". Picking the marker's own position is
+   * both honest and useful: the profile is measured from exactly where
+   * the observer sits, it just is not labelled with its name. */
+  function profileIsNode(pubkey) {
+    return !!findNodeByKey(pubkey);
+  }
+
+  function profileRefLatLng(ref) {
+    if (!ref) return null;
+    if (ref.kind === 'point') return [ref.lat, ref.lon];
+    var n = profileResolveNode(ref.pubkey);
+    return (n && n.lat != null && n.lon != null) ? [n.lat, n.lon] : null;
+  }
+
+  function ensureProfileTool() {
+    if (profileTool) return profileTool;
+    var wrap = document.getElementById('map-wrap');
+    if (!wrap || !profileOffered()) return null;
+    profileTool = window.TerrainProfile.create({
+      mount: wrap,
+      resolveNode: profileResolveNode,
+      // #727: the copy button hands out a /p link when the server serves it.
+      shareRoute: window.TerrainProfile.shareOffered(window.MC_DHM_CFG),
+      // #746: the server's rule for a free point's height, so a drop onto
+      // one is measured with the customizer's point default in one request.
+      pointAntenna: window.MC_DHM_CFG.pointAntenna || null,
+      // #765: the chart footer's credit and its links, from the server.
+      dhm: window.MC_DHM_CFG,
+      // #723 M3: the monuments block; with it, each end is looked up.
+      heritage: window.MC_getHeritageConfig ? window.MC_getHeritageConfig() : null,
+      // #737 M2: the oblique photos block; with it, A, B and a chart point
+      // offer the photo viewer.
+      skraafoto: window.MC_SKRAAFOTO_CFG || null,
+      onMoveStart: function (side) { profileArmFor(side, true); },
+      onMoveCancel: profileDisarm,
+      onEndpointsChange: profileDrawLine,
+      onCursor: profileCursorAt,
+      // #839 §2: a fold or unfold changes how much map the panel leaves.
+      onLayoutChange: profileKeepInView,
+      onClose: function () {
+        profileDisarm();
+        profileClearLine();
+        profileSyncButton();
+      }
+    });
+    // #724 M4: the interference hint reads the antenna-site cells around
+    // each end through the masts layer's own loader; no request of its own.
+    profileMastHint = window.MastsHint && window.MC_getMastsConfig
+      ? window.MastsHint.attach({ map: map, cfg: window.MC_getMastsConfig(), panel: function () { return profileTool && profileTool.el(); } })
+      : null;
+    if (!profileKeyHandler) {
+      // Escape drops a drag or disarms the picker, either way keeping the
+      // old end (#721); a second Escape closes the panel.
+      profileKeyHandler = function (e) {
+        if (e.key !== 'Escape') return;
+        if (profileDrag) { profileCancelDrag(); return; }
+        if (profileArm) { profileDisarm(); return; }
+        if (profileTool && profileTool.isOpen()) profileTool.close();
+      };
+      document.addEventListener('keydown', profileKeyHandler);
+    }
+    return profileTool;
+  }
+
+  function profileSyncButton() {
+    if (!profileBtn) return;
+    var armed = !!profileArm;
+    profileBtn.classList.toggle('active', armed);
+    profileBtn.setAttribute('aria-pressed', armed ? 'true' : 'false');
+  }
+
+  function profileShowHint(text, isError) {
+    if (!profileHintEl) return;
+    profileHintEl.textContent = text;
+    profileHintEl.classList.toggle('is-error', !!isError);
+    profileHintEl.hidden = false;
+  }
+
+  function profileHideHint() {
+    if (profileHintEl) profileHintEl.hidden = true;
+  }
+
+  // While armed, every marker gets a click handler and loses its popup; when
+  // disarmed the handlers go and the popups come back, so an idle map carries
+  // none of this. The popup has to go rather than be closed again afterwards:
+  // Leaflet auto-pans the map to fit a popup it opens, which would move every
+  // marker out from under the pointer between the first pick and the second.
+  function profileSyncPickers() {
+    if (!profileArm && !profileTool) return;
+    var on = !!profileArm;
+    for (var i = 0; i < _currentMarkerData.length; i++) {
+      var m = _currentMarkerData[i];
+      var mk = m._leafletMarker;
+      if (!mk) continue;
+      mk.off('click', onProfileMarkerPick);
+      if (on) {
+        mk.unbindPopup();
+        mk.on('click', onProfileMarkerPick);
+      } else if (!mk.getPopup() && typeof m.popupFn === 'function') {
+        mk.bindPopup(m.popupFn(), { maxWidth: 280 });
+      }
+    }
+  }
+
+  function onProfileMarkerPick(e) {
+    var mk = e && e.target;
+    if (!profileArm || !mk) return;
+    L.DomEvent.stopPropagation(e);
+    var ll = mk.getLatLng();
+    var ref = window.TerrainProfile.markerRef(mk._nodeKey, ll.lat, ll.lng, profileIsNode);
+    if (ref) profilePick(ref);
+  }
+
+  function onProfileMapClick(e) {
+    if (!profileArm || !e || !e.latlng) return;
+    var ref = window.TerrainProfile.pointRef(e.latlng.lat, e.latlng.lng);
+    if (ref) profilePick(ref);
+  }
+
+  function onProfilePointerMove(e) {
+    if (!profileArm || !profileAnchor || !e || !e.latlng) return;
+    var pts = [profileAnchor, [e.latlng.lat, e.latlng.lng]];
+    if (profileGhost) { profileGhost.setLatLngs(pts); return; }
+    profileGhost = L.polyline(pts, { className: 'tp-path-ghost', interactive: false, weight: 2, dashArray: '6 6' }).addTo(map);
+  }
+
+  function profilePick(ref) {
+    var tool = ensureProfileTool();
+    if (!tool) return;
+    if (profileMoving) {
+      // #721: only this end changes; the tool redraws through
+      // onEndpointsChange and measures once.
+      var moveSide = profileMoving;
+      profileDisarm();
+      if (tool.moveEndpoint(moveSide, ref)) profileKeepInView();
+      return;
+    }
+    var side = profileArm === 'b' ? 'b' : 'a';
+    tool.setEndpoint(side, ref);
+    if (side === 'a') {
+      profileAnchor = profileRefLatLng(ref);
+      profileArm = 'b';
+      profileShowHint('Now pick the other end: a node marker or any point.');
+      profileSyncButton();
+    } else {
+      profileDisarm();
+    }
+    profileDrawLine();
+    if (side === 'b') profileKeepInView();
+  }
+
+  /* profileArmFor arms the one picker for an end. With `move` it replaces
+   * that end of an open measurement (#721) and the other end anchors the
+   * preview line; without it, it is the first pick of a new one. */
+  function profileArmFor(side, move) {
+    var tool = ensureProfileTool();
+    if (!tool) return;
+    reachPutAway(); // #941: one map tool at a time
+    // Re-arming (Move A while Move B was armed) must not stack listeners.
+    if (profileArm && map) {
+      map.off('click', onProfileMapClick);
+      map.off('mousemove', onProfilePointerMove);
+    }
+    profileClearGhost();
+    profileArm = side;
+    profileMoving = move ? side : null;
+    if (move) profileAnchor = profileRefLatLng(tool.getState()[side === 'a' ? 'b' : 'a']);
+    if (map) {
+      map.getContainer().classList.add('tp-picking');
+      map.on('click', onProfileMapClick);
+      map.on('mousemove', onProfilePointerMove);
+    }
+    profileSyncPickers();
+    profileSyncButton();
+    profileShowHint(move
+      ? 'Pick the new position for ' + side.toUpperCase() + ': a node marker or any point. Escape or Move '
+        + side.toUpperCase() + ' again cancels.'
+      : side === 'a'
+        ? 'Pick the first end: a node marker or any point.'
+        : 'Now pick the other end: a node marker or any point.');
+  }
+
+  function profileDisarm() {
+    if (!profileArm) return;
+    profileArm = null;
+    profileAnchor = null;
+    profileMoving = null;
+    // The panel's Move button goes back up; cancelMove calls back here and
+    // returns at once, since the picker is already disarmed.
+    if (profileTool && profileTool.movingSide()) profileTool.cancelMove();
+    if (map) {
+      map.getContainer().classList.remove('tp-picking');
+      map.off('click', onProfileMapClick);
+      map.off('mousemove', onProfilePointerMove);
+    }
+    profileSyncPickers();
+    profileSyncButton();
+    profileHideHint();
+    profileClearGhost();
+  }
+
+  function profileClearGhost() {
+    if (profileGhost && map) { try { map.removeLayer(profileGhost); } catch (_) {} }
+    profileGhost = null;
+  }
+
+  /* #781: the point under the chart cursor, as a dot on the drawn path. One
+   * circle marker, made on first use and moved after that; hidden by
+   * taking it off the map. The fraction is interpolated between the line's
+   * own ends in the projection Leaflet draws it in, so the dot sits on it. */
+  function profileCursorAt(p) {
+    if (!p || !profileLine || !map || !window.TerrainProfileCursor) { profileHideCursorDot(); return; }
+    var ll = profileLine.getLatLngs();
+    var at = window.TerrainProfileCursor.latLonAt([ll[0].lat, ll[0].lng], [ll[1].lat, ll[1].lng], p.t);
+    // No colour options: fill and stroke come from --tp-cursor-dot in
+    // style.css, like the path line's own.
+    if (!profileCursorDot) profileCursorDot = L.circleMarker(at, { className: 'tp-cursor-dot', radius: 6, weight: 2, fillOpacity: 1, interactive: false });
+    else profileCursorDot.setLatLng(at);
+    if (!map.hasLayer(profileCursorDot)) profileCursorDot.addTo(map);
+  }
+
+  function profileHideCursorDot() {
+    if (profileCursorDot && map && map.hasLayer(profileCursorDot)) map.removeLayer(profileCursorDot);
+  }
+
+  function profileClearLine() {
+    profileClearGhost();
+    profileClearFirstEnd();
+    profileHideCursorDot();
+    profileCursorDot = null;
+    profileDrag = null;
+    if (profileLine && map) { try { map.removeLayer(profileLine); } catch (_) {} }
+    profileLine = null;
+    if (profileMastHint) profileMastHint.clear();
+    ['a', 'b'].forEach(function (side) {
+      if (profileEnds[side] && map) { try { map.removeLayer(profileEnds[side]); } catch (_) {} }
+      profileEnds[side] = null;
+    });
+  }
+
+  /* profileDrawLine puts the measured path and its two draggable ends on the
+   * map, updating the layers in place when they already exist — a drop
+   * redraws from inside the marker's own dragend. */
+  function profileDrawLine() {
+    if (!map || !profileTool) { profileClearLine(); return; }
+    var st = profileTool.getState();
+    var a = profileRefLatLng(st.a), b = profileRefLatLng(st.b);
+    if (!a || !b) { profileClearLine(); if (a) profileShowFirstEnd(a); return; }
+    profileClearGhost();
+    profileClearFirstEnd();
+    // No `color` option: the stroke comes from --los-line in style.css, so
+    // the line follows the theme and the customizer like everything else.
+    if (profileLine) profileLine.setLatLngs([a, b]);
+    else profileLine = L.polyline([a, b], { className: 'tp-path-line', interactive: false, weight: 3 }).addTo(map);
+    profileEndMarker('a', a);
+    profileEndMarker('b', b);
+    if (profileMastHint) profileMastHint.update(a, b);
+  }
+
+  /* #839 §1: the first end, on the map as soon as it is picked. The ghost
+   * line follows a mouse only, so on a touch screen nothing else says what
+   * the second tap measures from. Not interactive: a tap on it falls
+   * through to the map, and the draggable A/B ends take over once B is
+   * picked. */
+  function profileShowFirstEnd(ll) {
+    if (!map) return;
+    profileFirstEnd = L.marker(ll, {
+      // Static markup, no interpolation.
+      icon: L.divIcon({ className: 'tp-end-marker tp-end-marker-a tp-end-first',
+        html: '<span class="tp-end-dot">A</span>', iconSize: [48, 48], iconAnchor: [24, 24] }),
+      interactive: false, keyboard: false, zIndexOffset: 2000,
+    }).addTo(map);
+    var icon = profileFirstEnd.getElement();
+    if (icon) {
+      icon.setAttribute('data-testid', 'tp-end-first');
+      icon.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  function profileClearFirstEnd() {
+    if (profileFirstEnd && map) { try { map.removeLayer(profileFirstEnd); } catch (_) {} }
+    profileFirstEnd = null;
+  }
+
+  // ── #721: drag an end ──
+  // Dragging only moves the marker and the line on the map: no request, no
+  // panel work. The drop resolves the end once (a node marker under it, or
+  // the free point) and the tool measures once, debounced.
+  function profileEndMarker(side, ll) {
+    var mk = profileEnds[side];
+    if (mk) { if (!(profileDrag && profileDrag.side === side)) mk.setLatLng(ll); return; }
+    var tag = side.toUpperCase();
+    mk = L.marker(ll, {
+      // Static markup, no interpolation: the tag is 'A' or 'B'.
+      icon: L.divIcon({ className: 'tp-end-marker tp-end-marker-' + side,
+        html: '<span class="tp-end-dot">' + tag + '</span>', iconSize: [48, 48], iconAnchor: [24, 24] }),
+      draggable: true, autoPan: true, zIndexOffset: 2000,
+      title: 'Drag to move ' + tag + '. Drop on a node marker to use that node.',
+    }).addTo(map);
+    var icon = mk.getElement();
+    if (icon) {
+      icon.setAttribute('aria-label', 'Endpoint ' + tag + ', drag to move');
+      icon.setAttribute('data-testid', 'tp-end-marker-' + side);
+    }
+    mk.on('dragstart', function () { onProfileDragStart(side); });
+    mk.on('drag', function () { onProfileDrag(side); });
+    mk.on('dragend', function () { onProfileDragEnd(side); });
+    profileEnds[side] = mk;
+  }
+
+  function onProfileDragStart(side) {
+    var mk = profileEnds[side];
+    if (!mk) return;
+    // A drag replaces whatever the picker was waiting for.
+    profileDisarm();
+    profileDrag = { side: side };
+    map.getContainer().classList.add('tp-dragging');
+    profileShowHint('Drop ' + side.toUpperCase() + ' on a node marker or any point. Escape cancels.');
+  }
+
+  function onProfileDrag(side) {
+    var mk = profileEnds[side], other = profileEnds[side === 'a' ? 'b' : 'a'];
+    if (!profileDrag || !mk || !other || !profileLine) return;
+    var pts = [mk.getLatLng(), other.getLatLng()];
+    profileLine.setLatLngs(side === 'a' ? pts : pts.reverse());
+  }
+
+  function onProfileDragEnd(side) {
+    var drag = profileDrag, mk = profileEnds[side];
+    profileDrag = null;
+    if (map) map.getContainer().classList.remove('tp-dragging');
+    profileHideHint();
+    if (!drag || !mk || !profileTool) return;
+    var ll = mk.getLatLng();
+    var at = map.latLngToContainerPoint(ll);
+    var moved = profileTool.moveEndpoint(side, window.TerrainProfile.snapEndpoint(
+      { x: at.x, y: at.y, lat: ll.lat, lon: ll.lng }, profileSnapCandidates(), PROFILE_SNAP_PX, profileIsNode));
+    // A refused drop (onto the other end) is redrawn from the unchanged
+    // state, which puts the marker back; a snapped one moves onto its node
+    // through onEndpointsChange.
+    if (!moved) profileDrawLine();
+  }
+
+  /* profileSnapCandidates lists the node markers drawn on screen right now:
+   * one pass over the rendered markers, once per drop. A marker folded into
+   * a cluster has no icon and cannot be dropped on. */
+  function profileSnapCandidates() {
+    var out = [];
+    for (var i = 0; i < _currentMarkerData.length; i++) {
+      var mk = _currentMarkerData[i]._leafletMarker;
+      if (!mk || !mk._icon || !mk._nodeKey) continue;
+      var ll = mk.getLatLng(), p = map.latLngToContainerPoint(ll);
+      out.push({ x: p.x, y: p.y, key: mk._nodeKey, lat: ll.lat, lon: ll.lng });
+    }
+    return out;
+  }
+
+  /* profileCancelDrag is Escape mid-drag: the end goes back where it was
+   * and nothing is measured. Re-enabling the handler ends Leaflet's live
+   * drag; it unhooks the marker before it does, so no dragend reaches
+   * onProfileDragEnd and the redraw from the unchanged state happens here. */
+  function profileCancelDrag() {
+    var drag = profileDrag;
+    if (!drag) return;
+    profileDrag = null;
+    var mk = profileEnds[drag.side];
+    if (mk && mk.dragging) { mk.dragging.disable(); mk.dragging.enable(); }
+    if (map) map.getContainer().classList.remove('tp-dragging');
+    profileHideHint();
+    profileDrawLine();
+  }
+
+  function onProfileToggle() {
+    var tool = ensureProfileTool();
+    if (!tool) return;
+    if (profileArm) { profileDisarm(); return; }
+    if (tool.isOpen()) { tool.close(); return; }
+    profileArmFor('a');
+  }
+
+  function buildProfileToggle() {
+    var wrap = document.getElementById('map-wrap');
+    if (!wrap || profileBtn) return;
+    profileBtn = document.createElement('button');
+    profileBtn.type = 'button';
+    profileBtn.id = 'mapProfileToggle';
+    profileBtn.className = 'map-profile-toggle';
+    profileBtn.setAttribute('data-testid', 'map-profile-toggle');
+    profileBtn.setAttribute('aria-pressed', 'false');
+    profileBtn.setAttribute('aria-label', 'Path profile');
+    profileBtn.title = 'Path profile — terrain, line of sight and Fresnel zone';
+    profileBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-ruler"/></svg>';
+    profileBtn.addEventListener('click', onProfileToggle);
+    wrap.appendChild(profileBtn);
+    profileHintEl = document.createElement('div');
+    profileHintEl.className = 'map-profile-hint';
+    profileHintEl.setAttribute('data-testid', 'map-profile-hint');
+    profileHintEl.setAttribute('role', 'status');
+    profileHintEl.hidden = true;
+    wrap.appendChild(profileHintEl);
+  }
+
+  // initProfileTool waits for the client config, then offers the tool and
+  // restores a #/map?profile=… link. Without the config block it does
+  // nothing at all — no button, no listener, no request.
+  async function initProfileTool() {
+    const alive = mapToken();
+    try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
+    if (!alive() || !profileOffered()) return;
+    buildProfileToggle();
+    var qs = (location.hash || '').split('?')[1] || '';
+    var st = window.TerrainProfile.parseState(qs);
+    if (!st) {
+      // #681 M5: node detail sends profile=<one key> — A is that node, and
+      // the picker is armed for B, exactly as if A had just been clicked.
+      var start = window.TerrainProfile.parseStart(qs);
+      if (!start) { if (window.TerrainProfile.invalidLink(qs)) profileBadLink(); return; }
+      if (!ensureProfileTool()) return;
+      await profileLoadExtraNode(start.pubkey);
+      if (!alive() || !ensureProfileTool()) return;
+      profileStartAt(start);
+      return;
+    }
+    var tool = ensureProfileTool();
+    if (!tool) return;
+    tool.setState(st);
+    profileDrawLine();
+    profileFitPath();
+  }
+
+  /* profileStartAt starts a measurement from node detail's half link or
+   * the Map popup (#959): start is A, the picker is armed for B, exactly as
+   * if A had just been clicked, and the map pans to A. */
+  function profileStartAt(start) {
+    profileArmFor('a');
+    profilePick(start);
+    if (profileAnchor && map) profileLinkMove(function () { map.panTo(profileAnchor); });
+  }
+
+  /* profileBadLink answers a link whose profile cannot be read (#839 §7),
+   * such as /p?profile=garbage after its handoff: the junk leaves the
+   * address bar (no history entry), and the hint says what happened until
+   * the next tap on the map or the ruler. */
+  function profileBadLink() {
+    try {
+      history.replaceState(history.state, '', location.pathname + location.search
+        + window.TerrainProfile.withProfileParams(location.hash, {}));
+    } catch (_) { /* the notice still shows */ }
+    profileShowHint('This profile link is invalid, so no profile was opened. Use the ruler to measure a path.', true);
+    if (map) map.once('click', function () { if (!profileArm) profileHideHint(); });
+  }
+
+  /* profileFitPath brings a profile opened from the URL (a deep link or a
+   * /p handoff) into view above the panel (#746): someone who receives a
+   * link sees where the path is, not their own last view. Once, when the
+   * link is opened: a move or a pan afterwards is the viewer's own view.
+   * A node end the Map page's list does not hold has no position here, and
+   * the stored view stays.
+   *
+   * The fit itself is never saved as the viewer's view (#765): a later
+   * plain #/map or a reload opens their own view again. */
+  function profileFitPath() {
+    var st = profileTool && profileTool.getState();
+    var a = st && profileRefLatLng(st.a), b = st && profileRefLatLng(st.b);
+    if (!map || !a || !b || !(profileTool && profileTool.el())) return;
+    var pad = profileFitPad();
+    profileLinkMove(function () {
+      map.fitBounds(L.latLngBounds([a, b]), Object.assign(pad, { maxZoom: PROFILE_FIT_MAX_ZOOM, animate: false }));
+    });
+  }
+
+  /* profileFitPad is the fitBounds padding that keeps a path clear of the
+   * panel as it is laid out now: at the bottom, reserved at the height it
+   * may grow to (#765), or docked at the right on a short landscape screen
+   * (#839 §2), and clear of the map's own buttons on either side. The panel
+   * says which through its CSS variables. */
+  function profileFitPad() {
+    var TP = window.TerrainProfile;
+    var size = map.getSize();
+    // How far the buttons reach in from each side; one wide across the
+    // middle (the attribution) counts for neither.
+    var left = 0, right = 0;
+    profileControlBoxes().forEach(function (b) {
+      if (b.right < size.x / 2) left = Math.max(left, b.right);
+      else if (b.left > size.x / 2) right = Math.max(right, size.x - b.left);
+    });
+    var panel = profileTool && profileTool.el();
+    if (!panel || !panel.classList.contains('is-open')) return TP.fitPadding(size.y, 0, NaN, left, right);
+    var cs = getComputedStyle(panel);
+    var px = function (name) { return parseFloat(cs.getPropertyValue(name)); };
+    if (cs.getPropertyValue('--tp-dock').trim() === 'right') return TP.fitPaddingBeside(size.x, panel.offsetWidth, left);
+    // A compact bar or a folded head does not grow; the full panel grows
+    // to its cap once the chart arrives (#765).
+    var cap = panel.classList.contains('tp-compact') || panel.classList.contains('tp-folded') ? panel.offsetHeight
+      : TP.panelCap(size.y, px('--tp-panel-max-h'), px('--tp-map-keep'), px('--tp-panel-min-h'));
+    return TP.fitPadding(size.y, panel.offsetHeight, cap, left, right);
+  }
+
+  /* profileControlBoxes are the boxes of the buttons over the map (zoom,
+   * layers, the ruler, the settings toggle and the open Map Controls), in
+   * map container pixels: an end under one cannot be seen, and the fit
+   * keeps clear of them. Read on a pick or a fold only, never per frame. */
+  function profileControlBoxes() {
+    var wrap = map && map.getContainer().parentNode;
+    if (!wrap) return [];
+    var m = map.getContainer().getBoundingClientRect();
+    var els = wrap.querySelectorAll('.leaflet-control-container .leaflet-control, .map-profile-toggle, .map-controls-toggle, .map-controls');
+    var out = [];
+    for (var i = 0; i < els.length; i++) {
+      var r = els[i].getBoundingClientRect();
+      if (r.width && r.height) out.push({ left: r.left - m.left, top: r.top - m.top, right: r.right - m.left, bottom: r.bottom - m.top });
+    }
+    return out;
+  }
+
+  /* profileKeepInView brings both ends back into view when one is hidden
+   * — under the panel, off the map or under a map button (#839 §2, §3):
+   * an end clicked low on the map that the panel then opens over. It moves
+   * nothing while both can be seen, and never zooms in past the viewer's
+   * own zoom. The viewer's own pick moved the map, so the view is theirs
+   * and is saved as usual (unlike a link's fit, #765). */
+  function profileKeepInView() {
+    var st = profileTool && profileTool.getState();
+    var a = st && profileRefLatLng(st.a), b = st && profileRefLatLng(st.b);
+    if (!map || !a || !b) return;
+    var pad = profileFitPad();
+    var size = map.getSize();
+    var pts = [a, b].map(function (ll) { var p = map.latLngToContainerPoint(ll); return { x: p.x, y: p.y }; });
+    if (window.TerrainProfile.endsVisible(pts, { x: size.x, y: size.y }, pad, profileControlBoxes())) return;
+    map.fitBounds(L.latLngBounds([a, b]), Object.assign(pad, { maxZoom: map.getZoom() }));
+  }
+
+  /* profileLinkMove makes one map move on behalf of a profile link and keeps
+   * it out of the viewer's stored view (#765, #794). Leaflet ends every
+   * move with exactly one moveend: inside the call when it does not
+   * animate (or the jump is too far to animate), or when the animation
+   * ends — a drag or map.remove() stops it early, and that still fires
+   * moveend. So an animated pan releases the guard on its own moveend, not
+   * when the call returns: it would otherwise be saved after all.
+   *
+   * Only that moveend (#817). Another can come first: setView stops a
+   * running animation (drag inertia) with a moveend inside the call, and
+   * an invalidateSize() mid-pan fires one while the pan still runs. So the
+   * listener goes on after the call, and a moveend while the pan animation
+   * is still in progress is not the pan's. Leaflet clears _inProgress
+   * before the pan's own moveend. The save handler was registered first,
+   * so it still sees the guard. */
+  function profileLinkMove(move) {
+    profileFitting = true;
+    move();
+    if (!profilePanAnimating()) { profileFitting = false; return; }
+    map.on('moveend', function release() {
+      if (profilePanAnimating()) return;
+      map.off('moveend', release);
+      profileFitting = false;
+    });
+  }
+
+  function profilePanAnimating() {
+    return !!(map && map._panAnim && map._panAnim._inProgress);
+  }
+
+  // ── #941: Predicted reach (public/coverage.js) ──
+  // The tool owns its button, panel, layer and link; the map lends it the
+  // map, the node names, and keeps it apart from the Path profile: one map
+  // tool at a time, so their pickers and panels never meet.
+  var reachTool = null;
+
+  async function initReachTool() {
+    const alive = mapToken();
+    try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
+    var pr = window.PredictedReach;
+    if (!alive() || !map || reachTool || !pr || !pr.offered(window.MC_COVERAGE_CFG)) return;
+    reachTool = pr.create({
+      map: map,
+      mount: document.getElementById('map-wrap'),
+      cfg: window.MC_COVERAGE_CFG,
+      // #968 M3: the viewer's default environment loss (Customize → Display).
+      viewerSettings: function () { return window.SITE_CONFIG && window.SITE_CONFIG.reach; },
+      dhm: window.MC_DHM_CFG,
+      resolveNode: profileResolveNode,
+      onArm: reachPutProfileAway,
+      onOpen: reachPutProfileAway,
+      linkMove: profileLinkMove
+    });
+    var qs = (location.hash || '').split('?')[1] || '';
+    var st = pr.parseState(qs);
+    if (st) {
+      if (st.at.kind === 'node') await profileLoadExtraNode(st.at.pubkey);
+      if (alive() && reachTool) reachTool.open(st, { fit: true });
+    }
+  }
+
+  function reachPutProfileAway() {
+    profileDisarm();
+    if (profileTool && profileTool.isOpen()) profileTool.close();
+  }
+
+  function reachPutAway() {
+    if (!reachTool) return;
+    reachTool.disarm();
+    if (reachTool.isOpen()) reachTool.close();
+  }
+
+  function destroyReachTool() {
+    if (reachTool) reachTool.destroy();
+    reachTool = null;
+  }
+
+  function destroyProfileTool() {
+    profileDisarm();
+    profileClearLine();
+    if (profileKeyHandler) document.removeEventListener('keydown', profileKeyHandler);
+    profileKeyHandler = null;
+    if (profileTool) profileTool.destroy();
+    profileTool = null;
+    profileMastHint = null;
+    profileExtraNode = null;
+    profileBtn = null;
+    profileHintEl = null;
+  }
+
   function destroy() {
+    // #123: make every pending response and timer of this mount inert.
+    mapGeneration++;
+    mapTimers.forEach(clearTimeout);
+    mapTimers.clear();
+    clearTimeout(_zoomResizeTimer);
+    nodesLoadPromise = null;
+    if (areaNodesHandler) AreaFilter.offChange(areaNodesHandler);
+    if (areaOutlineHandler) AreaFilter.offChange(areaOutlineHandler);
+    areaNodesHandler = areaOutlineHandler = null;
+    if (dagiChangeHandler) DagiFilter.offChange(dagiChangeHandler);
+    dagiChangeHandler = null;
+    if (window.DagiFilter) DagiFilter.release(document.getElementById('mapDagiFilter'));
+    if (dagiOutline) dagiOutline.clear();
+    dagiOutline = null;
+    areaBoundaryPending = false;
+    // #123: one theme observer and tile-provider listener per mount; before
+    // this every mount added both for good, and each kept setting URLs on
+    // its removed map's tile layer.
+    if (mapThemeObs) mapThemeObs.disconnect();
+    if (tileProviderHandler) window.removeEventListener('mc-tile-provider-changed', tileProviderHandler);
+    mapThemeObs = tileProviderHandler = null;
+    if (creditObs) creditObs.disconnect();
+    creditObs = null;
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
     // #1771 review fix: invalidate the Important Links overlay's in-flight
@@ -2488,21 +3804,32 @@
     topRoutesLayer = null;
     topRoutesEdges = null;
     if (map) {
+      // Leaflet 1.9.4 ends an animated zoom from a 250 ms setTimeout that
+      // remove() does not cancel; it then reads the removed map pane
+      // ("_leaflet_pos"). With the flag cleared that callback returns early.
+      map._animatingZoom = false;
       map.remove();
       map = null;
     }
     markerLayer = null;
     clusterGroup = null;
+    _clusterAdd = null;
+    _renderQueued = false;
     _currentMarkerData = [];
     routeLayer = null;
     if (heatLayer) { heatLayer = null; }
+    routeViewOpen = false;
     geoFilterLayer = null;
     selectedReferenceNode = null;
     neighborPubkeys = null;
     delete window._mapSelectRefNode;
     delete window._mapGetNeighborPubkeys;
+    destroyProfileTool();
+    destroyReachTool();
   }
 
+  // While a route view is open the layer is built but left off the map
+  // (#929; see hideRouteViewOverlays).
   function toggleHeatmap(on) {
     if (!on || !map) {
       if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; window._meshcoreHeatLayer = null; }
@@ -2517,25 +3844,25 @@
     if (!points.length || typeof L.heatLayer !== 'function') return;
     var savedOpacity = parseFloat(localStorage.getItem('meshcore-heatmap-opacity'));
     if (isNaN(savedOpacity)) savedOpacity = 0.25;
-    // Update existing layer data without recreating (avoids opacity flash)
-    if (heatLayer) {
+    // Update existing layer data without recreating (avoids opacity flash).
+    // leaflet.heat redraws through this._map, so a layer a route view took
+    // off the map is rebuilt off the map instead (#929).
+    if (heatLayer && map.hasLayer(heatLayer)) {
       heatLayer.setLatLngs(points);
       return;
     }
-    heatLayer = L.heatLayer(points, {
-      radius: 25, blur: 15, maxZoom: 14, minOpacity: 0.05,
-      gradient: { 0.2: '#0d47a1', 0.4: '#1565c0', 0.6: '#42a5f5', 0.8: '#ffca28', 1.0: '#ff5722' }
-    });
+    heatLayer = L.heatLayer(points, HeatGradient.options());
     // Set opacity on canvas BEFORE it's visible — hook the 'add' event
     heatLayer.on('add', function() {
       var canvas = heatLayer._canvas || (heatLayer.getContainer && heatLayer.getContainer());
       if (canvas) canvas.style.opacity = savedOpacity;
     });
-    heatLayer.addTo(map);
+    if (!routeViewOpen) heatLayer.addTo(map);
     window._meshcoreHeatLayer = heatLayer;
   }
 
   let _themeRefreshHandler = null;
+  let _heatUnwatch = null;
 
   // ─── Affinity Debug Overlay ────────────────────────────────────────────────
   function clearAffinityOverlay() {
@@ -2547,9 +3874,11 @@
     clearAffinityOverlay();
     // Fetch debug data — requires API key stored in localStorage
     var apiKey = localStorage.getItem('meshcore-api-key') || '';
+    var alive = mapToken();
     fetch('/api/debug/affinity', { headers: { 'X-API-Key': apiKey } })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (data) {
+        if (!alive()) return; // #123
         affinityData = data;
         renderAffinityOverlay();
       })
@@ -2778,10 +4107,22 @@
         if (topRoutesEdges && document.getElementById('mcTopRoutes')?.checked) renderTopRoutes();
       };
       window.addEventListener('theme-refresh', _themeRefreshHandler);
+      // #914: a theme, customizer or colour-blind preset change that moves
+      // the heat gradient rebuilds the layer; no reload.
+      _heatUnwatch = HeatGradient.watch(function () {
+        if (!heatLayer || !map) return;
+        // Rebuild rather than setOptions: leaflet.heat's redraw would throw
+        // on a layer a route view took off the map (it reads
+        // this._map._animating). toggleHeatmap keeps the new one off the map
+        // while the route view is open.
+        toggleHeatmap(false); // removes the old layer: one heat canvas, never two
+        toggleHeatmap(true);
+      });
       return init(app, routeParam);
     },
     destroy: function() {
       if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }
+      if (_heatUnwatch) { _heatUnwatch(); _heatUnwatch = null; }
       return destroy();
     }
   });
@@ -2892,7 +4233,12 @@
   if (typeof window !== 'undefined') {
     window.__meshcoreMapInternals = {
       createClusterGroup: createClusterGroup, makeClusterIcon: makeClusterIcon,
+      // #673 — route hops for inferred paths and the shared 1-byte hop filter.
+      inferredRouteHops: inferredRouteHops, hide1ByteRoutePositions: hide1ByteRoutePositions,
+      tagPathHopTokens: tagPathHopTokens, routeEdgeCounts: routeEdgeCounts,
       nodePassesByteSizeFilter: nodePassesByteSizeFilter,
+      // #807: label + popup rendering for unknown hash sizes.
+      makeRepeaterLabelIcon: makeRepeaterLabelIcon, buildPopup: buildPopup,
       nodePassesScopeFilter: nodePassesScopeFilter, buildScopeOptions: buildScopeOptions,
       nodePassesRelayedScopeFilter: nodePassesRelayedScopeFilter, buildRelayedScopeOptions: buildRelayedScopeOptions,
       nodePassesConfiguredScopeFilter: nodePassesConfiguredScopeFilter, buildConfiguredScopeOptions: buildConfiguredScopeOptions,
@@ -2914,6 +4260,9 @@
       setNodesForTesting: function (n) { nodes = n; },
       setFiltersForTesting: function (f) { Object.assign(filters, f); },
       destroyForTesting: function () { return destroy(); },
+      // #608: the real loadRouteFromDeepLink raw_hex slicing, not a replica.
+      extractSrcDstFromRawHex: extractSrcDstFromRawHex,
+      extractChannelHashFromRawHex: extractChannelHashFromRawHex,
     };
   }
 })();

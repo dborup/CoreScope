@@ -19,7 +19,7 @@ func TestComputeSuspiciousGPSPositions_FlagsNodeFarFromTightCluster(t *testing.T
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('badgps', 'n1', 10)`)
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('badgps', 'n2', 5)`)
 
-	positioned, _, err := db.GetNodesForAreaAnalytics()
+	positioned, _, err := db.GetNodesForAreaAnalytics(nil)
 	if err != nil {
 		t.Fatalf("GetNodesForAreaAnalytics: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestComputeSuspiciousGPSPositions_DoesNotFlagWithinRange(t *testing.T) {
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('goodgps', 'n1', 10)`)
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('goodgps', 'n2', 5)`)
 
-	positioned, _, err := db.GetNodesForAreaAnalytics()
+	positioned, _, err := db.GetNodesForAreaAnalytics(nil)
 	if err != nil {
 		t.Fatalf("GetNodesForAreaAnalytics: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestComputeSuspiciousGPSPositions_SkipsScatteredNeighbors(t *testing.T) {
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('mid', 's1', 10)`)
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('mid', 's2', 5)`)
 
-	positioned, _, err := db.GetNodesForAreaAnalytics()
+	positioned, _, err := db.GetNodesForAreaAnalytics(nil)
 	if err != nil {
 		t.Fatalf("GetNodesForAreaAnalytics: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestComputeSuspiciousGPSPositions_SkipsSingleNeighbor(t *testing.T) {
 	db.conn.Exec(`INSERT INTO nodes (public_key, name, lat, lon) VALUES ('onlyneighbor', 'OnlyNeighbor', 55.0, 10.0)`)
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('loner', 'onlyneighbor', 10)`)
 
-	positioned, _, err := db.GetNodesForAreaAnalytics()
+	positioned, _, err := db.GetNodesForAreaAnalytics(nil)
 	if err != nil {
 		t.Fatalf("GetNodesForAreaAnalytics: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestComputeSuspiciousGPSPositions_SkipsNoNeighbors(t *testing.T) {
 
 	db.conn.Exec(`INSERT INTO nodes (public_key, name, lat, lon) VALUES ('isolated', 'IsolatedNode', 55.0, 10.0)`)
 
-	positioned, _, err := db.GetNodesForAreaAnalytics()
+	positioned, _, err := db.GetNodesForAreaAnalytics(nil)
 	if err != nil {
 		t.Fatalf("GetNodesForAreaAnalytics: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestComputeSuspiciousGPSPositions_SortedWorstFirst(t *testing.T) {
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('extreme', 'n1', 10)`)
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('extreme', 'n2', 5)`)
 
-	positioned, _, err := db.GetNodesForAreaAnalytics()
+	positioned, _, err := db.GetNodesForAreaAnalytics(nil)
 	if err != nil {
 		t.Fatalf("GetNodesForAreaAnalytics: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestComputeSuspiciousGPSPositions_ScanErrorPropagates(t *testing.T) {
 		t.Fatalf("insert NULL-count edge: %v", err)
 	}
 
-	positioned, _, err := db.GetNodesForAreaAnalytics()
+	positioned, _, err := db.GetNodesForAreaAnalytics(nil)
 	if err != nil {
 		t.Fatalf("GetNodesForAreaAnalytics: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestComputeSuspiciousGPSPositions_ScanErrorDiscardsAlreadyScannedEdges(t *t
 		t.Fatalf("insert NULL-count edge: %v", err)
 	}
 
-	positioned, _, err := db.GetNodesForAreaAnalytics()
+	positioned, _, err := db.GetNodesForAreaAnalytics(nil)
 	if err != nil {
 		t.Fatalf("GetNodesForAreaAnalytics: %v", err)
 	}

@@ -17,6 +17,9 @@
  * Pure file:// harness — does not require the Go server.
  *
  * Usage: node test-analytics-fluid-charts.js
+ *
+ * FLUID_CHARTS_CSS_DELAY_MS=<ms> holds style.css back that long on every
+ * load, as a slow runner would (#148).
  */
 'use strict';
 const { chromium } = require('playwright');
@@ -69,6 +72,14 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
   });
   const ctx = await browser.newContext();
+  // #148: on a slow runner style.css can apply after DOMContentLoaded.
+  // cssDelayMs holds it back that long, so a test can reproduce that.
+  const envCssDelayMs = Number(process.env.FLUID_CHARTS_CSS_DELAY_MS) || 0;
+  let cssDelayMs = envCssDelayMs;
+  await ctx.route((url) => url.href === cssHref, async (route) => {
+    if (cssDelayMs > 0) await new Promise((r) => setTimeout(r, cssDelayMs));
+    await route.continue();
+  });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
 
@@ -79,7 +90,24 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     const tmp = path.join(os.tmpdir(),
       `1058-harness-${wrapperWidth}-${viewportWidth}.html`);
     fs.writeFileSync(tmp, harnessHTML(wrapperWidth));
-    await page.goto('file://' + tmp, { waitUntil: 'domcontentloaded' });
+    await page.goto('file://' + tmp, { waitUntil: 'load' });
+    await waitForStyles();
+  }
+
+  // #148: DOMContentLoaded does not wait for style.css, and unstyled
+  // cards stack in one column. Wait until the stylesheet is attached,
+  // then for two frames so layout reflects it, before measuring. This
+  // waits on the stylesheet itself, not on the properties under test.
+  async function waitForStyles() {
+    try {
+      await page.waitForFunction(() => {
+        const link = document.querySelector('link[rel="stylesheet"]');
+        return !!(link && link.sheet);
+      }, null, { timeout: 15000 });
+    } catch (e) {
+      throw new Error('style.css was not applied: ' + e.message);
+    }
+    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
   }
 
   // Helper: count distinct column-x-positions of chart cards.
@@ -118,6 +146,21 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     const o = await overflow();
     assert(o.scrollW <= o.clientW + 1,
       `horizontal overflow: scrollW=${o.scrollW} clientW=${o.clientW}`);
+  });
+
+  // --- #148: measure only once style.css applies ------------------------
+  // Same case as above with style.css held back for a second. Unstyled
+  // cards stack in one column, so a measurement taken before the
+  // stylesheet applies reads 1 column.
+  await step('viewport 1440 / wrapper 1300px with style.css held back 1s → side-by-side (≥2 cols)', async () => {
+    cssDelayMs = Math.max(envCssDelayMs, 1000);
+    try {
+      await load(1300, 1440);
+    } finally {
+      cssDelayMs = envCssDelayMs;
+    }
+    const cols = await colCount();
+    assert(cols >= 2, `expected ≥2 columns at wrapper 1300px; got ${cols}`);
   });
 
   // --- Viewport 1080: medium width — must not overflow ------------------
@@ -188,8 +231,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       document.getElementById('wrap').style.width = '760px';
     });
     await page.setViewportSize({ width: 768, height: 900 });
-    // Give the browser a frame to recompute layout.
-    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+    // Same wait as after a load: styles applied, then two frames so the
+    // layout is recomputed for the new width.
+    await waitForStyles();
     const colsNarrow = await colCount();
     assert(colsNarrow === 1,
       `expected layout to reflow to 1 column after shrink; got ${colsNarrow}`);

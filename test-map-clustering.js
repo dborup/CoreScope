@@ -115,10 +115,10 @@ console.log('\n=== map.js: clustering ===');
     assert.ok(icon && icon._isDivIcon, 'expected an L.divIcon');
     const html = icon.html || '';
     assert.ok(/>6</.test(html) || html.indexOf('>6<') >= 0, `total count 6 not in html: ${html}`);
-    // Role pill counts should appear
-    assert.ok(html.indexOf('>3<') >= 0, `repeater pill (3) not in html: ${html}`);
-    assert.ok(html.indexOf('>2<') >= 0, `companion pill (2) not in html: ${html}`);
-    assert.ok(html.indexOf('>1<') >= 0, `room pill (1) not in html: ${html}`);
+    // Role pills read letter + count since #1360 (R = repeater, C = companion, M = room)
+    assert.ok(html.indexOf('>R3<') >= 0, `repeater pill (R3) not in html: ${html}`);
+    assert.ok(html.indexOf('>C2<') >= 0, `companion pill (C2) not in html: ${html}`);
+    assert.ok(html.indexOf('>M1<') >= 0, `room pill (M1) not in html: ${html}`);
     // CoreScope-themed wrapper class
     assert.ok((icon.className || '').indexOf('mc-cluster') >= 0, `expected mc-cluster class, got: ${icon.className}`);
   });

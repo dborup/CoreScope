@@ -13,6 +13,51 @@
 # We accept these as residual risk in exchange for a regex-only gate that
 # runs in <5s on every PR and surfaces actionable file:line evidence.
 #
+# #351 N4 / #333: the gate flags an unescaped node-controlled field inside
+# a QUOTED ATTRIBUTE on a sink line, in both the template form
+# (`el.innerHTML = \`<span title="${o.observer_name}">\``) and the concat
+# form (`el.innerHTML = '<span title="' + o.name + '">'`), because strings,
+# templates and // comments are parsed in one left-to-right pass (see
+# strip() below).
+#
+# KNOWN LIMITATION — same-line sinks only. The gate audits the line that
+# holds the sink (innerHTML = …, insertAdjacentHTML(…), bindPopup(…), …).
+# HTML built on OTHER lines and assigned later is not seen, e.g.
+#   function row(o) { return '<td>' + o.iata + '</td>'; }   // not audited
+#   tbody.innerHTML = rows.map(row).join('');                // no field here
+# This is how every #333 sink was written (packets.js / observers.js /
+# region-filter.js row builders), so the gate does not catch those
+# mutants; the DOM-level tests (test-xss-escape-sinks.js,
+# test-xss-333-*e2e.js) do. Flagging every line that builds an HTML
+# fragment was measured on public/*.js (#333 round 2): 224 lines, nearly
+# all pre-escaped locals or static text, i.e. false positives, so it is
+# not enabled. Closing this gap needs data flow, not a line regex.
+#
+# #394 F5 — concrete instance of the above in public/perf.js. perf.js is
+# the string-accumulator shape of the same blind spot:
+#   let html = '';
+#   html += `<tr><td><code>${path}</code></td>…`;   // raw sink — NOT audited
+#   …
+#   el.innerHTML = html;                             // sink line, RHS is a
+#                                                    // bare local, no field
+# The only `.innerHTML =` line carries the bare identifier `html`, so the
+# per-line audit finds no interpolation there, and the `html += `…`` lines
+# are not recognised as sinks. The gate therefore reports 0 findings on the
+# pre-#392 perf.js (verified: `--file` on the pre-fix file exits 0) even
+# though `${path}` / `${q.path}` / `${k}` were live XSS. Those values flow
+# through generically-named locals (`path`, `q.path`, the write-source key
+# `k`) that are NOT in the node-controlled allowlist. Adding them to the
+# allowlist was measured (#394 F5 re-review): across all public/**/*.{js,html}
+# it produces exactly ONE extra finding (route-view.js, a genuine false
+# positive where `k` is a .map() index) — not an explosion. So the allowlist
+# is not the real obstacle; the accumulator shape above is, and it hides the
+# pre-#392 perf.js sinks regardless of the allowlist. Extending detection here
+# would also diverge from the canonical skill-side mirror and its shared
+# allowlist, so the allowlist is left unchanged. The #392 sinks
+# are instead pinned by DOM-grep unit tests (test-xss-escape-sinks.js, the
+# `#392`/`#394` cases) plus a browser E2E (test-xss-392-perf-e2e.js), each
+# with a mutant, which is the regression guard for this file.
+#
 # Two modes:
 #   $0 --file <path>       Scan a single file. Exit 1 if any flagged sink
 #                          interpolates a node-controlled identifier
@@ -26,6 +71,17 @@
 #   $0 --diff [BASE]       Walk git diff $BASE...HEAD for public/**/*.{js,html}
 #                          and apply the same rules to added lines only.
 #                          BASE defaults to origin/master.
+#
+# CI scope: the PR-only `--diff` step in .github/workflows/deploy.yml sets
+# PREFLIGHT_PR_BODY and PREFLIGHT_PR_LABELS but NEVER PREFLIGHT_TEST_FILES.
+# The same-PR DOM-grep test route therefore only applies to local and
+# skill-side runs that set the variable themselves. In CI a flagged sink
+# passes only via an escape helper on the line, DOM construction
+# (createElement + textContent / non-URL setAttribute) instead of an HTML
+# string, or the PR-body opt-out + `xss-optout` label. This is deliberate:
+# the sham-test check (basename + marker grep) is too weak to trust in CI.
+# The fix hint mirrors this and only mentions the test route when
+# PREFLIGHT_TEST_FILES is non-empty.
 #
 # The canonical pr-preflight gate (skill-side) consumes the same allowlist
 # format documented inline below.
@@ -184,16 +240,48 @@ def sink_match(line):
 # Comment/string strip — preserves short identifier-like string contents
 # (so setAttribute('href', ...) keeps its 'href' marker) and template
 # literal ${...} interpolations (so the RHS audit can still see node IDs).
+#
+# #333 F4: strings, template literals and // comments are recognised in ONE
+# left-to-right pass. The earlier version erased "…" runs, then '…' runs,
+# then // to end of line, each over the whole line, so a run of the other
+# quote kind could swallow code: in
+#   el.innerHTML = '<span title="' + o.name + '">'
+# the "…" pass took `"' + o.name + '"` for one string and erased the field,
+# and a URL such as 'https://…' was cut at `//` as if it were a comment.
+# Scanning in order means a quote inside a string or a template is just
+# text, so the round-1 N4 workaround (keeping ${…} found inside "…" runs) is
+# no longer needed, and a plain '…${x}…' literal is no longer mistaken for
+# an interpolation.
 def strip(line):
     line = re.sub(r"/\*.*?\*/", "", line)
-    line = re.sub(r"//[^\n]*", "", line)
-    def short_str(m, q):
-        body = m.group(1)
+    def short_str(body, q):
         if len(body) <= 32 and re.fullmatch(r"[A-Za-z0-9_:\-/.]+", body):
             return q + body + q
         return q + q
-    line = re.sub(r"\"((?:[^\"\\]|\\.)*)\"", lambda m: short_str(m, '"'), line)
-    line = re.sub(r"'((?:[^'\\]|\\.)*)'", lambda m: short_str(m, "'"), line)
+    def scan_to(i, q):
+        # Index of the closing quote q for a literal opened just before i,
+        # skipping backslash escapes; len(line) if it is not closed here.
+        while i < len(line) and line[i] != q:
+            i += 2 if line[i] == "\\" else 1
+        return i
+    out = []
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == "/" and line.startswith("//", i):
+            break  # a real comment: we are outside every literal here
+        if c == "`":
+            j = scan_to(i + 1, "`")
+            out.append(line[i:j + 1])  # left whole for tpl() below
+            i = j + 1
+        elif c in "'\"":
+            j = scan_to(i + 1, c)
+            out.append(short_str(line[i + 1:j], c))
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    line = "".join(out)
     def tpl(m):
         body = m.group(1)
         parts = re.findall(r"\$\{[^}]*\}", body)
@@ -325,7 +413,16 @@ def emit_finding(file, lineno, token, sink):
         print(f"ℹ️  {file}:{lineno}: flagged token '{token}' in {sink} — author opt-out in PR body (xss-optout label + ≥40ch reason)")
         return False
     print(f"❌ {file}:{lineno}: flagged: {token}  (sink: {sink})")
-    print(f"   fix: wrap with escapeHtml(...) / escapeAttr(...) — or add a DOM-grep test in test*.js asserting the payload renders inert — or add 'PREFLIGHT-XSS-OPTOUT: {file}:{lineno} reason=\"...(≥40 chars)...\"' to the PR body AND apply the xss-optout label.")
+    # Only offer the same-PR test route when this run can honor it. CI's
+    # --diff step never sets PREFLIGHT_TEST_FILES, so there it is dead.
+    test_route = (" — or add a DOM-grep test in test*.js (listed in PREFLIGHT_TEST_FILES)"
+                  " asserting the payload renders inert") if TEST_FILES else ""
+    print(f"   fix: wrap with escapeHtml(...) / escapeAttr(...) / esc(...)"
+          f" — or build the DOM with createElement + textContent (setAttribute for non-URL, non-on* attributes) instead of an HTML string"
+          f"{test_route}"
+          f" — or add 'PREFLIGHT-XSS-OPTOUT: {file}:{lineno} reason=\"...(≥40 chars)...\"' to the PR body AND apply the xss-optout label.")
+    if not TEST_FILES:
+        print("   note: PREFLIGHT_TEST_FILES is not set, so existing or same-PR tests do not count as coverage (CI never sets it).")
     return True
 
 def scan_lines(lines_with_no):

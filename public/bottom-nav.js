@@ -8,7 +8,7 @@
  *   4. Map     — primary
  *   5. Channels — primary
  *   6. More    — toggles a bottom-anchored sheet listing the long-tail
- *                routes (Nodes, Tools, Observers, Analytics, Perf, Audio Lab).
+ *                routes (Regions, Nodes, Tools, Observers, Analytics, Perf, Audio Lab).
  *                Replaces the hamburger at ≤768px (#1174 design call).
  *
  * Tabs are <a href="#/..."> so they reuse the existing hashchange-driven
@@ -73,6 +73,7 @@
   // it here, or it will be unreachable on phones at <=768px (the
   // hamburger is hidden at that breakpoint -- see bottom-nav.css).
   var MORE_ROUTES = [
+    { route: 'regions',   hash: '#/regions',   label: 'Regions',   ph: 'globe' },
     { route: 'nodes',     hash: '#/nodes',     label: 'Nodes',     ph: 'monitor' },
     { route: 'tools',     hash: '#/tools',     label: 'Tools',     ph: 'wrench' },
     { route: 'observers', hash: '#/observers', label: 'Observers', ph: 'eye' },

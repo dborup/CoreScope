@@ -121,7 +121,17 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
     page.on('pageerror', (e) => console.error('[pageerror]', e.message));
-    await page.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
+    // #1923 follow-up: pin an explicit window so this step tests the munger
+    // slide-over rather than the clock, the same way #1924 pinned
+    // test-slideover-1056-e2e.js. The packets page defaults to
+    // `since = now - 15 min` client-side, and the freshened fixture's newest
+    // rows age out of that window ~15 minutes after freshen-fixture.sh runs.
+    // Must be > 0: packets.js reads the param only under `_urlTimeWindow > 0`,
+    // so `timeWindow=0` silently keeps the default.
+    // #869: 180 is the largest window the mobile limit accepts (this 800 px
+    // viewport counts as mobile; 1440 fell back to the 15 min default), and the
+    // fixture spans about 2 h, so it still holds rows ~40 min after freshening.
+    await page.goto(BASE + '/#/packets?timeWindow=180', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#pktTable tbody tr[data-action]', { timeout: 8000 });
 
     await step('hashchange: navigating away closes slide-over + releases scroll-lock', async () => {

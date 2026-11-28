@@ -1,0 +1,492 @@
+package main
+
+// #730 M2 — buildings versus trees in GET /api/terrain/profile, with
+// map.dhm.profile.buildings.enabled (off by default).
+//
+// Where the surface model (DSM) stands more than T above the terrain
+// (DTM), a sample inside an INSPIRE – Bygninger footprint is a building,
+// anything else trees or other (internal/buildings). The lookup is one
+// phase of the profile fetch, after the rasters:
+//
+//   - It runs inside the same Flight call, the same admission slot and the
+//     same per-IP charge as the rasters: a cache miss is charged once, as
+//     before, and a hit (or a request that joins a running fetch) makes no
+//     building call at all. There is no new charge path.
+//   - Only model=both that DHM covers end to end is classified (not a
+//     partial one, nor one the foreign fill completed, #738: neither has a
+//     surface verdict), and only the segments with an elevated sample are
+//     fetched: a path where nothing stands above T costs no request.
+//   - The phase has its own deadline (terrainBuildingsDeadline, inside the
+//     profile's 25 s), and the footprints come through one shared
+//     buildings.Fetcher: at most 4 upstream requests at once server-wide,
+//     keyless, cached per segment, coalesced and admitted.
+//   - A failure never fails the profile: the classification is
+//     "unavailable" (or "partial" when only some segments failed), the
+//     answer is 200, and the failure is logged by category. Such a profile
+//     is marked degraded and cached for terrainBuildingsRetryTTL only
+//     (terrainClasses.ttl), so the whole profile is fetched again at most
+//     once per that time. Within it, a hit retries the building phase
+//     alone on the cached rasters (retryBuildings, as #773 retries the
+//     foreign fill), so a recovered footprint service is noticed without
+//     DHM fetching a raster twice (#786 review F2). The retries are spaced
+//     (terrainRetryGate): at most one per cached profile per
+//     terrainBuildingsRetryEvery, the failed lookup counting as the first,
+//     so during an outage a hit is a plain hit (#797 review finding 2).
+//     A deterministic answer (nothing elevated, a truncated segment) is
+//     not degraded, is cached like any profile and is never retried.
+//   - The classes are one byte per sample in the profile's cache entry,
+//     behind a flag bit, so an entry of another format is rejected and
+//     fetched again rather than misread.
+//
+// The response gains named fields only: classification{state, truncated},
+// per-sample cls and verdict.surface.cause, plus the extended credit. With
+// the classification off none of them appear and the answer is byte for
+// byte the old one (TestTerrainProfileGolden_BuildingsOff).
+
+import (
+	"context"
+	"errors"
+	"math"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/meshcore-analyzer/buildings"
+	"github.com/meshcore-analyzer/dhm"
+)
+
+const (
+	// terrainBuildingsDeadline bounds the building phase of one profile
+	// fetch, or of its retry (#730 research §6).
+	terrainBuildingsDeadline = 5 * time.Second
+	// terrainBuildingsRetryTTL is how long a profile whose building lookup
+	// failed is reused before a request fetches it again, rasters and all
+	// (#730 M2).
+	terrainBuildingsRetryTTL = 10 * time.Minute
+	// terrainBuildingsRetryEvery spaces the building retries of one cached
+	// degraded profile within its terrainBuildingsRetryTTL (#797): at most
+	// four retries on the cached rasters before the entry runs out. It must
+	// be shorter than terrainBuildingsRetryTTL, or no retry would ever be
+	// due while the entry lives.
+	//
+	// Both are hardcoded for now; like the other buildings knobs they
+	// belong under map.dhm.profile.buildings.* and later in the customizer
+	// (AGENTS.md rule 8).
+	terrainBuildingsRetryEvery = 2 * time.Minute
+)
+
+// terrainBuildingsMaxSegments is the most segments one profile's corridor
+// has: 80.2 km in 10 km segments.
+var terrainBuildingsMaxSegments = int(math.Ceil(float64(buildings.MaxCorridorM) / buildings.DefaultSegmentM))
+
+// terrainBuildingSource fetches one corridor segment's footprints:
+// *buildings.Fetcher, or a fake in tests.
+type terrainBuildingSource interface {
+	Fetch(ctx context.Context, s buildings.Segment) (buildings.Page, error)
+}
+
+// newTerrainBuildingSource is the production source on baseURL
+// (buildings.DefaultBaseURL outside tests): the keyless INSPIRE client
+// behind a Fetcher whose in-flight bound covers every admitted profile's
+// segments, so the profile admission (maxInFlight) is the bound that
+// bites. At most 4 requests run upstream at once (the Fetcher's
+// Concurrency).
+func newTerrainBuildingSource(set terrainSettings, baseURL string) terrainBuildingSource {
+	co := buildings.DefaultClientOptions()
+	co.BaseURL = baseURL
+	o := buildings.DefaultFetcherOptions()
+	o.MaxInFlight = set.maxInFlight * terrainBuildingsMaxSegments
+	return buildings.NewFetcher(buildings.NewClient(co), o)
+}
+
+// The states of a classification, as cached (one byte) and as served.
+const (
+	terrainClassFull        byte = 1 // every elevated sample has a class
+	terrainClassPartial     byte = 2 // some elevated samples have none
+	terrainClassUnavailable byte = 3 // none could be classified
+)
+
+var terrainClassStates = map[byte]string{
+	terrainClassFull:        "full",
+	terrainClassPartial:     "partial",
+	terrainClassUnavailable: "unavailable",
+}
+
+// terrainClasses is the classification of one profile: its state, whether
+// a segment had more buildings than one page holds, and one
+// buildings.Class per sample. degraded says a segment's lookup failed, so
+// the profile is kept for terrainBuildingsRetryTTL only and a hit on it
+// within that time retries the building phase (retryBuildings).
+type terrainClasses struct {
+	state     byte
+	truncated bool
+	cls       []buildings.Class
+	degraded  bool
+}
+
+// The causes of verdict.surface.cause.
+const (
+	terrainCauseBuilding   = "building"
+	terrainCauseVegetation = "vegetation"
+	terrainCauseUnknown    = "unknown"
+)
+
+// unclassified is the classification of n samples that could not be
+// classified.
+func unclassified(n int) *terrainClasses {
+	return &terrainClasses{state: terrainClassUnavailable, cls: make([]buildings.Class, n)}
+}
+
+// classifyBuildings is the building phase of a profile fetch. ctx is the
+// fetch's: a profile whose requesters have all gone returns its error, so
+// nothing is cached; anything else, failure included, is a
+// classification.
+func (p *terrainProfiler) classifyBuildings(ctx context.Context, plan *dhm.Plan, e terrainElevation) (*terrainClasses, error) {
+	n := len(plan.E)
+	out := unclassified(n)
+	if e.dsm == nil || n < 2 || plan.Covered() < n {
+		// Not wholly inside DHM: no surface verdict (#689 N1, #738), so
+		// nothing to tell apart, and no request.
+		return out, nil
+	}
+	for _, v := range e.dtm {
+		if math.IsNaN(float64(v)) {
+			return out, nil
+		}
+	}
+	c, err := buildings.NewCorridor([2]float64{plan.E[0], plan.N[0]}, [2]float64{plan.E[n-1], plan.N[n-1]},
+		buildings.DefaultRadiusM, buildings.DefaultSegmentM)
+	if err != nil {
+		return out, nil
+	}
+	s := buildings.Samples{E: plan.E, N: plan.N, DTM: e.dtm, DSM: e.dsm, StepM: plan.StepM}
+	o := buildings.DefaultOptions()
+	need, err := c.Needed(s, o)
+	if err != nil {
+		return out, nil
+	}
+	segs := c.Segments()
+	pages := make([]*buildings.Page, len(segs))
+	errs := make([]error, len(segs))
+	bctx, cancel := context.WithTimeout(ctx, p.buildingsDeadline)
+	defer cancel()
+	var wg sync.WaitGroup
+	asked := 0
+	for k := range segs {
+		if !need[k] {
+			continue
+		}
+		asked++
+		wg.Add(1)
+		go func(k int) {
+			defer wg.Done()
+			page, err := p.buildings.Fetch(bctx, segs[k])
+			if err != nil {
+				errs[k] = err
+				return
+			}
+			pages[k] = &page
+		}(k)
+	}
+	wg.Wait()
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, ctx.Err()
+	}
+	if asked == 0 {
+		// Nothing stands above T: every elevated sample (none) is
+		// classified, without a request.
+		out.state = terrainClassFull
+		return out, nil
+	}
+	answered := 0
+	for k, err := range errs {
+		switch {
+		case err != nil:
+			if !out.degraded && p.logFailure != nil {
+				p.logFailure("terrain profile buildings", buildingsFailure(err))
+			}
+			out.degraded = true
+		case pages[k] != nil:
+			answered++
+			out.truncated = out.truncated || pages[k].Truncated
+		}
+	}
+	if answered == 0 {
+		return out, nil
+	}
+	cls, err := buildings.Classify(c, s, pages, o)
+	if err != nil {
+		return out, nil
+	}
+	out.cls, out.state = cls, terrainClassFull
+	for i, cl := range cls {
+		if cl == buildings.Unclassified && s.Elevated(i, o.ThresholdM) {
+			out.state = terrainClassPartial
+			break
+		}
+	}
+	return out, nil
+}
+
+// buildingsFailure is err as a logged category: the phase's own deadline
+// is a timeout.
+func buildingsFailure(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return dhm.FetchError{Reason: "timeout"}
+	}
+	return err
+}
+
+// ttl is how long the profile is cached: briefly when its building
+// lookup failed, else the profile's TTL.
+func (c *terrainClasses) ttl(profileTTL time.Duration) time.Duration {
+	if c != nil && c.degraded && terrainBuildingsRetryTTL < profileTTL {
+		return terrainBuildingsRetryTTL
+	}
+	return profileTTL
+}
+
+// retryBuildings runs the building phase again for a cached profile whose
+// lookup failed (#786 review F2). The rasters come from the cache, so a
+// failing footprint service never makes DHM fetch them twice, and the
+// Fetcher's cache holds the pages of the segments that did answer, so
+// only the failed ones are asked again. A retry is made only when the
+// gate says one is due (#797 review finding 2); otherwise, and for every
+// hit that arrives while one runs, e is served at once, uncharged and
+// without a slot. Like a miss, the retry itself is charged to the client
+// and takes a slot of the profile admission (p.admit, through
+// DoAdmitted); refused by either, it is not made, the charge is given
+// back and the next hit may try. A classification that is no longer
+// degraded replaces the cache entry for the profile's full TTL; one that
+// failed again leaves the entry, and its short TTL, as they are. Whatever
+// stops the retry, the cached profile e is served as it is.
+func (p *terrainProfiler) retryBuildings(r *http.Request, key terrainKey, plan *dhm.Plan, e terrainElevation) terrainElevation {
+	k := key.String()
+	if !p.buildingsRetry.claim(k, p.now()) {
+		return e
+	}
+	if ok, _ := p.limiter.allow(r); !ok {
+		p.buildingsRetry.release(k)
+		return e
+	}
+	data, _, err := p.flight.DoAdmitted(r.Context(), k+"|buildings", p.deadline, p.admit, func(ctx context.Context) ([]byte, error) {
+		f := e
+		var err error
+		if f.classes, err = p.classifyBuildings(ctx, plan, e); err != nil {
+			return nil, err
+		}
+		enc := f.encode()
+		if f.classes.degraded {
+			// Failed again: the next try is a cadence from now.
+			p.buildingsRetry.hold(k, p.now())
+		} else {
+			p.cache.PutFor(key, enc, p.now(), f.classes.ttl(p.set.cacheTTL))
+			p.buildingsRetry.release(k)
+		}
+		return enc, nil
+	})
+	if isTerrainBusy(err) {
+		// Refused by the admission (dhm.ErrAdmissionFull): no upstream
+		// work was done, so give the charge and the turn back.
+		p.limiter.refund(r)
+		p.buildingsRetry.release(k)
+	}
+	if err != nil {
+		return e
+	}
+	f, err := decodeTerrainElevation(data, len(e.dtm), true, true)
+	if err != nil {
+		return e
+	}
+	return f
+}
+
+// terrainRetryGate spaces the building retries of the cached degraded
+// profiles (#797 review finding 2): a profile whose lookup was just tried
+// is held until every has passed. It holds at most max profiles, the
+// profile cache's entry count, so it is bounded like the cache it serves:
+// when full it drops the holds that have run out, and with none to drop
+// it refuses a new retry rather than grow.
+type terrainRetryGate struct {
+	mu    sync.Mutex
+	every time.Duration
+	max   int
+	next  map[string]time.Time // key → the earliest next retry
+}
+
+func newTerrainRetryGate(every time.Duration, max int) *terrainRetryGate {
+	return &terrainRetryGate{every: every, max: max, next: make(map[string]time.Time)}
+}
+
+// claim reports whether a retry of key is due at now, and if so holds key
+// for the cadence, so concurrent hits find it held and start none.
+func (g *terrainRetryGate) claim(key string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if t, ok := g.next[key]; ok && now.Before(t) {
+		return false
+	}
+	return g.holdLocked(key, now)
+}
+
+// hold records that key was tried at now: no retry before now+every.
+func (g *terrainRetryGate) hold(key string, now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.holdLocked(key, now)
+}
+
+func (g *terrainRetryGate) holdLocked(key string, now time.Time) bool {
+	if _, ok := g.next[key]; !ok && len(g.next) >= g.max {
+		for k, t := range g.next {
+			if !now.Before(t) {
+				delete(g.next, k)
+			}
+		}
+		if len(g.next) >= g.max {
+			return false
+		}
+	}
+	g.next[key] = now.Add(g.every)
+	return true
+}
+
+// release forgets key: its retry was refused before any upstream work, or
+// it succeeded and the profile is no longer degraded.
+func (g *terrainRetryGate) release(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.next, key)
+}
+
+func (g *terrainRetryGate) len() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.next)
+}
+
+// used reports whether any sample was classified, i.e. whether footprints
+// went into the answer and are to be credited.
+func (c *terrainClasses) used() bool {
+	for _, cl := range c.cls {
+		if cl != buildings.Unclassified {
+			return true
+		}
+	}
+	return false
+}
+
+// response is the classification as served.
+func (c *terrainClasses) response() *TerrainClassification {
+	return &TerrainClassification{State: terrainClassStates[c.state], Truncated: c.truncated}
+}
+
+// surfaceCause says what stands where the surface verdict is decided
+// (dhm.Link.Obstructions): "building" when any of those samples that is
+// elevated is a building, else "unknown" when any is unclassified, else
+// "vegetation" when any is trees/other. It is "" (absent) when the
+// surface is clear or unknown, or when only the terrain itself decides
+// it. The verdict is not changed (#681 owner decision 6).
+func (c *terrainClasses) surfaceCause(obstructions []int, e terrainElevation) string {
+	t := buildings.DefaultOptions().ThresholdM
+	s := buildings.Samples{DTM: e.dtm, DSM: e.dsm}
+	unknown, vegetation := false, false
+	for _, i := range obstructions {
+		if !s.Elevated(i, t) {
+			continue
+		}
+		switch c.cls[i] {
+		case buildings.Building:
+			return terrainCauseBuilding
+		case buildings.Vegetation:
+			vegetation = true
+		default:
+			unknown = true
+		}
+	}
+	switch {
+	case unknown:
+		return terrainCauseUnknown
+	case vegetation:
+		return terrainCauseVegetation
+	}
+	return ""
+}
+
+// sampleClass is sample i's class as served: "b", "v", or "" (absent).
+func (c *terrainClasses) sampleClass(i int) string {
+	if cl := c.cls[i]; cl != buildings.Unclassified {
+		return string(rune(cl))
+	}
+	return ""
+}
+
+// The cache entry (terrainElevation.encode): byte 4 holds flags, bit 0 a
+// DSM and bits 1-3 the foreign fill (#738); terrainEntryClassified (bit 4)
+// marks a classified entry, whose elevations are followed by the state,
+// a flags byte (terrainClassTruncated, terrainClassDegraded) and one
+// class byte per sample. Before #730 M2 bit 4 had to be 0, so an older
+// reader refuses a classified entry too, and before #730 M3 the flags
+// byte was 0 or 1, so an M2 reader refuses a degraded one.
+const (
+	terrainEntryClassified byte = 1 << 4
+	terrainEntryHeader          = 5
+
+	terrainClassTruncated byte = 1 << 0
+	terrainClassDegraded  byte = 1 << 1
+)
+
+// terrainEntryOK checks an entry's DSM and classification flags and its
+// length against what the profiler expects for n samples: an entry of
+// another format is rejected, never misread. decodeTerrainElevation checks
+// the fill bits.
+func terrainEntryOK(b []byte, n int, both, classified bool) bool {
+	if len(b) < terrainEntryHeader {
+		return false
+	}
+	models := 1
+	if both {
+		models = 2
+	}
+	size := terrainEntryHeader + 4*n*models
+	if classified {
+		size += 2 + n
+	}
+	return b[4]&1 == 1 == both && (b[4]&terrainEntryClassified != 0) == classified && len(b) == size
+}
+
+// appendTo writes c after an entry's elevations.
+func (c *terrainClasses) appendTo(out []byte) []byte {
+	flags := byte(0)
+	if c.truncated {
+		flags |= terrainClassTruncated
+	}
+	if c.degraded {
+		flags |= terrainClassDegraded
+	}
+	out = append(out, c.state, flags)
+	for _, cl := range c.cls {
+		out = append(out, byte(cl))
+	}
+	return out
+}
+
+var errTerrainEntry = errors.New("terrain cache entry does not match its key")
+
+// decodeTerrainClasses reads the trailer appendTo wrote for n samples.
+func decodeTerrainClasses(b []byte, n int) (*terrainClasses, error) {
+	if len(b) != 2+n || terrainClassStates[b[0]] == "" || b[1]&^(terrainClassTruncated|terrainClassDegraded) != 0 {
+		return nil, errTerrainEntry
+	}
+	c := &terrainClasses{state: b[0], truncated: b[1]&terrainClassTruncated != 0,
+		degraded: b[1]&terrainClassDegraded != 0, cls: make([]buildings.Class, n)}
+	for i, v := range b[2:] {
+		switch cl := buildings.Class(v); cl {
+		case buildings.Unclassified, buildings.Building, buildings.Vegetation:
+			c.cls[i] = cl
+		default:
+			return nil, errTerrainEntry
+		}
+	}
+	return c, nil
+}

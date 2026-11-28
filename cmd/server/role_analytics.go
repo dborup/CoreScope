@@ -120,6 +120,7 @@ func (s *Server) handleAnalyticsRoles(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, RoleAnalyticsResponse{Roles: []RoleStats{}})
 		return
 	}
+	setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompRoles)) // #492
 	writeJSON(w, s.store.GetAnalyticsRoles())
 }
 

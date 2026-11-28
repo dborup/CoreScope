@@ -11,6 +11,7 @@
 ## Table of Contents
 
 - [Conventions](#conventions)
+- [Estimated-position policy](#estimated-position-policy)
 - [GET /api/stats](#get-apistats)
 - [GET /api/health](#get-apihealth)
 - [GET /api/perf](#get-apiperf)
@@ -24,17 +25,25 @@
 - [GET /api/nodes/:pubkey/paths](#get-apinodespubkeypaths)
 - [GET /api/nodes/:pubkey/analytics](#get-apinodespubkeyanalytics)
 - [GET /api/nodes/:pubkey/reach](#get-apinodespubkeyreach)
+- [GET /api/reach-rank](#get-apireach-rank)
 - [GET /api/packets](#get-apipackets)
 - [GET /api/packets/timestamps](#get-apipacketstimestamps)
 - [GET /api/packets/:id](#get-apipacketsid)
-- [POST /api/packets](#post-apipackets)
+- [POST /api/packets/observations](#post-apipacketsobservations)
 - [POST /api/decode](#post-apidecode)
 - [GET /api/observers](#get-apiobservers)
 - [GET /api/observers/:id](#get-apiobserversid)
 - [GET /api/observers/:id/analytics](#get-apiobserversidanalytics)
 - [GET /api/channels](#get-apichannels)
 - [GET /api/channels/:hash/messages](#get-apichannelshashmessages)
+- [GET /api/channel-proposals/config](#get-apichannel-proposalsconfig)
+- [POST /api/channel-proposals](#post-apichannel-proposals)
+- [GET /api/channel-proposals/requests/:requestId](#get-apichannel-proposalsrequestsrequestid)
+- [GET /api/admin/channel-proposals](#get-apiadminchannel-proposals)
+- [POST /api/admin/channel-proposals/:id/approve and /reject](#post-apiadminchannel-proposalsidapprove-and-reject)
+- [POST /api/admin/channel-proposals/:id/revoke](#post-apiadminchannel-proposalsidrevoke)
 - [GET /api/analytics/rf](#get-apianalyticsrf)
+- [GET /api/analytics/observer-comparison](#get-apianalyticsobserver-comparison)
 - [GET /api/analytics/topology](#get-apianalyticstopology)
 - [GET /api/analytics/channels](#get-apianalyticschannels)
 - [GET /api/analytics/distance](#get-apianalyticsdistance)
@@ -42,10 +51,12 @@
 - [GET /api/analytics/subpaths](#get-apianalyticssubpaths)
 - [GET /api/analytics/subpath-detail](#get-apianalyticssubpath-detail)
 - [GET /api/scope-stats](#get-apiscope-stats)
+- [GET /api/regions/observed](#get-apiregionsobserved)
 - [GET /api/resolve-hops](#get-apiresolve-hops)
 - [GET /api/traces/:hash](#get-apitraceshash)
 - [GET /api/config/theme](#get-apiconfigtheme)
 - [GET /api/config/regions](#get-apiconfigregions)
+- [GET /api/config/regions/groups](#get-apiconfigregionsgroups)
 - [GET /api/config/areas](#get-apiconfigareas)
 - [GET /api/config/areas/polygons](#get-apiconfigareaspolygons)
 - [GET /api/config/client](#get-apiconfigclient)
@@ -59,6 +70,90 @@
 - [Area Filter](#area-filter)
 
 ---
+
+## Estimated-position policy
+
+`config.json` accepts `estimatedPositions: { "enabled": false }`. Missing
+section or field defaults to `true`. This is a server-startup policy, not a
+request parameter or a browser preference. Restart the server to change it.
+`GET /api/config/client` always publishes the effective value as
+`estimatedPositions: { "enabled": <boolean> }`.
+
+When disabled:
+
+- Node detail omits `estimated_lat`, `estimated_lon`,
+  `estimated_contributor_count`, and `estimated_distance_km`. Reported
+  `lat`/`lon` are unchanged.
+- Packet paths and saved Ping Scores path responses retain route identities
+  and reported coordinates but omit neighbor-derived coordinates and their
+  approximation metadata. Endpoint distances depending on removed estimates
+  are omitted; distances between reported endpoints remain valid. Saved
+  source archives are not modified -- neither by a request nor by the
+  background Ping Scores history refresh -- so re-enabling the policy serves
+  the original archived geometry again.
+- `/api/analytics/areas` returns `estimatedPositionsEnabled: false` alongside
+  `density`, `bridgeNodes`, and `unpositionedTotal`. It omits uncomputed
+  `positionGaps`, `estimatedNodes`, and `unpositionedNoNeighborFix` rather than
+  claiming zero gaps or no neighbor evidence.
+- `/api/analytics/gps-sanity` returns only
+  `{ "estimatedPositionsEnabled": false }`, without running the estimator.
+
+Enabled analytics retain their existing response shapes. API clients must
+distinguish disabled computation from an enabled, empty result. The policy
+does not disable ordinary neighbor graphs or independent IATA/name-based
+position fallbacks. No query parameter can override the server setting.
+
+## GET /api/ping-scores/:hash/path
+
+Returns path evidence for a currently displayed Ping Scores record. Requires
+`record=allTime.<kind>` or `record=thisWeek.<kind>`, where `<kind>` is one of
+`farthestPing`, `mostHopsPing`, `widestSpreadPing`, `fastestSpreadPing`, or
+`mostEfficientPing`. The hash must match that slot's current record.
+
+```json
+{
+  "status": "archived",
+  "capturedAt": "2026-01-15T10:05:00Z",
+  "path": {
+    "hash": "example",
+    "branches": [{ "hops": 0, "points": [], "observer": { "name": "Example", "lat": 56.0, "lon": 10.0 } }]
+  }
+}
+```
+
+`status` is `archived` (saved route geometry), `live` (currently available
+observations), `initializing` (board not published yet), or `unavailable`.
+`capturedAt` is the archive capture time, not a radio transmission timestamp.
+Unavailable responses omit `path` and include a `reason`: expired raw data
+before capture, no coordinates, privacy filtering, or archive size limits
+(`raw_data_expired_before_capture`, `no_coordinates`, `privacy_filtered`,
+`archive_too_large`). `record_evidence_unavailable` means current observations
+no longer reproduce the saved record and no matching archive exists; a
+smaller live map is not substituted. Invalid slots return 400; superseded slot/hash pairs
+return 404. A visibility lookup failure returns 500 rather than exposing data.
+
+The existing ping history sidecar stores at most ten record-slot paths, each
+limited to 256 KiB, 128 branches and 4,096 points (including `first`). Paths
+are saved atomically with record changes and restored after restart. Old
+records whose observations were already pruned cannot be reconstructed.
+Superseded records are not a permanent path archive. Packet retention and the
+main database schema are unchanged.
+
+The sidecar's additive v3 migration also adds a nullable distance-origin
+pubkey, without scanning existing rows. This keeps historical distance
+evidence separate from current first-hearer leaderboard credit. Missing
+GPS, including fallback to an IATA airport, cannot lower an established
+distance; genuine corrections with both historical endpoints positioned are
+still allowed.
+
+Archived and live paths both apply the current node/observer blacklists and
+hidden-name prefixes, including saved names and current/inactive names.
+Hidden branches are omitted entirely; hidden first observations and their
+relative measurements are removed. Approximate neighbor-centroid positions
+are omitted when a visibility policy is active because the path format does
+not identify their contributors. Touched areas are recomputed from visible
+positions and current area configuration. Existing general packet-path
+endpoints are unchanged.
 
 ## Conventions
 
@@ -93,7 +188,55 @@ They return `total` (the unfiltered/filtered count before pagination).
 ```
 
 - `400` — Bad request (missing/invalid params)
-- `404` — Resource not found
+- `404` — Resource not found, or an unrecognized `/api` or `/api/*` path
+- `405` — A known `/api/*` path called with an unsupported method; the response carries an `Allow` header listing the methods that path does support
+- `413` — Request body over the byte cap on `POST /api/decode` or `POST /api/packets/observations` (other capped endpoints report an over-cap body as `400`; see below)
+
+`HEAD` is accepted on every path that accepts `GET` and returns the same status and headers without a body.
+
+#### Request-body byte caps
+
+Every endpoint that takes a request body bounds it — with one exception, noted
+below — and every bound is enforced by the application itself, not by a reverse
+proxy in front of it. **Neither the enforcement nor the status code is
+uniform**, so the table gives both per endpoint:
+
+| Endpoint | Cap | Enforced on | Over the cap |
+|---|---|---|---|
+| `POST /api/decode` | 4096 bytes | bytes received, before parsing | `413` `{"error":"request body too large (max 4096 bytes)"}`, `application/json` |
+| `POST /api/packets/observations` | 65536 bytes | bytes received, before parsing | `413` `{"error":"request body too large (max 65536 bytes)"}`, `application/json` |
+| `POST /api/paths/inspect` | 4096 bytes | the streaming decoder | `400` `{"error":"invalid JSON"}`, served as `text/plain` |
+| `POST /api/channel-proposals` | 1024 bytes | the streaming decoder | `400` `{"error":"invalid request body"}`, `application/json` |
+| `PUT /api/config/geo-filter` (API key) | 1048576 bytes (1 MiB) | the streaming decoder | `400` `{"error":"invalid JSON"}`, `application/json` |
+
+**Enforced on bytes received, before parsing** (the two rows issue #334
+covers) is the strict reading: the verdict depends only on how many bytes
+arrived. It does not depend on the body's shape — bulk sitting in an unknown
+field, or in a string the endpoint never reads, is rejected the same way — and
+it does not depend on `Content-Length`, so a chunked request that declares no
+length, or one that understates it, is cut off at the same byte count. A body
+of exactly the cap is accepted; one byte more is `413`, and the server stops
+reading there instead of buffering the rest.
+
+**Enforced on the streaming decoder** is weaker: the limit wraps the body and
+the JSON decoder reads through it, so the limit only bites when the JSON
+*value* runs past it. A body that is over the limit only because of data that
+follows the value is still accepted — for example a 6019-byte
+`POST /api/paths/inspect` body whose JSON object ends at byte 19 answers `200`
+despite the 4096-byte limit. When the limit does bite, the decoder reports a
+parse failure, which is why these rows answer `400` rather than `413`.
+
+Three gaps are known and deliberately not changed by #334, because each is an
+API-visible change with its own clients to check:
+
+- the three streaming rows are not enforced on bytes received;
+- they are not aligned on `413` + the shared error shape;
+- `POST /api/admin/prune-geo-filter?confirm=true` (API key) decodes a JSON body
+  with **no limit at all**.
+
+Caps are deliberately well above anything a legitimate client sends (see each
+endpoint below), so a per-endpoint semantic limit — such as the 200-hash limit
+on `POST /api/packets/observations` — is what a real client meets first.
 
 ---
 
@@ -162,7 +305,15 @@ Server health and telemetry. Used by monitoring.
     "hitRate":    number        // percentage (0–100)
   },
   "websocket": {
-    "clients":   number        // connected WS clients
+    "clients":   number,       // connected WS clients
+    // Upgrade refusals since boot, omitted when zero. deny/rate/connCap are
+    // the per-IP rules; globalCap is the server-wide concurrent ceiling
+    // (webSocket.maxClients, default 512 — a nonzero value here means the
+    // server was full, not that one client misbehaved) (#369).
+    "rejectedDeny":      number,
+    "rejectedRate":      number,
+    "rejectedConnCap":   number,
+    "rejectedGlobalCap": number
   },
   "packetStore": {
     "packets":      number,    // loaded transmissions
@@ -174,6 +325,13 @@ Server health and telemetry. Used by monitoring.
     "slowQueries":   number,
     "recentSlow": [            // last 5
       {
+        // Same SlowQuery shape as GET /api/perf → slowQueries[]: normalized
+        // route key + a sanitised, control-char-stripped copy of the raw
+        // request path (each half ≤128 content runes plus an "…" truncation
+        // marker), joined by a space (e.g. "/api/nodes/:id
+        // /api/nodes/abcd1234"); unmatched routes emit the capped raw path
+        // once. Not HTML-escaped — clients MUST escape before DOM insertion
+        // (#392, #394 F3/F4/F6).
         "path":   string,
         "ms":     number,
         "time":   string,      // ISO timestamp
@@ -189,6 +347,18 @@ Server health and telemetry. Used by monitoring.
 ## GET /api/perf
 
 Detailed performance metrics per endpoint.
+
+### Query Parameters
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `mem` | string | `1` adds `memoryBreakdown` and `memoryBreakdownNote`: a walk of every stored transmission and observation under the packet-store read lock. Ignored when the server has no packet store. |
+
+`mem=1` is admission-controlled per server process (#371): one scan at a
+time, and none for 5 s after a scan completes. A refused request gets
+`429` with `Retry-After` (whole seconds, rounded up) and
+`{"error": string, "retryAfter": number}`, before the store is touched.
+Requests without `mem=1` are never limited.
 
 ### Response `200`
 
@@ -209,6 +379,14 @@ Detailed performance metrics per endpoint.
   },
   "slowQueries": [                  // last 20 queries > 100ms
     {
+      // Normalized route key + a sanitised copy of the raw request path,
+      // joined by a single space, e.g. "/api/nodes/:id /api/nodes/abcd1234".
+      // BOTH halves are independently control-char-stripped (incl. CR/LF/TAB)
+      // and capped to ≤128 content runes each (an "…" marks truncation), so
+      // the whole value is bounded at ≤259 runes (2×128 content runes + two
+      // "…" markers + the join space) regardless of input (#392, #394 F3/F4).
+      // Unmatched routes (key == raw) emit the capped raw path once. Not
+      // HTML-escaped — clients MUST escape before inserting into the DOM.
       "path":   string,
       "ms":     number,
       "time":   string,             // ISO timestamp
@@ -313,7 +491,7 @@ Paginated node list with filtering.
       "last_seen":     string (ISO),
       "first_seen":    string (ISO),
       "advert_count":  number,
-      "hash_size":     number | null,    // latest hash size (1–3 bytes)
+      "hash_size":     number | null,    // latest hash size (1–3 bytes); falls back to the newest size-declaring advert in the DB when none is in the window (#807)
       "hash_size_inconsistent": boolean, // true if flip-flopping
       "hash_sizes_seen": [number] | undefined, // present only if >1 unique size seen
       "last_heard":    string (ISO) | undefined, // from in-memory packets or path relay
@@ -397,23 +575,18 @@ Returns a JSON array (not wrapped in an object):
       "totalObservations":  number,
       "totalPackets":       number,   // same as totalTransmissions (backward compat)
       "packetsToday":       number,
-      "avgSnr":             number | null,
-      "lastHeard":          string (ISO) | null
+      "avgSnr":             number | null, // direct receptions only (see Heard By)
+      "lastHeard":          string (ISO) | null,
+      "lastAdvert":         string (ISO) | null
     },
-    "observers": [
-      {
-        "observer_id":   string,
-        "observer_name": string | null,
-        "avgSnr":        number | null,
-        "avgRssi":       number | null,
-        "packetCount":   number
-      }
-    ]
+    "directObservers": [ HeardDirectObserver ],  // see Heard By below
+    "relayObservers":  [ HeardRelayObserver ]
   }
 ]
 ```
 
-**Note:** This is a bare array, not `{ nodes: [...] }`.
+**Note:** This is a bare array, not `{ nodes: [...] }`. The rows carry no
+`can_relay`; the single-node endpoint does.
 
 ---
 
@@ -457,6 +630,18 @@ Node detail page data.
 |----------|--------|----------------------|
 | `pubkey` | string | Node public key (hex)|
 
+### Query Parameters
+
+| Param     | Type   | Description |
+|-----------|--------|-------------|
+| `include` | string | Opt-in extras, comma-separated (may also repeat). `advertRoutes` adds `recentAdvertsByRoute`, `advertCounts`, `advertIntervals` and `route_class` on the `recentAdverts` ADVERT rows (see [Advert route classes](#advert-route-classes) and [Estimated advert intervals](#estimated-advert-intervals)). Unknown values are ignored. |
+
+Without `include=advertRoutes` the response is exactly the pre-#2073 one:
+no `recentAdvertsByRoute`, no `advertCounts`, no `advertIntervals`, no `route_class`. The breakdown
+scans all of the node's ADVERT rows, so only the node page (full view and
+side panel) asks for it; the packets, live, channels and route views and the
+claimed-nodes lookups do not.
+
 ### Response `200`
 
 ```jsonc
@@ -472,13 +657,163 @@ Node detail page data.
     "advert_count":  number,
     "hash_size":     number | null,
     "hash_size_inconsistent": boolean,
-    "hash_sizes_seen": [number] | undefined
+    "hash_sizes_seen": [number] | undefined,
+    "flood_advert_count_7d": number   // route_type 1 only (see below)
   },
-  "recentAdverts": [Packet]   // last 20 packets for this node, newest first
+  "recentAdverts": [Packet],  // last 20 packets for this node, newest ingest first;
+                              // with include=advertRoutes ADVERT rows also carry route_class
+  "recentAdvertsByRoute": {   // include=advertRoutes only; absent when the identity is hidden
+    "limit":    20,           // max rows per class
+    "flood":    [Packet],     // newest adverts per route class, newest ingest first;
+                              // rows without the observations array
+    "zero_hop": [Packet],
+    "mixed":    [Packet],
+    "unknown":  [Packet]      // only present when the node has such adverts
+  },
+  "advertCounts": {           // include=advertRoutes only; absent when the identity is hidden
+    "24h": { "flood": number, "zero_hop": number, "mixed": number, "unknown": number },
+    "7d":  { "flood": number, "zero_hop": number, "mixed": number, "unknown": number },
+    "truncated": boolean,     // more adverts than the 50,000-row cap in the 7d floor
+    "route_mask_backfill": { "status": "pending" | "backfilling" | "complete", "remaining": number | null }
+  },
+  "advertIntervals": {        // include=advertRoutes only; absent when the identity is hidden
+    "window": 20,             // most adverts per class considered
+    "flood":    AdvertIntervalEstimate,
+    "zero_hop": AdvertIntervalEstimate
+  }
+}
+```
+
+Where `AdvertIntervalEstimate` is:
+
+```jsonc
+{
+  "interval_s":     number | null,  // estimate in seconds, snapped when "snapped"; null when confidence is none
+  "raw_interval_s": number | null,  // the median before snapping
+  "snapped":        boolean,
+  "samples":        number,         // adverts used (after a raised interval: those since the change)
+  "gaps_used":      number,         // gaps between them that fit 1-4x the interval
+  "confidence":     "high" | "medium" | "low" | "none",
+  "status":         "estimated" | "none_observed" | "too_few" | "irregular",
+  "last_advert":    string (ISO) | null  // first_seen of the newest advert in the class
 }
 ```
 
 Where `Packet` is a transmission object (see [Packet Object](#packet-object)).
+
+#### Advert route classes
+
+`recentAdvertsByRoute`, `advertCounts` and `route_class` (port/extension of
+upstream `Kpa-clawbot/CoreScope#2073`) classify ADVERTs exactly like the
+ADVERT rows of Relay Airtime Share (#89), from `transmissions.route_mask`
+(every raw route type observed for the content hash):
+
+| `route_class` | Meaning |
+|---------------|---------|
+| `flood`       | only route 0/1 (transport flood / flood) seen |
+| `zero_hop`    | only route 2/3 — a zero-hop advert is sent DIRECT with an empty path |
+| `mixed`       | both flood and zero-hop routes seen for the same advert |
+| `unknown`     | no usable route — the same bucket Relay Airtime Share's `route_class` calls `legacy` (its historical plain ADVERT row); one classifier, two names kept for API compatibility |
+
+Rows whose mask is not backfilled yet (and databases without the column)
+fall back to the first-inserted `route_type`; `route_mask_backfill` says
+whether that fallback is still in use (anything but `complete`: provisional).
+
+- The class is filtered before the per-class limit, so frequent
+  zero-hop adverts cannot push rare flood adverts out of `flood`. A mixed
+  advert appears only under `mixed`.
+- `advertCounts` counts distinct adverts (by hash) whose `first_seen` — when
+  the advert was first heard, the axis `flood_advert_count_7d` uses too —
+  lies in the window. Rows whose `first_seen` cannot be parsed are skipped,
+  as for `flood_advert_count_7d`.
+- `flood_advert_count_7d` is unchanged (an external contract): it counts
+  `route_type` 1 only. `advertCounts["7d"].flood` differs from it: it also
+  counts transport flood (route 0) and never counts a mixed advert, while
+  `flood_advert_count_7d` counts a mixed advert whose first-inserted route
+  was 1.
+- Both new fields follow the node-detail visibility rules (blacklisted and
+  hidden-name nodes are 404) and are omitted when the identity is hidden by
+  the observer blacklist or an observer name (#68); `route_class` is then
+  left off the `recentAdverts` rows as well.
+- The per-class rows omit the `observations` array (they repeat rows of
+  `recentAdverts`); `observation_count` and the best observation's fields
+  stay. Their `route_class` is the class they were listed under.
+- The breakdown is cached per node for up to 30 s, and refreshed once the
+  node has a newer transmission (at most every 5 s). `flood_advert_count_7d`
+  is never cached: it is counted on every request (a request that scanned
+  the node for the breakdown itself takes the identical number from that
+  scan).
+
+#### Estimated advert intervals
+
+`advertIntervals` (#245) estimates how often the node sends flood and
+zero-hop adverts, from the gaps between the adverts listed in
+`recentAdvertsByRoute.flood` and `.zero_hop` (so at most 20 per class, and no
+extra query). Mixed and unknown adverts are not used.
+
+The firmware settings it maps to (MeshCore `src/helpers/CommonCLI.cpp`):
+
+| Class | Setting | Allowed values | Default |
+|-------|---------|----------------|---------|
+| `flood` | `flood.advert.interval` (hours) | 0 = off, 3–168 | 47 h on repeaters and room servers, off on sensors |
+| `zero_hop` | `advert.interval` (minutes, stored / 2) | 0 = off, 60–240, even minutes | 2 min on an untouched new install, off after the first saved setting |
+
+- **Gaps.** A gap is taken from the adverts' own (sender) timestamps
+  when both are plausible: not ahead of `first_seen` by more than 10 min,
+  positive, and within max(10 min, 10 %) of the `first_seen` gap. Otherwise
+  it is taken from `first_seen`. A sender clock that is wrong by a steady
+  offset is still used; a jump or reset is not.
+- **The interval.** It must be seen directly, within 10 %, in at least two
+  gaps and a quarter of them. It must be an interval the class's timer can
+  run at, within 10 %: flood 3 h or more; zero-hop the 2 min new-install
+  default or 60 min or more (so manual `advert.zerohop` every 10–30 min is
+  irregular). Of those candidates, the one that explains the most gaps as
+  1–4× itself wins.
+  - A gap of k× the interval counts as k−1 missed adverts.
+  - Shorter gaps are dropped and count neither way: manual adverts and
+    reboots.
+  - Longer gaps that are no multiple are *irregular* and lower the
+    confidence. One is the zero-hop gap across a flood advert: the flood
+    advert re-arms the zero-hop timer, so that gap is between one and two
+    zero-hop intervals.
+- **A raised interval.** A new interval of 2–4× the old one fits every new
+  gap as missed adverts of the old one. When the newest 3 gaps that fit the
+  interval are all the same multiple k > 1, that is read as a raised
+  setting: the estimate is redone on the adverts since the newest gap at the
+  old interval, and `samples` counts those. Two in a row, or different
+  multiples, stay missed adverts. A lowered interval needs no special case:
+  the new one explains the old gaps as multiples once it is seen in a
+  quarter of the gaps.
+- **The value.** It is the median of gap/k over the fitting gaps (`raw_interval_s`).
+  It is snapped to the nearest settable value when it lies within 10 % of
+  the settable range (`snapped`).
+- **Confidence.**
+  - `high`: ≥ 6 fitting gaps, and ≥ 75 % of the gaps that are not short fit.
+  - `medium`: ≥ 3 fitting gaps and ≥ 50 %.
+  - `low`: anything less.
+  - `none`: fewer than 3 adverts, or no interval seen twice. `interval_s`
+    is then `null`.
+- **Status.** `estimated` when `interval_s` is set, `none_observed` with no
+  adverts of the class, `too_few` under 3 adverts, `irregular` otherwise.
+  The UI words the row from it.
+- **Known limitation: sparse coverage.** When the interval itself is never
+  heard twice in a row (a distant node heard every second or third time),
+  it is no candidate, and a multiple of it is reported: a 47 h flood heard
+  94 h and 141 h apart reads as 94 h or 141 h at medium confidence.
+- **Known trade-off: false change.** The raised-interval rule can read an
+  unchanged interval as raised. When the newest 3 heard gaps are all the
+  same multiple k (every 2nd or 3rd advert lost), the result is k× at
+  medium confidence on 4 adverts: 60 min reads as 120 min, 47 h as 94 h,
+  and 120 min with 3× gaps as 360 min. Gaps that fit no multiple (an
+  outage over 4×, a reboot advert between the 2× gaps) do not break the
+  run. The next gap heard at the interval itself does, and the estimate
+  returns to the interval. The opposite choice kept a raised interval at the
+  old value, at high confidence, for weeks (review F1 on #247).
+- **No zero-hop adverts.** A zero-hop advert is only recorded when an
+  observer hears the node directly. "None observed" can therefore mean that
+  the interval is 0 (off), or that no observer is in direct range.
+- **Visibility and caching.** The field is cached and hidden together with
+  `recentAdvertsByRoute`.
 
 ### Response `404`
 
@@ -506,14 +841,22 @@ Detailed health information for a single node.
     "first_seen":   string (ISO),
     "advert_count": number
   },
-  "observers": [
+  "directObservers": [               // HeardDirectObserver, see Heard By below
     {
       "observer_id":   string,
-      "observer_name": string | null,
-      "packetCount":   number,
-      "avgSnr":        number | null,
+      "observer_name": string,
+      "packetCount":   number,          // direct receptions
+      "avgSnr":        number | null,   // over those receptions: the node's signal
       "avgRssi":       number | null,
-      "iata":          string | null
+      "can_relay":     boolean          // omitted when the observer never reported repeat
+    }
+  ],
+  "relayObservers": [                // HeardRelayObserver
+    {
+      "observer_id":   string,
+      "observer_name": string,
+      "packetCount":   number,          // the node's transmissions this observer saw
+      "can_relay":     boolean          // omitted when unknown
     }
   ],
   "stats": {
@@ -521,18 +864,96 @@ Detailed health information for a single node.
     "totalObservations":  number,
     "totalPackets":       number,    // same as totalTransmissions (backward compat)
     "packetsToday":       number,
-    "avgSnr":             number | null,
+    "avgSnr":             number | null, // direct receptions only; null without one
     "avgHops":            number,    // rounded integer
-    "lastHeard":          string (ISO) | null
+    "lastHeard":          string (ISO) | null,
+    "lastAdvert":         string (ISO) | null
   },
   "recentPackets": [                 // last 20 packets, observations stripped
     {
       // Packet fields (see Packet Object) minus `observations`
       "observation_count": number    // added for display
     }
-  ]
+  ],
+  "activity24h": {
+    "windowStart": string (ISO UTC), // inclusive: request time minus 24 hours
+    "windowEnd": string (ISO UTC),   // exclusive: request time
+    "buckets": [                    // always 24 rolling one-hour buckets, oldest first
+      { "start": string (ISO UTC), "end": string (ISO UTC), "count": number }
+    ],
+    "coverageStart": string (ISO UTC) | null,
+    "complete": boolean
+  }
 }
 ```
+
+### Heard By (#76)
+
+`directObservers` and `relayObservers` replace the former `observers` list,
+on this endpoint and on `/api/nodes/bulk-health`. Together they hold every
+observer that recorded any observation of the node's transmissions (as
+originator, destination or resolved relay hop), each in exactly one list.
+They describe **observed routing evidence, not radio range**.
+
+An observer is in `directObservers` when at least one of its observations
+shows that it received the node's own transmission. Only an ADVERT whose
+signature is not known to be invalid can show that, read with the
+observation's own route type (its stored frame header; without one the
+transmission's route type, or unknown when the transmission was heard on
+both flood and direct routes) and its own path:
+
+| Observation route | Path | Credits |
+|---|---|---|
+| FLOOD / TRANSPORT_FLOOD | empty | the advertiser |
+| FLOOD / TRANSPORT_FLOOD | non-empty | the last hop, when it is the node's full key or a wire prefix unique among relay-capable nodes, and the node is not a listener (the evidence `lastHeard` uses) |
+| DIRECT / TRANSPORT_DIRECT | empty (zero hop) | the advertiser |
+| DIRECT / TRANSPORT_DIRECT | non-empty | nobody: it is the remaining route |
+
+This follows the firmware: a flood forwarder appends its own hash before it
+retransmits, `sendZeroHop` sends with an empty direct path, and a direct
+forwarder removes itself from the path. An observer never counts as hearing
+its own upload of the node's transmission.
+
+Every other observer is in `relayObservers`. For those the evidence names
+another transmitter or none (relayed copies, non-ADVERT traffic, direct
+routes, an ambiguous last hop), so their signal values would describe some
+other node and are not reported. An empty `directObservers` is missing
+evidence, not proof that no observer is in radio range.
+
+Observers whose identity is hidden (node or observer blacklist, or a recorded
+or current name with a hidden-name prefix) are left out of both lists.
+
+`activity24h.count` counts unique transmissions associated with this node in
+the in-memory node index, using each transmission's `first_seen` time. Multiple
+observations of one transmission count once. Association can come from node
+identity or a resolved path; it does not prove that a repeater forwarded the
+packet. Bucket boundaries are half-open `[start, end)` and move with request
+time rather than aligning to clock hours. A malformed `first_seen` is ignored.
+`complete` is true only when successful loading has proven that every retained
+transmission since the coverage start is in memory and the retention/index
+bounds cover the whole 24-hour window. Rows that retention or eviction removed
+while loading lie before the coverage start and do not count as missing. The
+server's general background-load “done” threshold of 90% is not enough for
+this field. If `complete` is false, zero-count
+buckets before `coverageStart` represent unknown history rather than confirmed
+silence. A null `coverageStart` means coverage cannot be established (for
+example during startup or after a failed load).
+
+With `?include=advertIntervals`, repeater health may also return
+`advertIntervals` in the same shape as the node-detail `include=advertRoutes`
+response: `{ "window": 20, "flood": AdvertIntervalEstimate,
+"zero_hop": AdvertIntervalEstimate }`, plus `advertRouteBackfill` as a
+`RouteMaskBackfillStatus` (`status`: `pending`, `backfilling`, or `complete`;
+`remaining`: number or null). Both fields are absent by default, for
+non-repeaters, and for hidden identities. If the backfill status is anything
+other than `complete`, including absent in an older response, route classes
+and their estimated intervals are provisional. The server reuses the bounded,
+per-node cached advert-route scan; this is an opt-in because a cold scan of a
+node with many adverts is comparatively expensive. `interval_s` is an
+**estimate** from at most the newest 20 distinct adverts in each route class,
+not the repeater's configured interval. Missed receptions and limited history
+can skew it. `null` plus `status` (`none_observed`, `too_few`, or `irregular`)
+means no defensible estimate, not proof the device's timer is disabled.
 
 ### Response `404`
 
@@ -673,6 +1094,46 @@ Per-node analytics over a time range.
 
 ---
 
+### Node analytics history coverage (`/analytics` and `/analytics/summary`)
+
+Both endpoints preserve the requested `timeRange` and return an additional
+`coverage` object: `{ from, to, seconds, partial, reason, loading, late_evicted_observations }`. The full
+and lightweight endpoints use exactly the same coverage and computed statistics
+when evaluated at the same instant. All boundaries are UTC and inclusive;
+invalid timestamps and future transmissions are excluded. There is no implicit
+retention-edge tolerance.
+
+`coverage.from` is the later of the requested start, configured retention cutoff,
+successfully loaded contiguous window, and earliest persisted **observation**
+evidence available in that window. An old transmission's `first_seen`, including
+an old hash heard again recently, does not prove earlier coverage. Loader state
+and the evidence edge are captured at startup; requests do not scan SQLite.
+While startup/background loading continues, `partial` and `loading` are true.
+Capped/failed loads conservatively certify only history after their completion;
+memory eviction advances the edge to the evicted transmissions' `first_seen`
+(the eviction boundary; packet membership is by `first_seen`). Late observations
+of evicted, re-heard transmissions never move `from`; they are counted (when heard more than 1 h after `first_seen`) in
+`late_evicted_observations` as a known, bounded gap. A later background completion cannot restore
+an evicted interval. Reasons include `complete`, `available_history`, `loading`,
+`unknown_history`, `load_capped`, `load_failed`, and `memory_eviction`.
+
+The packet set (including all display arrays and the summary numerator) is
+filtered to this effective interval, without changing sender/recipient/relay
+membership rules. Packets/day uses `totalPackets * 86400 / coverage.seconds`.
+Availability is the fraction of supported UTC-hour time bins containing at least
+one packet: a partially covered first or last hour contributes only its actual
+intersection duration, to both numerator and denominator. The first timeline bin
+is clipped to `coverage.from`. Zero supported duration yields zero rates and no
+packets; an empty/unknown store does not claim that missing history was silent.
+A node with no packets in an otherwise known supported interval has zero rates.
+
+This measures **available retained store history**, not uninterrupted recorder
+operation, radio uptime, successful reception, or an exact physical availability
+measurement. No new schema/config, historical SQL fallback, or acquisition-start
+guarantee is introduced. The UI explicitly warns when the requested range is
+only partially supported. It distinguishes unknown/loading history from an
+inactive node in a known interval.
+
 ## GET /api/nodes/:pubkey/reach
 
 Per-node RF reach report (two-way link quality). Computes **directional** link counts from raw
@@ -697,9 +1158,11 @@ to a recent window. Identifies nodes only by **unique 2–3 byte** path prefixes
   "window": { "days": number, "since": string (ISO) },
   "reliable_tokens": [string],          // uppercase hex prefixes unique to this node ([] if unidentifiable)
   "importance": {
-    "neighbor_degree":    number,        // all-time, from neighbor_edges
-    "degree_rank":        number,        // 1-based rank among nodes with edges
-    "nodes_with_edges":   number,
+    "neighbor_degree":    number,        // all-time distinct neighbours over valid neighbor_edges rows (see /api/reach-rank)
+    "degree_rank":        number,        // placement on /api/reach-rank; 0 unless rank_status is "ranked"
+    "nodes_with_edges":   number,        // ranked (visible) population = /api/reach-rank total
+    "rank_status":        string,        // "ranked" | "unranked" | "unavailable" (snapshot unreadable)
+    "rank_snapshot_at":   string (ISO),  // snapshot behind the three fields above; "" when unavailable
     "relay_observations": number,        // windowed obs with this node anywhere in path
     "bidirectional_links":number,
     "direct_observers":   number
@@ -722,11 +1185,39 @@ to a recent window. Identifies nodes only by **unique 2–3 byte** path prefixes
 `reliable_tokens: []` means the node has no unique 1–3 byte prefix and cannot be
 reliably identified in paths; `links`/`direct_observers` will be empty.
 
+### Visibility
+
+An identity is **hidden** when its pubkey is in `nodeBlacklist` or
+`observerBlacklist`, or when any of its names — node, observer, or its
+`inactive_nodes` name while it has no named `nodes` row — starts with a
+`hiddenNamePrefixes` entry. A hidden target returns
+`404` (same body as an unknown node). Hidden identities are omitted from
+`links` and `direct_observers`, and `bidirectional_links` / `direct_observers`
+count only what is listed. Names are read live on every request — including
+cached reports — so **hiding** (a blacklist or prefix change, or a rename into
+a hidden prefix) applies on the next request. Un-hiding by renaming — of a
+neighbour or of the target itself — can take up to the 5-minute cache TTL
+(plus the server's 30 s node cache for the target), because the name recorded
+when the report was computed still counts. This errs on the side of hiding.
+
+`neighbor_degree` counts every valid edge, including ones to a hidden
+neighbour — it is a number, not an identity, so it does not leak who the
+neighbour is (see `/api/reach-rank`). `degree_rank` and `nodes_with_edges`,
+by contrast, are computed over the **visible** (ranked) population: a hidden
+or blacklisted node never occupies a placement or is counted in the total,
+so no rank gap or total reveals it.
+
 ### Caching & limits
 
 - **Response cache:** computed responses are cached for **5 minutes** per
-  `pubkey|days`. Polling faster than that returns an identical body — clients
-  should not expect sub-5-minute freshness.
+  `pubkey|days`. Polling faster than that returns the same report — clients
+  should not expect sub-5-minute freshness. Both **visibility** (above) and
+  the **rank fields** (`neighbor_degree`, `degree_rank`, `nodes_with_edges`,
+  `rank_status`, `rank_snapshot_at`) are applied on every request, cached or
+  not: visibility from a live name lookup, rank from the shared degree
+  snapshot — so a cached body always reflects the current blacklist/prefix
+  state and always matches `/api/reach-rank` for the same
+  `rank_snapshot_at`.
 - **Scan cap:** the windowed path scan is hard-capped at **200,000** rows. A node
   with more matching observations in the window is truncated (counts become a
   representative sample rather than exhaustive).
@@ -741,10 +1232,117 @@ Returned when `:pubkey` is not a 64-char hex string.
 
 ### Response `404`
 
-Returned when the node is unknown or blacklisted.
+Returned when the node is unknown or hidden (see Visibility).
 
 ```json
 { "error": "Not found" }
+```
+
+### Response `429`
+
+Returned when the report is **cold** (not cached) and its build cannot be
+admitted. At most two cold reports compute at once; up to eight distinct cold
+build leaders may wait for a slot for up to three seconds without holding a
+database connection while waiting for that slot. Visibility and ranking checks
+can still query the database outside this limiter. A further distinct leader
+gets 429 immediately when the queue is full, before allocating a wait timer.
+An admitted leader gets 429 if
+its wait expires before a slot becomes available. These are fixed internal
+defaults, not operator/customizer settings.
+
+Warm (cached) responses bypass this limiter. Concurrent requests for the
+*same* node and window still share one computation and one queue admission;
+the eight-leader cap does **not** bound all existing singleflight followers.
+Nothing is cached for a shed request — retry after `Retry-After` seconds and
+it recomputes normally. Existing request-cancellation/error and visibility
+behavior is unchanged.
+
+```
+Retry-After: 2
+```
+
+```json
+{ "error": "reach is busy computing other reports", "retryAfter": 2 }
+```
+
+### Response `500`
+
+Returned when the scan fails, or when the live name lookup for visibility
+fails — the endpoint fails closed rather than serving unfiltered data.
+
+```json
+{ "error": "reach computation failed" }
+```
+
+---
+
+## GET /api/reach-rank
+
+Reach leaderboard: nodes ranked by **all-time neighbour count** — the same Rank
+shown on each node's Reach page. A historical count, **not** a measure of radio
+quality, range or traffic.
+
+- **Valid edge** = a `neighbor_edges` row whose endpoints are both MeshCore
+  pubkeys (exactly 64 hex characters, case-insensitive) and differ from each
+  other. Legacy rows that fail this (e.g. an empty endpoint) are ignored at
+  computation time; nothing is deleted.
+- **Neighbours** = distinct neighbours over valid edges (within the ingestor's
+  edge retention). The same value is `neighbor_degree` on `/api/nodes/:pubkey/reach`.
+- **Ranked population** = nodes with at least one valid edge that have a Reach
+  page (a node row, or an observer row with a name) and are not
+  node-blacklisted, observer-blacklisted or hidden by a hidden-name prefix on
+  any current name: node name, observer name, or its `inactive_nodes` name
+  while it has no named `nodes` row (a node that aged out). Hidden nodes never
+  occupy a placement.
+- **Rank** = 1 + the number of ranked nodes with strictly more neighbours
+  (competition ranking: 1, 1, 3); ties are listed in pubkey order.
+- A search or page returns the global placements — nothing is renumbered.
+
+### Query Parameters
+
+| Param    | Type   | Default | Description                                                     |
+|----------|--------|---------|-----------------------------------------------------------------|
+| `q`      | string | —       | Case-insensitive substring of name or pubkey; max 64 characters |
+| `offset` | number | `0`     | Rows to skip within the (filtered) list; must be ≥ 0            |
+| `limit`  | number | `50`    | Rows per page; above 100 → 100; zero, negative or non-numeric → 50 |
+
+### Response `200`
+
+```jsonc
+{
+  "snapshot_at": string (ISO),  // when the neighbour graph was read
+  "total":   number,            // ranked nodes in the whole leaderboard
+  "matched": number,            // rows matching q (== total without q)
+  "offset":  number,
+  "limit":   number,
+  "q":       string,            // trimmed query
+  "rows": [
+    { "rank": number, "pubkey": string, "name": string, "neighbors": number }
+  ]
+}
+```
+
+`name` may be empty (clients fall back to the pubkey).
+
+### Caching
+
+Served from a shared snapshot with a **60 s** TTL (also behind the Reach page's
+Rank). Once it expires, the previous snapshot keeps being served — with its own
+`snapshot_at` — while one background rebuild refreshes it. Only a request that
+finds no snapshot at all (at start-up, or after a failed start-up read) waits
+for the read. A failed rebuild is retried at most every 15 s. Blacklist and hidden-prefix changes re-rank immediately without a
+new DB read.
+
+### Response `400`
+
+`q` longer than 64 characters (or not UTF-8), or `offset` not a non-negative integer.
+
+### Response `500`
+
+No snapshot could be read (never an empty leaderboard).
+
+```json
+{ "error": "reach rank unavailable" }
 ```
 
 ---
@@ -759,7 +1357,8 @@ Paginated packet (transmission) list with filtering.
 |--------------|--------|---------|----------------------------------------------------|
 | `limit`      | number | `50`    | Page size                                          |
 | `offset`     | number | `0`     | Pagination offset                                  |
-| `type`       | string | —       | Filter by payload type (number or name)            |
+| `type`       | string | —       | Filter by numeric payload type                    |
+| `excludeTypes` | string | —     | Comma-separated numeric payload types (0–15), excluded before pagination |
 | `route`      | string | —       | Filter by route type                               |
 | `region`     | string | —       | Filter by region (IATA code substring)             |
 | `observer`   | string | —       | Filter by observer ID                              |
@@ -767,10 +1366,39 @@ Paginated packet (transmission) list with filtering.
 | `since`      | string | —       | ISO timestamp lower bound                          |
 | `until`      | string | —       | ISO timestamp upper bound                          |
 | `node`       | string | —       | Filter by node pubkey                              |
-| `nodes`      | string | —       | Comma-separated pubkeys (multi-node filter)        |
+| `nodes`      | string | —       | Comma-separated pubkeys or node names (multi-node filter); see below |
 | `order`      | string | `DESC`  | Sort direction: `asc` or `desc`                    |
 | `groupByHash`| string | —       | Set to `"true"` for grouped response               |
 | `expand`     | string | —       | Set to `"observations"` to include observation arrays |
+
+`excludeTypes=11` excludes CONTROL transmissions before `limit`, `offset`, and
+`total` are calculated, for both raw and `groupByHash=true` responses. It uses
+the same filtering in memory and in the SQLite fallback. It does not delete
+packets or affect WebSocket delivery or packet-detail endpoints.
+
+The list accepts at most 16 entries and 64 characters. Whitespace around entries
+is trimmed; duplicates collapse. Empty/omitted means no exclusion. Codes 0–15
+include reserved wire types; unknown/NULL stored types remain in the result.
+An overlapping `type` inclusion and exclusion returns no packets for that type.
+Malformed values, repeated `excludeTypes` parameters, and a nonempty exclusion
+combined with `nodes` return HTTP 400. Use `node` for a supported single-node
+combination. All other existing filters continue to compose normally.
+
+`nodes` matches each entry exactly (case-sensitive) against a node's public
+key or name. Whitespace around entries is trimmed, empty entries are dropped
+and duplicates collapse, before any node lookup. The list accepts at most 50
+distinct entries, 100 comma-separated entries (empty and duplicate ones
+included) and 4096 characters; a list over any of these bounds returns HTTP
+400 before any lookup, query or packet-store lock (#335). 50 full 64-character
+public keys separated by `, ` fit in 3,298 characters. A list of only empty
+entries returns an empty page, as before. Results, ordering (`order`) and
+pagination (`limit`, `offset`) are unchanged for lists within the bounds. No
+UI page sends `nodes`; the Packets page uses the single `node` filter.
+
+The Packets page refetches when its type selection or Hide CONTROL checkbox
+changes, so excluded traffic cannot fill the fetched page. Live updates are
+still filtered locally. Pinned-hash views omit these exclusions so a direct
+packet link remains visible.
 
 ### Response `200` (default)
 
@@ -820,6 +1448,17 @@ Paginated packet (transmission) list with filtering.
   "offset":  number
 }
 ```
+
+### Response `400` (nodes=... over its bounds)
+
+Shared error shape; the message names the bound that was exceeded:
+
+```json
+{ "error": "nodes accepts at most 50 distinct entries" }
+```
+
+The other two messages are `nodes accepts at most 100 comma-separated entries`
+and `nodes must be at most 4096 characters`.
 
 ---
 
@@ -907,48 +1546,6 @@ Single packet detail with byte breakdown and observations.
 
 ---
 
-## POST /api/packets
-
-Ingest a raw packet. Requires API key.
-
-### Headers
-
-- `X-API-Key: <key>` (required if `config.apiKey` is set)
-
-### Request Body
-
-```jsonc
-{
-  "hex":      string,        // required — raw hex-encoded packet
-  "observer": string | null, // observer ID
-  "snr":      number | null,
-  "rssi":     number | null,
-  "region":   string | null, // IATA code
-  "hash":     string | null  // pre-computed content hash
-}
-```
-
-### Response `200`
-
-```jsonc
-{
-  "id":      number,         // packet/observation ID
-  "decoded": {               // full decode result
-    "header":  DecodedHeader,
-    "path":    DecodedPath,
-    "payload": object
-  }
-}
-```
-
-### Response `400`
-
-```json
-{ "error": "hex is required" }
-```
-
----
-
 ## POST /api/decode
 
 Decode a raw packet without storing it.
@@ -960,6 +1557,12 @@ Decode a raw packet without storing it.
   "hex": string              // required — raw hex-encoded packet
 }
 ```
+
+Capped at **4096 bytes** before parsing (see
+[Request-body byte caps](#request-body-byte-caps)). The largest frame the decoder
+can accept is 1 header + 4 transport codes + 1 path-length byte +
+`MAX_PATH_SIZE` (64) path bytes + `MAX_PACKET_PAYLOAD` (184) payload bytes =
+254 bytes, i.e. 508 hex characters, i.e. a ~520-byte body — roughly 7x headroom.
 
 ### Response `200`
 
@@ -977,6 +1580,62 @@ Decode a raw packet without storing it.
 
 ```json
 { "error": "hex is required" }
+```
+
+### Response `413`
+
+```json
+{ "error": "request body too large (max 4096 bytes)" }
+```
+
+---
+
+## POST /api/packets/observations
+
+Return the stored observations for several packets in one call. Used by the
+packets table when a non-observer sort needs the child observations of the
+groups it is about to render.
+
+### Request Body
+
+```jsonc
+{
+  "hashes": string[]         // required — content hashes, at most 200
+}
+```
+
+Capped at **65536 bytes** before parsing (see
+[Request-body byte caps](#request-body-byte-caps)). A full 200-hash request
+serializes to ~3.8 KB, so the byte cap leaves roughly 17x headroom and the
+200-hash limit below is what a client actually meets first.
+
+### Response `200`
+
+```jsonc
+{
+  "results": {
+    "<hash>": [ Observation, ... ]   // one entry per requested hash
+  }
+}
+```
+
+An empty `hashes` array returns `{"results": {}}`. A hash with no stored
+observations gets an empty array.
+
+### Response `400`
+
+```json
+{ "error": "too many hashes (max 200)" }
+```
+
+```json
+{ "error": "invalid JSON body" }
+```
+
+### Response `413`
+
+```json
+{ "error": "request body too large (max 65536 bytes)" }
 ```
 
 ---
@@ -1086,6 +1745,16 @@ Per-observer analytics.
 
 List decoded channels with message counts.
 
+The database-backed list uses all retained SQL history, not the server's
+in-memory packet window. `messageCount` counts distinct transmissions, not
+observations. With `region`, a transmission is included when at least one
+observer in any selected region heard it; repeated observations and overlapping
+selected regions do not multiply the count. `lastActivity`, `lastMessage` and
+`lastSender` are selected from that same regional transmission population.
+Without a region filter, transmissions without observations remain eligible.
+`includeEncrypted=true` uses the same unique-transmission regional counting for
+encrypted channels (their message/sender fields remain null).
+
 ### Query Parameters
 
 | Param    | Type   | Default | Description                         |
@@ -1105,9 +1774,64 @@ List decoded channels with message counts.
       "messageCount": number,
       "lastActivity": string (ISO)
     }
-  ]
+  ],
+  // Shared hashtag channels approved by the administrator, listed even
+  // before they carry traffic. Omitted when there are none. hash == name.
+  "approvedChannels"?: [
+    { "name": string, "hash": string }
+  ],
+  // Channels with stored messages left out of `channels` because their
+  // proposal is not approved (see below). Omitted when none.
+  "hiddenChannels"?: string[]
 }
 ```
+
+**Revoked channels are left out of `channels`.** A channel with stored messages
+whose shared-channel proposal is **not approved** — revoked (see
+[revoke](#post-apiadminchannel-proposalsidrevoke)), suggested again and
+pending, or that re-suggestion rejected — does not appear in the list. Only
+approving the proposal lists it again, with its history. Such a name has stored
+messages only because it was decrypted earlier (approved, or through the
+config), so a pending or rejected proposal never hides a channel that was never
+decrypted. The exception is a name the ingestor also decrypts through its
+built-in/config list (built-in keys, rainbow table, `hashChannels`,
+`channelKeys`): that traffic keeps being decrypted, so such a channel is never
+hidden. When the ingestor's `builtin-channels.json` is missing or unreadable,
+nothing is hidden. Nothing is deleted: `GET /api/channels/:hash/messages` still
+returns the history of a hidden channel.
+
+`hiddenChannels` (`string[]`, omitted when empty) names the channels that were
+left out this way. The Channels page uses it so a live WebSocket packet for a
+stored message does not create the list row again. It only names channels that
+have stored messages, so an unreviewed suggestion is never published here.
+
+`hiddenChannels` is global and not filtered by `region`: a region request
+returns the same set, and another open tab keeps the set it last loaded —
+including after a re-approval, where live messages do not re-create the row in
+that tab until its list reloads.
+
+The decision is read once per 10 s snapshot (the one behind `approvedChannels`,
+dropped early when an approve or revoke result is read), per channel that has
+stored messages, so there is no per-request query of the proposals table and no
+row cap. Proposals that are not approved are removed by retention
+(`channelProposals.retentionDays` after the review); a hidden channel whose
+messages are still stored then appears again.
+
+`GET /api/analytics/channels` is not filtered: it still lists revoked channels
+with their message and sender counts (no message text). Hiding is a list-level
+measure, not a confidentiality control: the history stays readable by name.
+
+**Known limit: a suggestion can hide a name no administrator acted on.** The
+rule is "not approved", not "was approved before", so a channel whose stored
+messages were decrypted through the config, and whose name the ingestor no
+longer decrypts (removed from `hashChannels`/`channelKeys`, or past the
+4096-name cap of `builtin-channels.json`), is left out of the list while a
+suggestion for that name is pending. Distinguishing the two would need a
+history marker that survives a re-suggestion — `reviewed_at` is reset when a
+revoked proposal is suggested again, which is what makes a resubmission
+idempotent — so the trade-off is kept: it is list-level only, the history stays
+readable, a name the ingestor still decrypts is never hidden, the suggestion is
+in the administrator's pending queue, and approving it lists the channel again.
 
 ---
 
@@ -1143,12 +1867,130 @@ Messages for a specific channel.
       "repeats":          number,           // dedup count
       "observers":        [string],         // observer names
       "hops":             number,
-      "snr":              number | null
+      "snr":              number | null,
+      "observedPathHashSizes": [number],    // sorted unique relayed path widths (1–3)
+      "senderPathHashSize": number          // 0 if unknown, otherwise header width (1–3)
     }
   ],
   "total": number                           // total deduplicated messages
 }
 ```
+
+`observedPathHashSizes` aggregates evidence from the message's observations.
+It contains only hash widths encoded by non-empty relayed wire paths. Direct
+zero-hop copies provide no hash-size evidence and do not add a value. More than
+one value means different widths were observed for the same deduplicated
+message; the field describes those observations, not the sender's permanent
+configuration.
+
+`senderPathHashSize` is read from the transmission's raw frame header, not
+inferred from its observations. A flood can encode this width even when no
+relay has forwarded it. A direct zero-hop marker, unsupported payload header,
+or malformed frame yields 0 (unknown). This value describes that particular
+frame, not the sender's permanent configuration.
+
+---
+
+## Shared channel proposals
+
+Visitors suggest public hashtag channels; the administrator approves or rejects them with the existing `apiKey`. The server is read-only: it validates each request and writes it to a bounded file queue next to the database, and the ingestor applies it. An accepted request answers `202 { "requestId": string }` right away; poll the request status for the outcome. Validation errors answer `4xx` before anything is queued, and revoke also checks the stored status first and answers `409` when the proposal is not approved (see below). Timestamps are Unix epoch **milliseconds**.
+
+A proposal:
+
+```jsonc
+{
+  "id":         string,        // 16 hex characters
+  "name":       string,        // "#Channel", case preserved, <= 31 UTF-8 bytes
+  "status":     "pending" | "approved" | "rejected" | "revoked",
+  "createdAt":  number,        // ms
+  "reviewedAt"?: number        // ms, once reviewed (also set when revoked)
+}
+```
+
+In `GET /api/admin/channel-proposals` each proposal may also carry `"builtIn": true` (see [Built-in names](#built-in-names)).
+
+State machine: a new name becomes `pending` by default, or `approved` immediately if `channelProposals.autoApprove` is enabled. An administrator can move `pending` → `approved` or `rejected`; `approved` → `revoked` (see below); `revoked` → `pending` by suggesting the same name again (never auto-approved). An existing `pending` or `rejected` name is never auto-approved by another suggestion. `rejected` is terminal: suggesting a rejected name again reports the earlier rejection and does not reopen it, until retention deletes the rejected row `channelProposals.retentionDays` (default 30) days after the review; from then on the name can be suggested afresh. This keeps a rejected name from being pushed back into the review queue over and over while its row is retained.
+
+### Built-in names
+
+The ingestor already decrypts every name in its config-derived key list: the built-in keys, the rainbow table `channel-rainbow.json` (about 320 common names such as `#test`, `#chat` and `#general`), `hashChannels` and `channelKeys`. That list wins over approved suggestions, so approving such a name adds nothing (its traffic was already decrypted and listed once it has traffic) and revoking it does not stop decryption. The ingestor publishes those hashtag names to `builtin-channels.json` in the request queue directory at startup and after each `SIGHUP` reload; the server marks matching proposals with `"builtIn": true` in the admin list and in the request status, and the UI says so. An ingestor that predates this file simply leaves nothing marked.
+
+## GET /api/channel-proposals/config
+
+```json
+{ "enabled": true }
+```
+
+`enabled` is true only when `channelProposals.enabled` is set and `apiKey` is strong.
+
+## POST /api/channel-proposals
+
+Body `{ "name": "#Channel" }` (the `#` is optional; surrounding spaces are trimmed). Only public hashtag channel names are accepted, never keys.
+
+| Status | Meaning |
+|--------|---------|
+| `202` | `{ "requestId": string }` |
+| `400` | Invalid body or name. The body must be exactly one JSON object with only `name` (unknown fields and trailing data are refused). The name must not be empty or over 31 bytes, and must not contain control characters, the line/paragraph separators U+2028/U+2029, direction overrides, or other invisible formatting characters (Unicode category Cf, such as U+200B, U+FEFF, U+00AD and the tag characters U+E0000–U+E007F; the zero-width joiner U+200D is allowed, and variation selectors are not Cf, so emoji sequences work). The firmware only limits the length; the character rule is CoreScope's own, so two different channels cannot look identical. |
+| `403` | Suggestions disabled |
+| `429` | `submissionsPerHour` reached; `Retry-After` in seconds |
+| `503` | Request queue full; `Retry-After` in seconds |
+
+## GET /api/channel-proposals/requests/:requestId
+
+```jsonc
+{
+  "status":    "queued" | "pending" | "approved" | "rejected" | "revoked" | "error",
+  "proposal"?: Proposal,   // once the ingestor has processed the request
+  "error"?:    string,     // with status "error"
+  "builtIn"?:  true        // the proposal's name is a built-in name (see above)
+}
+```
+
+A duplicate suggestion reports the existing proposal and its status (for a rejected name: `rejected`, until retention). `revoked` is the outcome of a revoke request. `404` when the id is unknown or older than 24 hours.
+
+## GET /api/admin/channel-proposals
+
+Requires `X-API-Key`. Optional `?status=pending|approved|rejected|revoked`. Newest first, bounded.
+
+```jsonc
+{ "proposals": [Proposal & { "builtIn"?: true, "nearDuplicateOf"?: string[] }], "enabled": boolean }
+```
+
+**Letter case in names.** A hashtag channel's key is the first 16 bytes of
+`sha256("#name")` of the exact name (MeshCore `docs/companion_protocol.md`, "Hashtag
+Channels"; the meshcore-open app's `derivePskFromHashtag` does not change case),
+so `#HelloWorld` and `#helloworld` are different channels with different keys.
+They are therefore separate proposals and are never merged. `nearDuplicateOf`
+lists the other proposal names (any status, also outside the `status` filter)
+and built-in names that differ from this one only by letter case, sorted; it is
+omitted when there are none. It is a hint for the administrator.
+
+## POST /api/admin/channel-proposals/:id/approve and /reject
+
+Requires `X-API-Key`. `202 { "requestId": string }`, `404` for an unknown proposal. Only pending proposals change; repeating the stored decision is harmless, and a contradicting one (reject after approve) ends with status `error`.
+
+Missing or wrong key: `401`. No key configured, or a weak one: `403`.
+
+## POST /api/admin/channel-proposals/:id/revoke
+
+Requires `X-API-Key`. Undoes a previous approval: the ingestor stops decrypting the channel (unless the name is also in its config-derived list — the rainbow table, `channelKeys` or `hashChannels`, see [Built-in names](#built-in-names) — in which case that key keeps it decrypting) and it drops out of `GET /api/channels`' `approvedChannels`.
+
+Unlike approve/reject, this endpoint checks synchronously, before queuing anything:
+
+| Status | Meaning |
+|--------|---------|
+| `202` | `{ "requestId": string }` — the proposal was approved; the revoke is queued |
+| `400` | Invalid suggestion id |
+| `404` | Unknown proposal |
+| `409` | The proposal is not currently approved (pending, rejected, or already revoked) — **nothing is queued** |
+
+Missing or wrong key: `401`. No key configured, or a weak one: `403`.
+
+There is a real race between the `409` check and the ingestor actually applying the command: another admin could approve, reject or revoke the same proposal in between. The ingestor re-validates the status from scratch when it applies the command and is the true source of truth; the synchronous `409` here is only a best-effort fast-fail for the common case, not a guarantee. When the race is lost, the request ends with status `error` and an error such as `suggestion is not approved (it is pending)`.
+
+**Historical messages are kept, the channel leaves the list.** Revoking a channel removes its decryption key going forward and takes the channel out of `GET /api/channels` (unless the name is a [built-in name](#built-in-names), which keeps decrypting and is never hidden). Messages the ingestor already decoded and stored while the channel was approved are **not deleted**: `GET /api/channels/:hash/messages` still returns them, and the channel returns to the list with its history if the suggestion is approved again (suggest the name again, then approve). The server stays read-only: it only filters the list. The channel stays hidden while the name is re-suggested and pending, and after the administrator rejects that re-suggestion; to hide it again after an approval, revoke it again. A rejected re-suggestion therefore does not bring the channel back.
+
+**Retention.** A revoked proposal's row is not deleted at revoke time — only its status changes, keeping `reviewedAt` as the audit timestamp of when it was revoked. It is removed later by the same retention sweep that prunes rejected proposals, once `reviewedAt` is older than `channelProposals.retentionDays` (see [Configuration](user-guide/configuration.md#shared-channel-suggestions)). Approved rows are still never pruned.
 
 ---
 
@@ -1218,6 +2060,48 @@ RF signal analytics.
   ],
   "min": number,
   "max": number
+}
+```
+
+---
+
+## GET /api/analytics/observer-comparison
+
+Reference-to-many observer comparison (#122). Descriptive only: no SNR/RSSI comparison and no health score or classification. Overlap is computed server-side over every retained RX observation in the window, not a packet-list sample.
+
+### Query Parameters
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `ref` | string | yes | Reference observer id (max 128 chars). Unknown, inactive or blacklisted → `404`. |
+| `hours` | int | yes | Window length: `1`, `6` or `24`. |
+| `observers` | string | yes | Comma-separated ids to compare against `ref` (1–40 ids, each max 128 chars, list max 4096 chars, must not contain `ref`). Unknown, inactive or blacklisted ids are silently excluded. |
+
+All limits are checked before any cache or database work (`400`).
+
+### Semantics
+
+- The window is the UTC interval `[start, end)` over `observations.timestamp` (not `transmissions.first_seen`), returned in `window`.
+- Only observations with `direction = 'RX'` (case-insensitive) count; TX and NULL/unknown direction are excluded.
+- Each `transmission_id` counts once per observer.
+- `referenceCoveragePct = 100·shared/|R|` and `otherCoveragePct = 100·shared/|O|`, one decimal. A percentage is `null` (unavailable) when its denominator is zero.
+- If a window holds more than 1,000,000 distinct (observer, transmission) pairs the request fails with `500` and an explicit message; counts are never truncated.
+- Responses are cached for 30 s per `(ref, hours, observer set)` (max 64 entries) and concurrent misses share one computation.
+- The scan uses the `(observer_idx, timestamp)` index built by the ingestor's async migration `obs_observer_ts_idx_v1`; until that migration has finished the query falls back to the timestamp index and is slower but still correct.
+
+### Response `200`
+
+```json
+{
+  "reference": { "id": "…", "name": "…", "total": 1000 },
+  "window": { "hours": 24, "start": "2026-10-13T12:00:00Z", "end": "2026-10-14T12:00:00Z" },
+  "rows": [
+    {
+      "observerId": "…", "observerName": "…",
+      "total": 800, "shared": 600, "referenceOnly": 400, "otherOnly": 200,
+      "referenceCoveragePct": 60.0, "otherCoveragePct": 75.0
+    }
+  ]
 }
 ```
 
@@ -1470,6 +2354,191 @@ Hash size analysis across the network.
 
 ---
 
+## GET /api/analytics/advert-intervals
+
+Mesh-wide estimated advert intervals (#245 M2, Analytics → Advert
+Intervals): which flood and zero-hop advert intervals the nodes run with,
+by role and by region, how many show no adverts of a class, and which
+advertise more often than the firmware's timers allow.
+
+Each node is estimated exactly as node detail's `advertIntervals` (see
+[Estimated advert intervals](#estimated-advert-intervals)): the newest 20
+flood and 20 zero-hop adverts, the same route classifier, the same
+estimator, snapped to the firmware's settable values (`flood.advert.interval`
+whole hours 3–168, `advert.interval` even minutes 60–240 or the 2-minute
+new-install default; MeshCore `src/helpers/CommonCLI.cpp:486-505`,
+`examples/simple_repeater/MyMesh.cpp:903`).
+
+- **Who is counted.** Nodes in the node list with at least one ADVERT.
+  Hidden identities (node or observer blacklist, hidden-name prefix) are
+  left out.
+- **Distributions.** `buckets` hold medium and high confidence estimates.
+  Every counted node is in exactly one of `estimated`, `low_confidence`,
+  `irregular`, `too_few` and `not_observed` per class.
+- **Not observed.** A zero-hop advert is only recorded when an observer
+  hears it directly, so no zero-hop adverts means the zero-hop interval is
+  0 (off) *or* no observer is in direct range.
+- **Regions.** A node's regions are the regions (IATA) of the observers
+  that heard its sampled adverts. A node heard in two regions counts in both
+  `by_region` groups; one heard by no observer with a region is `unknown`.
+  `?region=` keeps nodes heard in one of the codes.
+- **Outliers** (`outliers`, most frequent first, at most 50): the median gap
+  between the class's sampled adverts is under the class's shortest setting
+  less 10 % (flood 3 h, zero-hop 60 min) — manual or scripted adverts, a
+  reboot loop, other firmware — or the zero-hop estimate is the 2-minute
+  new-install default.
+  Outliers name nodes, so they are checked against the identity visibility
+  rules on every request (#896), including observer and inactive-node names
+  the snapshot's pass does not see. A hidden identity's rows are left out
+  of `outliers` and counted in `outliers_withheld`; `outliers_total` and the
+  distributions keep counting them. If that check cannot read the identity
+  metadata the request fails with `500` (fail closed).
+- **Flood re-arm** (`flood_re_arm`). A flood advert re-arms the zero-hop
+  timer (`examples/simple_repeater/MyMesh.cpp:1294-1306`).
+  `zero_hop_paced_by_flood` counts zero-hop estimates equal to the flood
+  interval (zero-hop Z < flood F ≤ 2Z gives every zero-hop gap F, so the
+  setting is between F/2 and F). `zero_hop_maybe_suppressed` counts nodes
+  with no zero-hop adverts and a flood interval of at most 240 min, where
+  `advert.interval` ≥ flood never fires.
+- **Cost.** One background pass per analytics cycle
+  (`analytics.recomputeIntervalSeconds.advertIntervals`, default the
+  analytics default; `analytics.pauseWhenIdle` applies). It reads the
+  database only, never the packet store lock: every ADVERT row's classifier
+  columns newest first (at most 1,000,000 rows, `scan.truncated`), then
+  `decoded_json` and the observers of the kept adverts only. Every request,
+  filtered or not, is answered from that snapshot; a filter re-aggregates
+  the cached per-node rows, O(nodes).
+- **Thresholds.** The minimum confidence, the outlier rule and limit and
+  the estimator's own thresholds are hardcoded; they are candidates for the
+  customizer.
+
+### Query Parameters
+
+| Param    | Type   | Default | Description |
+|----------|--------|---------|-------------|
+| `region` | string | —       | Comma-separated IATA codes: nodes whose sampled adverts an observer in one of them heard |
+| `area`   | string | —       | Area key: nodes positioned in the area (unknown key: `400`) |
+
+### Response `200`
+
+```jsonc
+{
+  "window": 20,                    // adverts per class and node estimated from
+  "min_confidence": "medium",      // least confidence in buckets
+  "nodes": number,
+  "flood":    ClassSummary,
+  "zero_hop": ClassSummary,
+  "by_role":   [ { "key": string, "nodes": number, "flood": ClassSummary, "zero_hop": ClassSummary } ],
+  "by_region": [ { "key": string, "nodes": number, "flood": ClassSummary, "zero_hop": ClassSummary } ],
+  "regions_truncated": boolean,    // by_region holds the 50 largest only
+  "outliers": [
+    {
+      "public_key": string, "name": string, "role": string, "regions": [string],
+      "class": "flood" | "zero_hop",
+      "reason": "flood_faster_than_settable" | "zero_hop_faster_than_settable" | "zero_hop_new_install_default",
+      "median_gap_s": number, "samples": number, "interval_s": number | null
+    }
+  ],
+  "outliers_total": number,
+  "outliers_withheld": number,     // outlier rows hidden at serve time (#896), still in outliers_total
+  "flood_re_arm": { "zero_hop_paced_by_flood": number, "zero_hop_maybe_suppressed": number },
+  "scan": { "generated_at": string (ISO), "rows": number, "truncated": boolean }
+}
+
+// ClassSummary
+{
+  "estimated": number,             // medium/high, in buckets
+  "low_confidence": number,
+  "irregular": number,
+  "too_few": number,               // under 3 adverts
+  "not_observed": number,          // no adverts of the class
+  "buckets": [ { "interval_s": number, "snapped": boolean, "nodes": number } ]  // interval_s ascending
+}
+```
+
+---
+
+## GET /api/analytics/advert-intervals/bucket
+
+The nodes one Flood or Zero-hop distribution bucket of
+[`GET /api/analytics/advert-intervals`](#get-apianalyticsadvert-intervals)
+counts (#896, the list under a bar of Analytics → Advert Intervals). These
+are observed interval estimates, not confirmed firmware settings.
+
+- **Same rule as the bar.** A node is a member when its class estimate
+  counts in the distributions (medium or high confidence) and falls in the
+  bucket: `interval_s` and `snapped` together, so a snapped 3 h bucket and
+  an unsnapped estimate rounded to 3 h are two lists. Membership runs over
+  the same snapshot rows and `region`/`area` filter as the histogram, so
+  `nodes` is the bar's count.
+- **Snapshot only.** Answered from the published analytics snapshot; before
+  the first one it is `503` with `Retry-After`. It never scans the
+  database. `generated_at` is that snapshot's `scan.generated_at`.
+- **Paging.** Members are sorted by name case-insensitively, then name, then
+  public key. Pass the first page's `generated_at` as `snapshot=` when asking
+  for further pages: once another snapshot is published the answer is `409`
+  with the current `generated_at`, and the client starts again from
+  `offset=0`, so a list never mixes two snapshots.
+- **Visibility.** Every member's identity is checked on every request with
+  the canonical rules (node blacklist, observer blacklist, hidden-name
+  prefix on the node, inactive-node or observer name, in one bulk lookup
+  over all members). Hidden identities are never listed: they count in
+  `withheld` (`nodes` = `visible` + `withheld`). If the lookup fails the
+  answer is `500` with no list.
+- **Cost.** One pass over the snapshot rows, a sort of the bucket's
+  members, and with hidden-name prefixes configured one bulk primary-key
+  lookup. No packet store lock. Page size is hardcoded (default 50, at most
+  200).
+
+### Query Parameters
+
+| Param        | Type    | Default | Description |
+|--------------|---------|---------|-------------|
+| `class`      | string  | —       | Required: `flood` or `zero_hop` |
+| `interval_s` | integer | —       | Required: the bucket's `interval_s` (positive; an unsnapped bucket can lie above 168 h) |
+| `snapped`    | boolean | —       | Required: the bucket's `snapped` (`true` or `false`) |
+| `region`     | string  | —       | As for `GET /api/analytics/advert-intervals` |
+| `area`       | string  | —       | As for `GET /api/analytics/advert-intervals` (unknown key: `400`) |
+| `offset`     | integer | `0`     | Visible members to skip |
+| `limit`      | integer | `50`    | Page size, at most `200` (larger values are capped) |
+| `snapshot`   | string  | —       | `generated_at` the client paged from; `409` when it is no longer current |
+
+### Response `200`
+
+```jsonc
+{
+  "class": "flood" | "zero_hop",
+  "interval_s": number,            // as requested
+  "snapped": boolean,
+  "generated_at": string (ISO),    // snapshot served
+  "nodes": number,                 // the bucket's count (the histogram's)
+  "visible": number,               // listable members, all pages
+  "withheld": number,              // nodes - visible: hidden identities, never listed
+  "offset": number,
+  "limit": number,                 // page size served
+  "members": [                     // [] past the end
+    {
+      "public_key": string, "name": string, "role": string, "regions": [string],
+      "interval_s": number,        // the node's own estimate (unsnapped: not rounded)
+      "snapped": boolean,
+      "confidence": "high" | "medium",
+      "samples": number, "gaps_used": number
+    }
+  ]
+}
+```
+
+### Errors
+
+| Status | When |
+|--------|------|
+| `400`  | Missing or invalid `class`, `interval_s`, `snapped`, `offset`, `limit`, or an invalid `region`/`area` |
+| `409`  | `snapshot=` is not the published snapshot: `{ "error": string, "generated_at": string }` |
+| `500`  | Identity metadata could not be read (fail closed) |
+| `503`  | No snapshot published yet (warming up) |
+
+---
+
 ## GET /api/analytics/hash-collisions
 
 Hash collision analysis — packets where the same hash was used by multiple different nodes (ambiguous routing).
@@ -1567,6 +2636,23 @@ Subpath frequency analysis.
 }
 ```
 
+#### Hidden identities
+
+Hidden identities (node blacklist, observer blacklist, hidden-name prefixes)
+are shown as their raw hop, exactly like a hop that matches no node. Rows are
+masked **after** the store has merged raw keys that resolve to the same display
+name, so the two cases differ:
+
+- A hidden node seen under several raw keys of one hop pair (for example `bb`
+  and `bb22`) is already one row in the store; it stays one masked row, with
+  the counts summed and the smallest raw key as `rawHops`.
+- An unknown hop with the same traffic (`f0` and `f0f1`) has no name to merge
+  by, so it is one row per raw key.
+
+Rows that show the same path once masked are merged (counts summed, `pct`
+recomputed, smallest raw key), so a list can hold fewer rows than `limit`.
+`count`, `pct` and `totalPaths` always cover all traffic, hidden or not.
+
 ---
 
 ## GET /api/analytics/subpath-detail
@@ -1612,6 +2698,58 @@ Detailed stats for a specific subpath.
 ```
 
 ---
+
+## GET /api/regions/observed
+
+Bulk observed scoped relay activity for the Regions map. `window` accepts
+`1h`, `24h` (default), or `7d`; other values return HTTP 400. Returns HTTP 503
+until the background relay snapshot is available, and HTTP 500 if current
+node metadata cannot be read.
+
+```json
+{
+  "window": "24h",
+  "generatedAt": "2026-10-16T12:00:00Z",
+  "windowStart": "2026-10-15T12:00:00Z",
+  "windowEnd": "2026-10-16T12:00:00Z",
+  "coverage": {"start": "2026-10-12T12:00:00Z", "complete": true, "loading": false},
+  "nodes": [{
+    "publicKey": "<public key>", "name": "Example relay", "role": "repeater",
+    "lat": 55.2, "lon": 10.3, "positionSource": "reported",
+    "scopes": [{"name": "#example", "lastRelayed": "2026-10-16T11:55:00Z"}]
+  }],
+  "truncated": false,
+  "scopesTruncated": false
+}
+```
+
+`windowEnd` equals `generatedAt`, the time of the shared relay snapshot
+(normally refreshed every five minutes). A scope is included when its latest
+confirmed non-advert relay timestamp is within the inclusive requested bounds;
+future timestamps are excluded. Scope spelling and case are preserved. Raw
+prefix and heuristic-only paths do not broaden scoped relay attribution.
+
+`coverage.start` is the conservative lower bound of known retained in-memory
+history and may precede `windowStart`. It is `null` when startup loading,
+failed loading, incomplete row coverage, or missing history prevents that bound
+from being established. `complete` is true only when the known interval covers
+the requested window; it does not establish uninterrupted observer operation.
+Memory eviction and configured retention can shorten this interval. `loading`
+describes startup loading when the relay snapshot was generated.
+
+Nodes with active scope evidence but no usable reported coordinates remain in
+the response with `lat: null`, `lon: null`, and `positionSource: "none"`.
+Reported coordinates are self-reported node metadata, not a verified GPS fix.
+Neighbor position estimates are not used. The endpoint applies current node
+and observer blacklists, hidden-name prefixes (including observer aliases), and the node-list geographic filter (including
+its foreign-node exception) on every request and returns `Cache-Control:
+no-store`.
+
+At most 5,000 eligible visible nodes are returned in public-key order;
+`truncated` signals additional eligible nodes. Each node retains its 32 newest
+valid scope timestamps; `scopesTruncated` signals omission from that retained
+scope evidence. Clients must describe incomplete views when either flag is
+true. Empty lists serialize as arrays.
 
 ## GET /api/scope-stats
 
@@ -1808,6 +2946,56 @@ Available regions (IATA codes) merged from config + DB.
 
 Returns a flat key-value object.
 
+**Note:** this object is a flat `code → label` map and stays one. Named
+quick-pick groups over these codes are served separately by
+[GET /api/config/regions/groups](#get-apiconfigregionsgroups).
+
+---
+
+## GET /api/config/regions/groups
+
+Optional named quick-pick groups over the region codes from
+[GET /api/config/regions](#get-apiconfigregions), defined in `config.json`
+under `regionGroups` (issue #416). The frontend renders each group as one
+button next to the region filter that selects that group's codes in one
+action.
+
+### Response `200`
+
+```jsonc
+[
+  {
+    "name":  string,    // operator label, e.g. "Bay Area"
+    "codes": [string]   // region codes, e.g. ["SFO", "SJC", "OAK"]
+  }
+]
+```
+
+Returns `[]` when no groups are configured — the region filter then behaves
+exactly as it did before the option existed.
+
+Group names are convenience labels over region codes, **not** verified
+geographic boundaries.
+
+**Normalization and limits.** Config entries are normalized once at startup
+and filtered per request:
+
+| Case | Behaviour |
+| --- | --- |
+| `regionGroups` absent or `[]` | Response is `[]`. |
+| Name blank, or longer than 40 characters | Group dropped, one startup log line. |
+| No codes listed | Group dropped, one startup log line. |
+| More than 24 distinct codes in one group | Group dropped, one startup log line. |
+| More than 12 groups | Groups past the 12th dropped, one startup log line. |
+| Repeated group name (case-insensitive) | First one stands, later ones dropped. |
+| Repeated code within a group | De-duplicated, case-insensitively, first spelling kept. |
+| Code no observer reports | Dropped from the group; a group with no code left is omitted from the response. |
+
+A structural violation drops the whole entry rather than serving a
+truncated code list or a shortened name, because either would mislabel the
+filter the operator asked for. Codes are matched case-insensitively and
+returned in the spelling `GET /api/config/regions` uses.
+
 ---
 
 ## GET /api/config/areas
@@ -1874,7 +3062,8 @@ Client-side configuration values.
   "wsReconnectMs":      number | null,
   "cacheInvalidateMs":  number | null,
   "externalUrls":       object | null,
-  "propagationBufferMs": number          // default: 5000
+  "propagationBufferMs": number,         // default: 5000
+  "estimatedPositions": { "enabled": boolean } // default: true; operator policy
 }
 ```
 
@@ -1975,6 +3164,40 @@ Representative packets bucketed by payload type for audio lab.
 
 ---
 
+## GET /api/perf/ws-clients
+
+Returns aggregate open WebSocket connection counts, oldest first. This does
+not identify visitors or count unique people.
+
+Query parameter `range` accepts `24h` (default), `7d` or `30d`. Any other value
+returns HTTP 400. The response has this shape:
+
+```json
+{
+  "range": "7d",
+  "intervalSec": 300,
+  "persistence": { "enabled": true, "healthy": true },
+  "samples": [
+    { "t": "2026-10-01T12:04:00Z", "clients": 12, "peak": 18 },
+    { "t": "2026-10-01T12:34:00Z", "clients": 9, "peak": 11, "gapBefore": true }
+  ]
+}
+```
+
+- `24h` retains minute resolution. `7d` and `30d` return five- and
+  fifteen-minute buckets respectively. `clients` is the last observed count
+  in the bucket; `peak` is the highest count in that bucket, not an average.
+- `gapBefore` indicates interrupted sampling (including a process restart).
+  Missing periods are not zero-filled. A selected range can contain less data
+  than requested, especially after first installation.
+- History is capped at 30 days and uses a separate bounded disk journal, not
+  the packet database. Persistence survives deploys only when the journal's
+  data directory is retained and writable.
+- `persistence.enabled: false` means disk persistence was explicitly disabled.
+  `enabled: true, healthy: false` means loading or saving failed and current
+  samples are memory-only; the server logs the cause without exposing file
+  paths through this API.
+
 ## WebSocket Messages
 
 ### Connection
@@ -2049,6 +3272,7 @@ Broadcast on every new packet ingestion.
 | `data.packet`             |         | ✓          |        |             |
 | `data.observation_count`  |         | ✓          |        |             |
 | `data.path_json`          | ✓       |            |        |             |
+| `data.observed_path_hash_sizes` |       |            |        | ✓           |
 | (any)                     |         |            | ✓ (*)  |             |
 
 (*) `app.js` passes all messages to registered `wsListeners` and uses them only for cache invalidation.
@@ -2092,6 +3316,7 @@ A transmission/packet as stored in memory and returned by most endpoints:
   "snr":               number | null,
   "rssi":              number | null,
   "path_json":         string | null,       // JSON-stringified hop array
+  "observed_path_hash_sizes": [number] | undefined, // sorted unique relayed path widths (1–3)
   "direction":         string | null,
   "score":             number | null,
   "observations":      [Observation] | undefined  // stripped by default on list endpoints

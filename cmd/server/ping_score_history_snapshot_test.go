@@ -10,7 +10,7 @@ import (
 // --- shared equivalence helpers -------------------------------------------
 
 // historyEntriesFromLiveScores computes each trigger's score via the SAME
-// live path (computePingScore -> GetPacketPath) computeAllPingScores uses,
+// live path (computePingScore -> getPacketPath) computeAllPingScores uses,
 // then converts each into a PingScoreHistoryEntry via
 // pingScoreHistoryEntryFromScore -- simulating "persist today's live
 // computation, unchanged, as history" for the equivalence tests below.
@@ -224,7 +224,7 @@ func TestPingScoresHistoryEquivalence_LoneStationHasNilAirtime(t *testing.T) {
 }
 
 // TestBuildPingScoresSnapshotFromHistory_DerivedKmPerSecondAirtime
-// constructs an entry directly (bypassing the live GetPacketPath path, to
+// constructs an entry directly (bypassing the live getPacketPath path, to
 // isolate this specific derivation) with both FarthestKm and a positive
 // AirtimeMs persisted, and confirms the resulting snapshot record carries
 // the correctly-derived KmPerSecondAirtime -- not merely that
@@ -257,7 +257,7 @@ func TestBuildPingScoresSnapshotFromHistory_DerivedKmPerSecondAirtime(t *testing
 
 // TestBuildPingScoresSnapshotFromHistory_UnscorableEntrySkippedButCounted
 // covers a trigger whose persisted entry is Unscorable=true (this cycle's
-// -- or every cycle's -- GetPacketPath produced nothing usable): it must
+// -- or every cycle's -- getPacketPath produced nothing usable): it must
 // be excluded from every record/leaderboard, yet still counted in
 // TotalPings (which reflects the live trigger table, not "how many were
 // actually scored").

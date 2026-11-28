@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/meshcore-analyzer/channelregistry"
+	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
+	"github.com/meshcore-analyzer/configkey"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
 )
@@ -24,6 +27,10 @@ type MQTTSource struct {
 	IATAFilter         []string `json:"iataFilter,omitempty"`
 	ConnectTimeoutSec  int      `json:"connectTimeoutSec,omitempty"`
 	Region             string   `json:"region,omitempty"`
+	// ClientID is the MQTT client ID, used verbatim; it must be unique among
+	// the broker's concurrent clients. Empty: generated per client (#118,
+	// see mqtt_client_id.go).
+	ClientID string `json:"clientId,omitempty"`
 }
 
 // ConnectTimeoutOrDefault returns the per-source connect timeout in seconds,
@@ -43,9 +50,16 @@ type MQTTLegacy struct {
 
 // Config holds the ingestor configuration, compatible with the Node.js config.json format.
 type Config struct {
-	DBPath             string                  `json:"dbPath"`
-	MQTT               *MQTTLegacy             `json:"mqtt,omitempty"`
-	MQTTSources        []MQTTSource            `json:"mqttSources,omitempty"`
+	DBPath      string       `json:"dbPath"`
+	MQTT        *MQTTLegacy  `json:"mqtt,omitempty"`
+	MQTTSources []MQTTSource `json:"mqttSources,omitempty"`
+	// sourcesDefaulted records that MQTTSources came from LoadConfig's
+	// built-in mqtt://localhost:1883 fallback rather than from config.json,
+	// the legacy mqtt block or MQTT_BROKER. CheckBrokerSources needs the
+	// distinction: in external-broker mode "the operator configured
+	// localhost" and "nothing was configured at all" call for different
+	// advice. Unexported so it stays out of any JSON round-trip.
+	sourcesDefaulted   bool
 	LogLevel           string                  `json:"logLevel,omitempty"`
 	ChannelKeysPath    string                  `json:"channelKeysPath,omitempty"`
 	ChannelKeys        map[string]string       `json:"channelKeys,omitempty"`
@@ -55,10 +69,22 @@ type Config struct {
 	Metrics            *MetricsConfig          `json:"metrics,omitempty"`
 	Runtime            *RuntimeConfig          `json:"runtime,omitempty"`
 	ClientRxCoverage   *ClientRxCoverageConfig `json:"clientRxCoverage,omitempty"`
+	ClientRegions      *ClientRegionsConfig    `json:"clientRegions,omitempty"`
 	GeoFilter          *GeoFilterConfig        `json:"geo_filter,omitempty"`
 	ForeignAdverts     *ForeignAdvertConfig    `json:"foreignAdverts,omitempty"`
 	ValidateSignatures *bool                   `json:"validateSignatures,omitempty"`
 	DB                 *DBConfig               `json:"db,omitempty"`
+
+	// HashRegionsPath optionally points at a JSON array of region-scope
+	// names merged with the inline HashRegions list above (#360). A real
+	// deployment configures ~1100 regions: a large, machine-maintained
+	// block sitting in the middle of hand-edited settings, which this
+	// moves out without changing the inline format for anyone else.
+	// Env override: HASH_REGIONS_PATH. A relative path resolves against
+	// the directory holding this config file, so the server resolves the
+	// same path to the same file. Only read when set — there is no
+	// auto-discovered default. See internal/regions.Load.
+	HashRegionsPath string `json:"hashRegionsPath,omitempty"`
 
 	// ObserverIATAWhitelist restricts which observer IATA regions are processed.
 	// When non-empty, only observers whose IATA code (from the MQTT topic) matches
@@ -69,6 +95,19 @@ type Config struct {
 	// obsIATAWhitelistCached is the lazily-built uppercase set for O(1) lookups.
 	obsIATAWhitelistCached map[string]bool
 	obsIATAWhitelistOnce   sync.Once
+
+	// IATAWarnIntervalSec is how often a region dropped by
+	// ObserverIATAWhitelist is re-logged while it keeps arriving (#110).
+	// 0 or less means the default, 6 hours; larger than 86400 (24 hours)
+	// is capped at 86400. See iata_drop_warn.go.
+	IATAWarnIntervalSec int `json:"iataWarnIntervalSec,omitempty"`
+
+	// iataDropWarn is the bounded per-region throttle for that warning.
+	iataDropWarn iataDropThrottle
+
+	// clientRxSrcDrop is the per-source throttle for the client-RX source
+	// allowlist drop warning (#265). See client_rx_sources.go.
+	clientRxSrcDrop clientRxSourceDropThrottle
 
 	// ObserverBlacklist is a list of observer public keys to drop at ingest.
 	// Messages from blacklisted observers are silently discarded — no DB writes,
@@ -83,11 +122,34 @@ type Config struct {
 	// (#1287 — moved from cmd/server). 0 = default 5.
 	NeighborEdgesMaxAgeDays int `json:"neighborEdgesMaxAgeDays,omitempty"`
 
+	// NeighborEdgeCountHalfLifeDays is the half-life of neighbor_edges.count
+	// (#544, neighbor_edge_decay.go). Opt-in: 0 / unset / negative = decay
+	// disabled (counts only ever grow, the pre-#544 behaviour). Decay is
+	// irreversible: disabling it again does not restore decayed counts.
+	NeighborEdgeCountHalfLifeDays int `json:"neighborEdgeCountHalfLifeDays,omitempty"`
+
 	// IngestBufferSize caps the in-memory queue (number of MQTT messages) held
 	// while the single SQLite writer is blocked by startup migrations/prunes
 	// (#1608). Received messages are drained once the write path is ready.
 	// 0 / unset => default. Bounded memory.
 	IngestBufferSize int `json:"ingestBufferSize,omitempty"`
+
+	// ChannelProposals: limits for publicly suggested hashtag channels
+	// (internal/channelregistry). Approved channels are always loaded into
+	// the channel keys, whether or not new submissions are enabled.
+	ChannelProposals *channelregistry.Config `json:"channelProposals,omitempty"`
+
+	// AntennaClaims: limits and the auto-approval switch for owner
+	// antenna-height claims (#789 M2a). The same block is read by the server.
+	AntennaClaims *antennaclaim.Config `json:"antennaClaims,omitempty"`
+
+	// ResolvedPathBackfill tunes the start-up re-resolution of NULL
+	// observations.resolved_path rows (#188, resolved_path_backfill.go).
+	ResolvedPathBackfill *ResolvedPathBackfillConfig `json:"resolvedPathBackfill,omitempty"`
+
+	// DecodeBackfill tunes the re-decoding of historical rows after the
+	// effective channel/region key set grows (#380, decode_backfill.go).
+	DecodeBackfill *DecodeBackfillConfig `json:"decodeBackfill,omitempty"`
 }
 
 // NeighborEdgesDaysOrDefault returns the configured pruning window or 5.
@@ -96,6 +158,17 @@ func (c *Config) NeighborEdgesDaysOrDefault() int {
 		return 5
 	}
 	return c.NeighborEdgesMaxAgeDays
+}
+
+// NeighborEdgeCountHalfLifeDaysOrDefault returns the count half-life in days,
+// or 0 when decay is disabled, which is the default. Decay stays opt-in until
+// its effect on hop disambiguation has been measured on real data (PR #574
+// review; scripts/neighbor-edge-decay-replay.sh).
+func (c *Config) NeighborEdgeCountHalfLifeDaysOrDefault() int {
+	if c == nil || c.NeighborEdgeCountHalfLifeDays < 0 {
+		return 0
+	}
+	return c.NeighborEdgeCountHalfLifeDays
 }
 
 // IngestBufferSizeOrDefault returns the ingest buffer capacity. Default 50000:
@@ -132,12 +205,76 @@ func (f *ForeignAdvertConfig) IsDropMode() bool {
 // ClientRxCoverageConfig controls the opt-in mobile client-RX coverage feature.
 type ClientRxCoverageConfig struct {
 	Enabled bool `json:"enabled"`
+
+	// Sources optionally restricts which MQTT sources may contribute client RX
+	// coverage, by mqttSources[].name (#265). Trust in meshcore/client/... rests
+	// entirely on the broker binding the topic pubkey to the publisher, so on an
+	// instance that also reads a broker without that binding the namespace must
+	// be accepted from the trusted source only.
+	//
+	// Absent or empty (or only blank entries) means every source is accepted,
+	// which keeps the upstream-compatible default. See ClientRxSourceAllowed.
+	Sources []string `json:"sources,omitempty"`
 }
 
 // ClientRxCoverageEnabled reports whether the opt-in mobile client-RX coverage
 // feature is on. Absent/nil ⇒ off (the safe default).
 func (c *Config) ClientRxCoverageEnabled() bool {
 	return c.ClientRxCoverage != nil && c.ClientRxCoverage.Enabled
+}
+
+// ClientRxCoverageSources returns the configured client-RX source allowlist
+// with blank entries dropped. An empty result means "no restriction".
+func (c *Config) ClientRxCoverageSources() []string {
+	if c == nil || c.ClientRxCoverage == nil || len(c.ClientRxCoverage.Sources) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(c.ClientRxCoverage.Sources))
+	for _, name := range c.ClientRxCoverage.Sources {
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// ClientRxSourceAllowed reports whether client RX coverage arriving on the MQTT
+// source called name may be handled (#265). Matching is against
+// mqttSources[].name, trimmed and case-insensitive (as elsewhere in this config).
+//
+// With no allowlist configured every source is allowed — unchanged behaviour.
+// With one configured a source that is not on it is rejected, including a source
+// with no name (which cannot be listed, so it cannot be trusted).
+//
+// The list is scanned linearly: it is bounded by the number of configured MQTT
+// sources (a handful), so a set would cost more than it saves.
+func (c *Config) ClientRxSourceAllowed(name string) bool {
+	allow := c.ClientRxCoverageSources()
+	if len(allow) == 0 {
+		return true
+	}
+	name = strings.TrimSpace(name)
+	for _, a := range allow {
+		if strings.EqualFold(a, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClientRegionsConfig gates the opt-in declared-region reports on
+// meshcore/client/{pubkey}/regions (#126, docs/client-regions.md). It is a
+// gate of its own, independent of clientRxCoverage; the coverage source
+// allowlist (clientRxCoverage.sources) still governs the whole client
+// namespace.
+type ClientRegionsConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+// ClientRegionsEnabled reports whether declared-region reports are stored.
+// Nil config or absent section ⇒ off.
+func (c *Config) ClientRegionsEnabled() bool {
+	return c != nil && c.ClientRegions != nil && c.ClientRegions.Enabled
 }
 
 // RetentionConfig controls how long stale nodes are kept before being moved to inactive_nodes.
@@ -148,10 +285,57 @@ type RetentionConfig struct {
 	// PacketDays is the retention window for transmissions (#1283).
 	// Ownership moved from cmd/server to cmd/ingestor; 0 disables.
 	PacketDays int `json:"packetDays"`
+	// ChannelDays keeps channel messages (GRP_TXT) and their observations
+	// until they are this many days old, when longer than PacketDays (#296).
+	// 0, or a value not longer than PacketDays, leaves them on PacketDays.
+	ChannelDays int `json:"channelDays"`
 	// ClientRxDays is the retention window (by rx_at) for mobile client-RX
 	// coverage rows in client_receptions / client_observers; 0 disables. Bounds
 	// the table the opt-in coverage feature would otherwise grow without limit.
 	ClientRxDays int `json:"clientRxDays"`
+	// ClientRegionsDays is the window (by reported_at) for
+	// client_declared_regions; unset or 0 follows ClientRxDays, then
+	// defaultClientRegionsDays. See ClientRegionsDays.
+	ClientRegionsDays int `json:"clientRegionsDays"`
+	// The opt-in windows below cover the tables nothing else prunes (#329);
+	// 0 disables each. See TableRetention.
+	InactiveNodeDays  int `json:"inactiveNodeDays"`
+	NodeChangeDays    int `json:"nodeChangeDays"`
+	ObserverPurgeDays int `json:"observerPurgeDays"`
+}
+
+// TableRetention holds the opt-in retention windows, in days, of the tables
+// nothing else prunes (#329). 0 disables a window, so an instance that sets
+// none of them keeps every row, as before. ping_triggers has no window and is
+// kept forever: the all-time Ping Scores records join it with the history
+// sidecar (#349, #241).
+type TableRetention struct {
+	// InactiveNodeDays deletes inactive_nodes rows whose last advert is
+	// older, once the node has not come back.
+	InactiveNodeDays int
+	// NodeChangeDays deletes node_changes rows detected longer ago.
+	NodeChangeDays int
+	// ObserverPurgeDays hard-deletes observers that observerDays already
+	// soft-deleted, once nothing still references them (upstream#1886).
+	ObserverPurgeDays int
+}
+
+// Enabled reports whether any window is set.
+func (r TableRetention) Enabled() bool {
+	return r.InactiveNodeDays > 0 || r.NodeChangeDays > 0 || r.ObserverPurgeDays > 0
+}
+
+// TableRetention returns the configured opt-in table retention windows,
+// with unset and negative values as 0 (disabled).
+func (c *Config) TableRetention() TableRetention {
+	if c.Retention == nil {
+		return TableRetention{}
+	}
+	return TableRetention{
+		InactiveNodeDays:  max(c.Retention.InactiveNodeDays, 0),
+		NodeChangeDays:    max(c.Retention.NodeChangeDays, 0),
+		ObserverPurgeDays: max(c.Retention.ObserverPurgeDays, 0),
+	}
 }
 
 // PacketDaysOrZero returns the configured retention.packetDays or 0
@@ -163,6 +347,15 @@ func (c *Config) PacketDaysOrZero() int {
 	return 0
 }
 
+// ChannelDaysOrZero returns the configured retention.channelDays or 0
+// (channel messages follow packetDays) if not set.
+func (c *Config) ChannelDaysOrZero() int {
+	if c.Retention != nil && c.Retention.ChannelDays > 0 {
+		return c.Retention.ChannelDays
+	}
+	return 0
+}
+
 // ClientRxDaysOrZero returns the configured retention.clientRxDays or 0
 // (disabled) if not set.
 func (c *Config) ClientRxDaysOrZero() int {
@@ -170,6 +363,26 @@ func (c *Config) ClientRxDaysOrZero() int {
 		return c.Retention.ClientRxDays
 	}
 	return 0
+}
+
+// defaultClientRegionsDays bounds client_declared_regions when neither
+// retention.clientRegionsDays nor retention.clientRxDays is set.
+const defaultClientRegionsDays = 30
+
+// ClientRegionsDays returns the retention window of client_declared_regions:
+// retention.clientRegionsDays, else retention.clientRxDays (the window of the
+// other client-RX data), else defaultClientRegionsDays. Never 0: the table is
+// always bounded, and the same window rejects expired reports at ingest.
+func (c *Config) ClientRegionsDays() int {
+	if c != nil && c.Retention != nil {
+		if c.Retention.ClientRegionsDays > 0 {
+			return c.Retention.ClientRegionsDays
+		}
+		if c.Retention.ClientRxDays > 0 {
+			return c.Retention.ClientRxDays
+		}
+	}
+	return defaultClientRegionsDays
 }
 
 // MetricsConfig controls observer metrics collection.
@@ -291,6 +504,17 @@ func LoadConfig(path string) (*Config, error) {
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parsing config %s: %w", path, err)
 		}
+		// The opt-in gates take their canonical, exact-case keys only,
+		// read the same way as the server reads them (#884, #888).
+		keys := configkey.New(data, log.Printf)
+		cfg.AntennaClaims.ApplyGates(keys.On)
+		cfg.ChannelProposals.ApplyGates(keys.On)
+		if cfg.ClientRxCoverage != nil {
+			cfg.ClientRxCoverage.Enabled = keys.On("clientRxCoverage", "enabled")
+		}
+		if cfg.ClientRegions != nil {
+			cfg.ClientRegions.Enabled = keys.On("clientRegions", "enabled")
+		}
 	}
 
 	// Env var overrides
@@ -331,6 +555,7 @@ func LoadConfig(path string) (*Config, error) {
 			Broker: "mqtt://localhost:1883",
 			Topics: []string{"meshcore/#"},
 		}}
+		cfg.sourcesDefaulted = true
 		log.Printf("no MQTT sources configured, defaulting to mqtt://localhost:1883")
 	}
 

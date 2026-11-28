@@ -156,13 +156,19 @@ test('observers render() calls preserveCompareSelection after innerHTML rewrite'
 });
 
 // ── 4) a11y — tablist + clickable strip semantics (#1644 round-1) ────
+//
+// #122 added a SECOND, unrelated tablist to this file (the pair/reference
+// mode toggle, `data-mode-btn`) that also uses class="tab-btn" + role="tab"
+// but controls which CONTROL PANEL renders, not #compareDetail. Both regexes
+// below require the `data-cview` marker so they match only the original
+// Summary/Both/OnlyA/OnlyB detail tabs, not the mode toggle.
 test('compare tab buttons declare aria-selected (synced with .active)', () => {
   // Tab markup is built as a string in compare.js. Each `<button class="tab-btn"
   // ... role="tab">` MUST also emit aria-selected so screen readers know which
   // tab is current. We grep for `aria-selected=` co-located with `role="tab"`.
   // A passing implementation will emit something like:
   //   aria-selected="' + (currentView === 'both' ? 'true' : 'false') + '"
-  const tabButtonBlocks = COMPARE_JS.match(/'<button class="tab-btn[^']*'[\s\S]{0,400}?role="tab"[^']*'/g) || [];
+  const tabButtonBlocks = COMPARE_JS.match(/'<button class="tab-btn[^']*'[\s\S]{0,400}?data-cview[\s\S]{0,100}?role="tab"[^']*'/g) || [];
   assert(tabButtonBlocks.length >= 3, 'expected >=3 tab-btn strings with role="tab"');
   tabButtonBlocks.forEach((blk, i) => {
     assert(/aria-selected\s*=/.test(blk),
@@ -171,7 +177,7 @@ test('compare tab buttons declare aria-selected (synced with .active)', () => {
 });
 
 test('compare tab buttons declare aria-controls="compareDetail"', () => {
-  const tabButtonBlocks = COMPARE_JS.match(/'<button class="tab-btn[^']*'[\s\S]{0,400}?role="tab"[^']*'/g) || [];
+  const tabButtonBlocks = COMPARE_JS.match(/'<button class="tab-btn[^']*'[\s\S]{0,400}?data-cview[\s\S]{0,100}?role="tab"[^']*'/g) || [];
   tabButtonBlocks.forEach((blk, i) => {
     assert(/aria-controls=\\?"compareDetail\\?"/.test(blk),
       'tab-btn block #' + i + ' missing aria-controls="compareDetail"');

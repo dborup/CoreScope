@@ -96,7 +96,40 @@ func (s *PacketStore) OnChunkLoaded(fn func(rowsThisChunk, totalRows int)) {
 func (s *PacketStore) chunkedLoadInit() {
 	s.chunkInitOnce.Do(func() {
 		s.firstChunkReady = make(chan struct{})
+		s.startupLoadDone = make(chan struct{})
 	})
+}
+
+// StartupLoadDone returns a channel closed once RunStartupLoad has
+// returned (#116): LoadChunked AND the background fill loader have
+// terminated, whether they succeeded or not, so nothing more is loaded
+// from SQLite at start-up. LoadComplete() is not a substitute: it flips at
+// the end of the hot window, before the background fill starts. Nor is
+// backgroundLoadDone, which stays false on a failed fill (health
+// semantics, #1690) -- a failure must still wake the recomputers.
+func (s *PacketStore) StartupLoadDone() <-chan struct{} {
+	s.chunkedLoadInit()
+	return s.startupLoadDone
+}
+
+// signalStartupLoadDone closes StartupLoadDone exactly once. Before
+// closing it drops what was computed from the partial store and is read
+// by the post-load recomputes or later requests: the hash-size info cache
+// (15 s TTL), the clock-skew recompute throttle (30 s) and the
+// region/window analytics TTL caches.
+func (s *PacketStore) signalStartupLoadDone() {
+	s.chunkedLoadInit()
+	if !s.startupLoadSignaled.CompareAndSwap(false, true) {
+		return
+	}
+	s.hashSizeInfoMu.Lock()
+	s.hashSizeInfoCache = nil
+	s.hashSizeInfoMu.Unlock()
+	if s.clockSkew != nil {
+		s.clockSkew.Invalidate()
+	}
+	s.invalidateCachesFor(cacheInvalidation{eviction: true})
+	close(s.startupLoadDone)
 }
 
 func (s *PacketStore) signalFirstChunk() {
@@ -162,6 +195,7 @@ func (s *PacketStore) fireChunkCallbacks(rowsThisChunk, totalRows int) {
 //   - hotStartupHours > 0 success: terminal state is whatever
 //     loadBackgroundChunks set (done=true on full coverage,
 //     failed=true on partial / chunk errors — see #1690).
+//   - on every path: StartupLoadDone() is closed (#116).
 //
 // Issue #1809 root cause: previously main.go spawned loadBackgroundChunks
 // at FirstChunkReady while LoadChunked was still merging the remainder
@@ -172,6 +206,12 @@ func (s *PacketStore) fireChunkCallbacks(rowsThisChunk, totalRows int) {
 // parallelism while ensuring oldestLoaded has a valid floor when the
 // bg loader starts.
 func (s *PacketStore) RunStartupLoad(chunkSize int) error {
+	// #116: runs last (deferred first), on every return path.
+	defer s.signalStartupLoadDone()
+	// #89: once this returns, on every path (including a failed or partial
+	// background fill), nothing more is loaded at start-up; parked
+	// route_mask changes for transmissions still missing can be dropped.
+	defer s.routeMaskLoadSettled.Store(true)
 	// Clear any stale error from a previous invocation (single-call
 	// invariant — see godoc above). Production never re-enters but
 	// test fixtures may construct fresh stores that share no state;
@@ -182,6 +222,10 @@ func (s *PacketStore) RunStartupLoad(chunkSize int) error {
 	s.bgErrMu.Unlock()
 
 	if err := s.LoadChunked(chunkSize); err != nil {
+		s.mu.Lock()
+		s.analyticsHistory.failed = true
+		s.analyticsHistory.loading = false
+		s.mu.Unlock()
 		// Pick a terminal state on the error path so /api/healthz +
 		// backgroundLoadComplete don't stay undefined forever. Both
 		// done AND failed are set true: the LoadChunked read-protocol
@@ -205,10 +249,16 @@ func (s *PacketStore) RunStartupLoad(chunkSize int) error {
 		s.mu.RLock()
 		loadedCount := int64(len(s.packets))
 		s.mu.RUnlock()
-		var totalInDB int64
-		if err := s.db.conn.QueryRow(`SELECT COUNT(*) FROM transmissions`).Scan(&totalInDB); err != nil {
-			totalInDB = -1
-		}
+		// #351 F1: measure coverage against the rows LoadChunked actually
+		// targeted (retention/hot-start-filtered), NOT a raw COUNT(*) over
+		// the whole table. With the shipped default (retentionHours=168,
+		// hotStartupHours=0) and a DB holding more than 168h of history, a
+		// whole-table count makes this ratio structurally < 1 forever, so
+		// the 24h activity coverage gate never proves completeness even
+		// though every retained row is in memory. docs/api-spec.md defines
+		// coverage against the RETAINED transmissions, and the bg-loader
+		// path already measures it that way.
+		totalInDB := s.loadWindowTotalInDB
 		var ratio float64
 		switch {
 		case totalInDB <= 0:
@@ -224,6 +274,7 @@ func (s *PacketStore) RunStartupLoad(chunkSize int) error {
 		s.bgErrMu.Unlock()
 		log.Printf("[store] RunStartupLoad: hotStartupHours=0 — background fill loader SKIPPED (coverage=%.1f%%, loaded=%d, totalInDB=%d)",
 			ratio*100, loadedCount, totalInDB)
+		s.publishRetainedHistory()
 		s.backgroundLoadDone.Store(true)
 		s.backgroundLoadProgress.Store(100)
 		return nil
@@ -263,6 +314,8 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	if neighborEdgesTableExists(s.db.conn) && s.graph.Load() == nil {
 		panic("packet store LoadChunked(): neighbor_edges table has rows but s.graph is nil — graph must be loaded before packet load (see main.go #1643 invariant)")
 	}
+	// #89: the change-log watermark is read before any row is loaded.
+	s.initRouteMaskChangeCursor()
 	s.chunkedLoadInit()
 	// Reset state for repeat calls in tests.
 	s.loadComplete.Store(false)
@@ -310,6 +363,16 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 			loadConditions = append(loadConditions, fmt.Sprintf("t2.first_seen >= '%s'", hotCutoffStr))
 		}
 	}
+	s.mu.Lock()
+	s.beginNodeAnalyticsLoadLocked(hotCutoffStr)
+	s.mu.Unlock()
+
+	// #509: observations after this id re-hear transmissions while the
+	// load runs; the background fill loads those that no window picked up.
+	s.loadStartObsID = -1
+	if err := s.db.conn.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM observations`).Scan(&s.loadStartObsID); err != nil {
+		s.loadStartObsID = -1
+	}
 
 	// COUNT honours the same retention/hot-startup filter the chunk
 	// loop applies, so the logged "DB total" matches the rows the
@@ -324,6 +387,11 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	if err := s.db.conn.QueryRow(countSQL).Scan(&totalInDB); err != nil {
 		totalInDB = -1
 	}
+	// #351 F1: publish the retention/hot-start-filtered total so
+	// RunStartupLoad's hotStartupHours==0 branch can compute a coverage
+	// ratio against the rows it actually targeted instead of the whole
+	// table. Same goroutine, read-after-return — see field godoc.
+	s.loadWindowTotalInDB = int64(totalInDB)
 
 	// Memory cap honoured by clamping the maximum cursor walk.
 	var maxPackets int64
@@ -359,9 +427,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	// PR #1643 R1 munger #1: cold load uses unique_prefix-only gate, so
 	// the neighbor graph is no longer consulted here (affinity-tier
 	// resolution against ≤168h-old observations would silently mis-attribute).
-	s.mu.RLock()
-	_, relayPM := s.getCachedNodesAndPM()
-	s.mu.RUnlock()
+	relayPM := s.snapshotPathNodes().pm
 	var coldLoadAmbiguousHopsSkipped int
 
 	for {
@@ -383,13 +449,18 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 		if s.db.hasScopeName() {
 			scopeNameCol = ", t.scope_name"
 		}
+		// #89: route_mask follows scope_name as the last optional column.
+		routeMaskCol := ""
+		if s.db.hasRouteMask() {
+			routeMaskCol = ", t.route_mask"
+		}
 
 		var chunkSQL string
 		if s.db.isV3() {
 			chunkSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 					t.payload_type, t.payload_version, t.decoded_json,
 					o.id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
-					o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + `
+					o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 				FROM (SELECT * FROM transmissions t2 ` + whereClause + ` ORDER BY t2.id ASC LIMIT ` + fmt.Sprintf("%d", chunkSize) + `) AS t
 				LEFT JOIN observations o ON o.transmission_id = t.id
 				LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -398,7 +469,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 			chunkSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 					t.payload_type, t.payload_version, t.decoded_json,
 					o.id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
-					o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + `
+					o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 				FROM (SELECT * FROM transmissions t2 ` + whereClause + ` ORDER BY t2.id ASC LIMIT ` + fmt.Sprintf("%d", chunkSize) + `) AS t
 				LEFT JOIN observations o ON o.transmission_id = t.id
 				LEFT JOIN observers obs ON obs.id = o.observer_id
@@ -440,6 +511,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	s.mu.Lock()
 	for _, tx := range s.packets {
 		pickBestObservation(tx)
+		s.trackedBytes += rechargeTx(tx)
 		s.indexByNode(tx)
 	}
 	// Restore the "s.packets sorted oldest-first by FirstSeen" invariant
@@ -455,14 +527,18 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	sort.SliceStable(s.packets, func(i, j int) bool {
 		return s.packets[i].FirstSeen < s.packets[j].FirstSeen
 	})
-	s.buildSubpathIndex()
 	s.buildPathHopIndex()
-	s.buildDistanceIndex()
+	// The distance index is built lazily on the first
+	// /api/analytics/distance request, as in legacy Load() (#1011). Built
+	// here it held s.mu for the whole build and did not mark the index
+	// built for the lazy gate, so that first request built it again (#558).
 	if s.hotStartupHours > 0 {
 		s.oldestLoaded = hotCutoffStr
 	} else if len(s.packets) > 0 {
 		s.oldestLoaded = s.packets[0].FirstSeen
 	}
+	s.analyticsHistory.failed = s.analyticsHistory.failed || totalInDB < 0 || (maxPackets == 0 && totalLoaded < totalInDB)
+	s.finishNodeAnalyticsLoadLocked(s.analyticsHistory.loadCutoff, maxPackets > 0 && totalLoaded < totalInDB, s.hotStartupHours > 0)
 	s.loaded = true
 	s.mu.Unlock()
 
@@ -501,34 +577,47 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 	seenTxIDs := make(map[int]bool)
 	var maxID int64
 
-	for rows.Next() {
-		var txID int
-		var rawHex, hash, firstSeen, decodedJSON sql.NullString
-		var routeType, payloadType, payloadVersion sql.NullInt64
-		var obsID sql.NullInt64
-		var observerID, observerName, observerIATA, direction, pathJSON, obsTimestamp sql.NullString
-		var snr, rssi sql.NullFloat64
-		var score sql.NullInt64
-		var obsRawHex sql.NullString
-		var resolvedPathStr sql.NullString
-		var scopeName sql.NullString
+	// Reuse scan storage for this cursor only. Scan overwrites every target,
+	// including NULLs; retained values are copied by the null* helpers below.
+	var txID int
+	var rawHex, hash, firstSeen, decodedJSON sql.NullString
+	var routeType, payloadType, payloadVersion sql.NullInt64
+	var obsID sql.NullInt64
+	var observerID, observerName, observerIATA, direction, pathJSON, obsTimestamp sql.NullString
+	var snr, rssi sql.NullFloat64
+	var score sql.NullInt64
+	var obsRawHex sql.NullString
+	var resolvedPathStr sql.NullString
+	var scopeName sql.NullString
+	var routeMask sql.NullInt64
 
-		scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
-			&payloadVersion, &decodedJSON,
-			&obsID, &observerID, &observerName, &observerIATA, &direction,
-			&snr, &rssi, &score, &pathJSON, &obsTimestamp}
-		if s.db.hasObsRawHex() {
-			scanArgs = append(scanArgs, &obsRawHex)
-		}
-		if s.db.hasResolvedPath() {
-			scanArgs = append(scanArgs, &resolvedPathStr)
-		}
-		if s.db.hasScopeName() {
-			scanArgs = append(scanArgs, &scopeName)
-		}
+	scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
+		&payloadVersion, &decodedJSON,
+		&obsID, &observerID, &observerName, &observerIATA, &direction,
+		&snr, &rssi, &score, &pathJSON, &obsTimestamp}
+	if s.db.hasObsRawHex() {
+		scanArgs = append(scanArgs, &obsRawHex)
+	}
+	if s.db.hasResolvedPath() {
+		scanArgs = append(scanArgs, &resolvedPathStr)
+	}
+	if s.db.hasScopeName() {
+		scanArgs = append(scanArgs, &scopeName)
+	}
+	if s.db.hasRouteMask() {
+		scanArgs = append(scanArgs, &routeMask)
+	}
+
+	for rows.Next() {
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] LoadChunked scan error: %v", err)
+			s.analyticsHistory.failed = true
 			continue
+		}
+		if s.loadScannedRowHook != nil {
+			hook := s.loadScannedRowHook
+			s.loadScannedRowHook = nil
+			hook()
 		}
 
 		if int64(txID) > maxID {
@@ -549,10 +638,9 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				PayloadType: nullIntPtr(payloadType),
 				DecodedJSON: nullStrVal(decodedJSON),
 				ScopeName:   nullStrVal(scopeName),
-				obsKeys:     make(map[string]bool),
-				observerSet: make(map[string]bool),
 			}
 			s.byHash[hashStr] = tx
+			s.mergeRouteMaskOrQueue(tx, routeMask)
 			s.packets = append(s.packets, tx)
 			s.byTxID[txID] = tx
 			if txID > s.maxTxID {
@@ -564,26 +652,33 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
 			s.trackAdvertPubkey(tx)
-			s.trackedBytes += estimateStoreTxBytes(tx)
+			s.trackedBytes += rechargeTx(tx)
 		}
 
 		if obsID.Valid {
 			oid := int(obsID.Int64)
-			obsIDStr := nullStrVal(observerID)
+			// #489: one canonical copy of each observer ID, name, IATA code
+			// and direction, as in Load. The chunk merge holds s.mu, but the
+			// pool is uncontended here: a chunk brings at most a handful of
+			// values the pool does not already hold.
+			om := s.obsStrPool.internObs(nullStrVal(observerID), nullStrVal(observerName),
+				nullStrVal(observerIATA), nullStrVal(direction))
+			obsIDStr := om.observerID
 			obsPJ := nullStrVal(pathJSON)
 
-			dk := obsIDStr + "|" + obsPJ
-			if tx.obsKeys[dk] {
+			dup, knownObserver := tx.lookupObservation(obsIDStr, obsPJ)
+			if dup {
 				continue
 			}
 
 			obs := &StoreObs{
 				ID:             oid,
 				TransmissionID: txID,
-				ObserverID:     obsIDStr,
-				ObserverName:   nullStrVal(observerName),
-				ObserverIATA:   nullStrVal(observerIATA),
-				Direction:      nullStrVal(direction),
+				ObserverID:     om.observerID,
+				ObserverName:   om.observerName,
+				ObserverIATA:   om.observerIATA,
+				Direction:      om.direction,
+				sharedStrs:     om.shared,
 				SNR:            nullFloatPtr(snr),
 				RSSI:           nullFloatPtr(rssi),
 				Score:          nullIntPtr(score),
@@ -591,38 +686,21 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				// obs.RawHex deliberately NOT stored: it duplicates the parent
 				// tx.RawHex (same content hash ⇒ same frame) and enrichObs falls
 				// back to tx.RawHex when obs.RawHex == "". obsRawHex is still
-				// scanned to keep scanArgs aligned with the o.raw_hex column.
+				// scanned to keep scanArgs aligned with the o.raw_hex column,
+				// and its header route feeds wireRoute (#76).
 				Timestamp: normalizeTimestamp(nullStrVal(obsTimestamp)),
+				wireRoute: wireRouteFromRawHex(obsRawHex.String),
+				advertEv:  advertEvidenceFromRawHex(obsRawHex.String),
 			}
 
-			rpStr := nullStrVal(resolvedPathStr)
-			if rpStr != "" {
-				rp := unmarshalResolvedPath(rpStr)
-				pks := extractResolvedPubkeys(rp)
-				s.indexResolvedPathHops(tx, pks, hopsSeen)
-			} else if relayPM != nil && obsPJ != "" && obsPJ != "[]" {
-				// resolved_path is NULL on live (since #1287 relay data is
-				// persisted as neighbor_edges, not per-observation). Re-resolve
-				// relay-hop attribution from path_json so relay nodes keep their
-				// analytics history across a restart instead of rebuilding only
-				// from post-restart live traffic. relayPM is passed in from
-				// LoadChunked (fetched before any chunk cursor opened).
-				// byNode ONLY — see the Load() counterpart for why the
-				// resolved_path/path-hop indexes must NOT be populated here.
-				// PR #1643 R1 munger #1: unique_prefix-only gate.
-				rp := resolvePathForObsColdLoad(obsPJ, obsIDStr, tx, relayPM, coldLoadAmbiguousHopsSkipped)
-				for _, pk := range extractResolvedPubkeys(rp) {
-					s.addToByNode(tx, pk)
-				}
-			}
+			// Same relay-hop indexing as Load and live ingest (see
+			// indexObservationRelayHops). relayPM is passed in from
+			// LoadChunked (fetched before any chunk cursor opened).
+			s.indexObservationRelayHops(tx, decodePersistedRelayPath(nullStrVal(resolvedPathStr)), obsPJ, obsIDStr, relayPM, hopsSeen, coldLoadAmbiguousHopsSkipped)
 
-			tx.Observations = append(tx.Observations, obs)
-			tx.obsKeys[dk] = true
-			if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
-				tx.observerSet[obs.ObserverID] = true
-				tx.UniqueObserverCount++
-			}
-			tx.ObservationCount++
+			tx.mergeObservedPathHashSize(obsPJ)
+			s.trackedBytes += tx.addObservation(obs, knownObserver)
+			s.analyticsHistory.observedFrom = earlierNodeAnalyticsEvidence(s.analyticsHistory.observedFrom, obs.Timestamp)
 			if obs.Timestamp > tx.LatestSeen {
 				tx.LatestSeen = obs.Timestamp
 			}

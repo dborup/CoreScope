@@ -728,7 +728,7 @@
             }
           }
         },
-        "observers": {
+        "directObservers": {
           "type": "array",
           "elementShape": {
             "type": "object",
@@ -739,11 +739,28 @@
               "observer_name": {
                 "type": "string"
               },
+              "packetCount": {
+                "type": "number"
+              },
               "avgSnr": {
                 "type": "nullable"
               },
               "avgRssi": {
                 "type": "nullable"
+              }
+            }
+          }
+        },
+        "relayObservers": {
+          "type": "array",
+          "elementShape": {
+            "type": "object",
+            "keys": {
+              "observer_id": {
+                "type": "string"
+              },
+              "observer_name": {
+                "type": "string"
               },
               "packetCount": {
                 "type": "number"

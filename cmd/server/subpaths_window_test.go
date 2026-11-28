@@ -62,8 +62,8 @@ func TestSubpathsHonorsTimeWindow_StoreLevel(t *testing.T) {
 	if err := store.Load(); err != nil {
 		t.Fatalf("store.Load failed: %v", err)
 	}
-	// #1008: indexes build in the background after Load(); tests that
-	// read s.spIndex / s.spTxIndex must wait for the ready flag.
+	// #1008: the path-hop index builds in the background after Load();
+	// wait so it does not race the assertions below.
 	if !store.WaitIndexesReady(5 * time.Second) {
 		t.Fatalf("indexes not ready after 5s")
 	}
@@ -106,9 +106,9 @@ func TestSubpathsHandlerHonorsTimeWindow(t *testing.T) {
 	if err := store.Load(); err != nil {
 		t.Fatalf("store.Load failed: %v", err)
 	}
-	// #1008: handler is hard-gated behind SubpathIndexReady() and returns
-	// 503 until the background build completes. Wait for ready before
-	// hitting the route.
+	// #1008: the path-hop index builds in the background after Load();
+	// wait so it does not race the requests below. Route Patterns
+	// themselves need no index since #413.
 	if !store.WaitIndexesReady(5 * time.Second) {
 		t.Fatalf("indexes not ready after 5s")
 	}

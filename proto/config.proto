@@ -74,6 +74,26 @@ message RegionsResponse {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/config/regions/groups — Named region quick-pick groups (#416)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// One operator-named group of region codes. Convenience labels over the codes
+// from GET /api/config/regions, not verified geographic boundaries.
+message RegionGroup {
+  // Operator label, e.g. "Bay Area". Never empty, at most 40 characters.
+  string name = 1;
+  // Region codes, in the spelling GET /api/config/regions uses. Never empty,
+  // de-duplicated, at most 24 entries.
+  repeated string codes = 2;
+}
+
+// GET /api/config/regions/groups — response.
+// A JSON array (at most 12 entries), empty when none is configured.
+message RegionGroupsResponse {
+  repeated RegionGroup groups = 1;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // GET /api/config/client — Client-side configuration
 // ═══════════════════════════════════════════════════════════════════════════════
 

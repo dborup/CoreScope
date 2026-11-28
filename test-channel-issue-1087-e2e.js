@@ -130,7 +130,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   // ─── Bug 4: Share opens a DEDICATED modal ───
   await step('Bug 4: Share button opens a dedicated share modal (not Add)', async () => {
     // Channel from previous step is in the sidebar.
-    await page.waitForSelector('[data-share-channel]');
+    await page.waitForSelector('[data-row-menu]');
     // Make sure the Add modal is closed before we click Share.
     const addOpen = await page.evaluate(() => {
       const m = document.getElementById('chAddChannelModal');
@@ -138,7 +138,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     });
     assert(!addOpen, 'precondition: Add modal must be closed before Share click');
 
-    await page.click('[data-share-channel]');
+    await page.click('[data-row-menu]');
+    await page.click('#chRowMenu [data-share-channel]');
 
     // The Share modal must exist and be visible.
     await page.waitForSelector('#chShareModal:not(.hidden)', { timeout: 5000 });

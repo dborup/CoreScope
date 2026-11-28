@@ -138,6 +138,26 @@ function makeApiStub(resp) {
 (async () => {
   console.log('\n=== analytics.js: renderAreasTab ===');
 
+  await testAsync('disabled estimates preserve real density/bridges without zero-value estimate tables or links', async () => {
+    // Deliberately retain stale estimate fields: the capability flag wins.
+    const ctx = makeAnalyticsSandbox(makeApiStub(makeAreasResponse({ estimatedPositionsEnabled: false })));
+    const el = fakeEl();
+    await ctx.window._analyticsRenderAreasTab(el);
+    assert.ok(el.innerHTML.includes('disabled by the instance operator'));
+    assert.ok(el.innerHTML.includes('Odense by') && el.innerHTML.includes('BridgeNode'));
+    assert.ok(el.innerHTML.includes('3 nodes network-wide have no real GPS fix'));
+    assert.ok(!el.innerHTML.includes('View Estimated Nodes') && !el.innerHTML.includes('Estimated (via Neighbors)'));
+    assert.ok(!el.innerHTML.includes('no positioned neighbor'));
+  });
+
+  await testAsync('disabled estimates are explained even when no areas exist', async () => {
+    const ctx = makeAnalyticsSandbox(makeApiStub({ estimatedPositionsEnabled: false }));
+    const el = fakeEl();
+    await ctx.window._analyticsRenderAreasTab(el);
+    assert.ok(el.innerHTML.includes('disabled by the instance operator'));
+    assert.ok(el.innerHTML.includes('No Areas are configured'));
+  });
+
   await testAsync('renders the Node Density & Health table from the API response', async () => {
     const ctx = makeAnalyticsSandbox(makeApiStub(makeAreasResponse()));
     const el = fakeEl();

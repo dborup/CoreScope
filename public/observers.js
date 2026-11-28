@@ -140,6 +140,9 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
   let _fetchedAt = 0; // #1562: ms epoch when the current `observers` payload was received
   let _loadObserversReqId = 0; // #1563: monotonic id; resolutions older than the latest are discarded
   let obsSkewMap = {}; // observerID → {offsetSec, samples}
+  let obsAirtimeMap = {}; // #479 observerID → tx_airtime_pct_1h
+  let obsRxAirtimeMap = {}; // #497 observerID → rx_airtime_pct_1h
+  let obsAirtimeWarnPct; // #479 duty_cycle_warn_pct from the summary
   let wsHandler = null;
   let refreshTimer = null;
   let regionChangeHandler = null;
@@ -178,8 +181,17 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
     }
     regionChangeHandler = RegionFilter.onChange(function () { render(); });
     loadObservers();
+    // #405 — Bind the delegated handlers to the observers page's OWN
+    // container, not the shared #app. The next page's init rebuilds
+    // app.innerHTML, which discards this subtree (and its listeners) with
+    // it; binding to #app instead left these handlers firing on every
+    // later page and stacking on each revisit (same leak class #402 fixed
+    // in compare.js). All interactive targets — header buttons, the
+    // last-updated pill and the table rows — live inside .observers-page,
+    // so delegation here still catches every event it did on #app.
+    var pageEl = app.querySelector('.observers-page');
     // Event delegation for data-action buttons
-    app.addEventListener('click', function (e) {
+    pageEl.addEventListener('click', function (e) {
       var btn = e.target.closest('[data-action]');
       if (btn && btn.dataset.action === 'obs-refresh') loadObservers({ bust: true });
       if (btn && btn.dataset.action === 'compare-observers') {
@@ -211,8 +223,9 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
         location.hash = row.dataset.value;
       }
     });
-    // #209 — Keyboard accessibility for observer rows
-    app.addEventListener('keydown', function (e) {
+    // #209 — Keyboard accessibility for observer rows (bound to the page
+    // container, not #app — see the #405 note above).
+    pageEl.addEventListener('keydown', function (e) {
       // #1562 — Last-updated pill (role=button) supports Enter/Space to
       // force a fresh fetch, matching click behavior on data-action="obs-refresh".
       var refreshBtn = e.target.closest('[data-action="obs-refresh"]');
@@ -255,6 +268,8 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
     _mqttPanelTeardown = null;
     observers = [];
     obsSkewMap = {};
+    obsAirtimeMap = {};
+    obsRxAirtimeMap = {};
   }
 
   async function loadObservers(opts) {
@@ -265,13 +280,21 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
     // (or vice versa) with stale data + a misleading "0s ago" pill.
     var myId = ++_loadObserversReqId;
     try {
-      const [data, skewData] = await Promise.all([
+      const [data, skewData, airData] = await Promise.all([
         api('/observers', { ttl: CLIENT_TTL.observers, bust: bust }),
-        api('/observers/clock-skew', { ttl: 30000 }).catch(function() { return []; })
+        api('/observers/clock-skew', { ttl: 30000 }).catch(function() { return []; }),
+        // #479 — rolling 1 h TX airtime; one bulk call, not per observer.
+        api('/observers/metrics/summary?window=1h', { ttl: 30000 }).catch(function() { return {}; })
       ]);
       if (myId !== _loadObserversReqId) return; // stale resolve, newer in-flight
       observers = data.observers || [];
       _fetchedAt = Date.now(); // #1562: stamp freshness for the header label
+      obsAirtimeMap = {};
+      obsRxAirtimeMap = {};
+      obsAirtimeWarnPct = airData && airData.duty_cycle_warn_pct;
+      ((airData && airData.observers) || []).forEach(function(a) {
+        if (a && a.observer_id) { obsAirtimeMap[a.observer_id] = a.tx_airtime_pct_1h; obsRxAirtimeMap[a.observer_id] = a.rx_airtime_pct_1h; }
+      });
       obsSkewMap = {};
       (Array.isArray(skewData) ? skewData : []).forEach(function(s) {
         if (s && s.observerID) obsSkewMap[s.observerID] = s;
@@ -397,7 +420,7 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
         <caption class="sr-only">Observer status and statistics</caption>
         <thead><tr>
           <th scope="col" data-priority="1" data-sort-key="status" data-type="numeric">Status</th><th scope="col" data-priority="1" data-sort-key="name">Name</th><th scope="col" data-priority="3" data-sort-key="region">Region</th><th scope="col" data-priority="2" data-sort-key="last_seen" data-type="numeric">Last Status</th><th scope="col" data-priority="2" data-sort-key="last_packet_at" data-type="numeric">Last Packet</th>
-          <th scope="col" data-priority="3" data-sort-key="packet_health" data-type="numeric">Packet Health</th><th scope="col" data-priority="4" data-sort-key="packet_count" data-type="numeric">Total Packets</th><th scope="col" data-priority="3" data-sort-key="packets_hour" data-type="numeric">Packets/Hour</th><th scope="col" data-priority="4" data-sort-key="clock_offset" data-type="numeric">Clock Offset</th><th scope="col" data-priority="4" data-sort-key="uptime" data-type="numeric">Uptime</th><th scope="col" data-priority="4" data-sort-key="firmware">Firmware</th><th scope="col" data-priority="4" data-sort-key="client_version">Client</th><th scope="col" data-priority="4" data-sort-key="neighbors_report" data-type="numeric" title="Whether this observer sends /neighbors reports (opt-in firmware feature)">Neighbors</th>
+          <th scope="col" data-priority="3" data-sort-key="packet_health" data-type="numeric">Packet Health</th><th scope="col" data-priority="4" data-sort-key="packet_count" data-type="numeric">Total Packets</th><th scope="col" data-priority="3" data-sort-key="packets_hour" data-type="numeric">Packets/Hour</th><th scope="col" data-priority="3" data-sort-key="airtime_1h" data-type="numeric" title="${window.ObserverAirtime.TX_TITLE}">TX 1h</th><th scope="col" data-priority="3" data-sort-key="rx_airtime_1h" data-type="numeric" title="${window.ObserverAirtime.RX_TITLE}">RX 1h</th><th scope="col" data-priority="4" data-sort-key="clock_offset" data-type="numeric">Clock Offset</th><th scope="col" data-priority="4" data-sort-key="uptime" data-type="numeric">Uptime</th><th scope="col" data-priority="4" data-sort-key="firmware">Firmware</th><th scope="col" data-priority="4" data-sort-key="client_version">Client</th><th scope="col" data-priority="4" data-sort-key="neighbors_report" data-type="numeric" title="Whether this observer sends /neighbors reports (opt-in firmware feature)">Neighbors</th>
           <th scope="col" data-priority="1" class="col-compare-select" style="width:32px"><span class="sr-only">Select for compare</span></th>
         </tr></thead>
         <tbody>${filtered.map(o => {
@@ -424,15 +447,17 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
           const _packetCount = (o.packet_count != null) ? o.packet_count : '';
           const _packetsHour = (o.packetsLastHour != null) ? o.packetsLastHour : '';
           const _neighborsReportMs = o.last_neighbors_report_at ? new Date(o.last_neighbors_report_at).getTime() : '';
-          return `<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/observers/${encodeURIComponent(o.id)}" data-observer-id="${escapeHtml(o.id)}" onclick="location.hash='#/observers/${encodeURIComponent(o.id)}'">
+          return `<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/observers/${encodeURIComponent(o.id)}" data-observer-id="${escapeHtml(o.id)}">
             <td data-value="${_healthRank}"><span class="health-dot ${h.cls}" title="${h.label}">${shapeIcon}</span> ${h.label}</td>
             <td data-testid="obs-cell-name" data-value="${escapeHtml(String(o.name || o.id))}" class="mono">${escapeHtml(o.name || o.id)}${window.ObserversNaiveChip.render(o)}${o.can_relay === false ? ' <span class="badge-listener" title="Firmware reported repeat:off — listener-only; excluded from path-hop disambiguator (issue #1290)">listener</span>' : (o.can_relay === true ? ' <span class="badge-repeater" title="Firmware reported repeat:on — eligible as a path hop">repeater</span>' : '')}</td>
-            <td data-value="${escapeHtml(o.iata || '')}">${o.iata ? `<span class="badge-region">${o.iata}</span>` : '—'}</td>
+            <td data-value="${escapeHtml(o.iata || '')}">${o.iata ? `<span class="badge-region">${escapeHtml(o.iata)}</span>` : '—'}</td>
             <td data-value="${_lastSeenMs}">${timeAgo(o.last_seen)}</td>
             <td data-testid="obs-cell-last-packet" data-value="${_lastPktMs}">${o.last_packet_at ? timeAgo(o.last_packet_at) : '<span class="text-muted">—</span>'}</td>
             <td data-value="${_healthRank}">${packetBadge(o)}</td>
             <td data-testid="obs-cell-packet-count" data-value="${_packetCount}">${(o.packet_count || 0).toLocaleString()}</td>
             <td data-value="${_packetsHour}">${sparkBar(o.packetsLastHour || 0, maxPktsHr)}</td>
+            <td data-testid="obs-cell-airtime" data-value="${obsAirtimeMap[o.id] != null ? obsAirtimeMap[o.id] : ''}">${window.ObserverAirtime.badge(obsAirtimeMap[o.id], obsAirtimeWarnPct)}</td>
+            <td data-testid="obs-cell-rx-airtime" data-value="${obsRxAirtimeMap[o.id] != null ? obsRxAirtimeMap[o.id] : ''}">${window.ObserverAirtime.rxBadge(obsRxAirtimeMap[o.id])}</td>
             <td data-value="${_skewSec}">${(function() {
               var sk = obsSkewMap[o.id];
               if (!sk || sk.samples == null || sk.samples === 0) return '<span class="text-muted">—</span>';
@@ -538,10 +563,10 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
     var content = window.SlideOver.open({ title: (o.name || o.id) });
     var naiveChipHTML = window.ObserversNaiveChip.render(o);
     content.innerHTML =
-      (naiveChipHTML ? '<div style="margin-bottom:10px">' + naiveChipHTML + ' <span class="text-muted">Clock is naive — per-packet timing clamped to ingest time.</span></div>' : '') +
+      (naiveChipHTML ? '<div style="margin-bottom:10px">' + naiveChipHTML + ' <span class="text-muted">Clock is naive — per-packet timing clamped to ingest time. Clears itself 24h after the last skew event.</span></div>' : '') +
       '<dl class="slide-over-dl" style="margin:0;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px">' +
         '<dt>Status</dt><dd><span class="health-dot ' + h.cls + '"><svg class="ph-icon" aria-hidden="true" focusable="false"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"></use></svg></span> ' + h.label + '</dd>' +
-        '<dt>Region</dt><dd>' + (o.iata ? '<span class="badge-region">' + o.iata + '</span>' : '—') + '</dd>' +
+        '<dt>Region</dt><dd>' + (o.iata ? '<span class="badge-region">' + escapeHtml(o.iata) + '</span>' : '—') + '</dd>' +
         '<dt>Last status</dt><dd>' + timeAgo(o.last_seen) + '</dd>' +
         '<dt>Last packet</dt><dd>' + (o.last_packet_at ? timeAgo(o.last_packet_at) : '—') + '</dd>' +
         '<dt>Total packets</dt><dd>' + (o.packet_count || 0).toLocaleString() + '</dd>' +

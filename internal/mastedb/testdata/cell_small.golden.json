@@ -1,0 +1,118 @@
+[
+  {
+    "lat": 56.429831,
+    "lon": 9.421574,
+    "street": "Hjørnet",
+    "houseNumber": "2",
+    "postcode": "8800",
+    "city": "Testby Ø",
+    "stations": [
+      "TEST-HJØRNE"
+    ],
+    "entries": [
+      {
+        "technology": "LTE",
+        "bandMHz": 2100,
+        "service": "Mobiltelefoni",
+        "commissioned": "2024-07-12T22:00:00Z",
+        "interference": false
+      }
+    ],
+    "interference": false,
+    "likelyMast": false
+  },
+  {
+    "lat": 56.436996,
+    "lon": 9.42814,
+    "street": "Prøvevej",
+    "houseNumber": "12B",
+    "postcode": "8800",
+    "city": "Testby Ø",
+    "stations": [
+      "TEST-A1",
+      "TEST-A2"
+    ],
+    "entries": [
+      {
+        "technology": "LTE",
+        "bandMHz": 800,
+        "service": "Mobiltelefoni",
+        "commissioned": "2019-03-01T23:00:00Z",
+        "interference": true
+      },
+      {
+        "technology": "LTE",
+        "bandMHz": 1800,
+        "service": "Mobiltelefoni",
+        "commissioned": "2019-03-01T23:00:00Z",
+        "interference": false
+      },
+      {
+        "technology": "5G-NR",
+        "bandMHz": 3500,
+        "service": "Mobiltelefoni",
+        "commissioned": "2023-06-02T22:00:00Z",
+        "interference": false
+      }
+    ],
+    "interference": true,
+    "likelyMast": false
+  },
+  {
+    "lat": 56.446839,
+    "lon": 9.439606,
+    "street": "Banevej",
+    "houseNumber": "3",
+    "postcode": "8800",
+    "city": "Testby Ø",
+    "stations": [
+      "TEST-B",
+      "TEST-BANE"
+    ],
+    "entries": [
+      {
+        "technology": "GSM-R",
+        "service": "Andre",
+        "commissioned": "2021-01-14T23:00:00Z",
+        "interference": true
+      },
+      {
+        "technology": "LTE",
+        "bandMHz": 2600,
+        "service": "Mobiltelefoni",
+        "commissioned": "2022-11-08T23:00:00Z",
+        "interference": false
+      }
+    ],
+    "interference": true,
+    "likelyMast": false
+  },
+  {
+    "lat": 56.430644,
+    "lon": 9.445913,
+    "street": "Masteløkken",
+    "houseNumber": "1",
+    "postcode": "8800",
+    "city": "Testby Ø",
+    "stations": [
+      "TEST-RADIO"
+    ],
+    "entries": [
+      {
+        "technology": "FM",
+        "bandMHz": 100,
+        "service": "Andre",
+        "commissioned": "1998-05-31T22:00:00Z",
+        "interference": false
+      },
+      {
+        "technology": "DVB-T",
+        "service": "Andre",
+        "commissioned": "2009-10-31T23:00:00Z",
+        "interference": false
+      }
+    ],
+    "interference": false,
+    "likelyMast": true
+  }
+]

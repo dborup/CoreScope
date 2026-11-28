@@ -260,8 +260,8 @@ async function main() {
   else {
     if (favProbe.aria !== 'Toggle favorite') fail(`(j) /nodes fav-star: aria-label missing/wrong (got "${favProbe.aria}")`);
     else pass('(j) /nodes fav-star has aria-label="Toggle favorite"');
-    if (favProbe.w < 44 || favProbe.h < 44) fail(`(j) /nodes fav-star bbox ${favProbe.w}x${favProbe.h} < 44x44 (WCAG 2.5.5)`);
-    else pass(`(j) /nodes fav-star bbox ${favProbe.w}x${favProbe.h} ≥ 44x44`);
+    if (favProbe.w < 48 || favProbe.h < 48) fail(`(j) /nodes fav-star bbox ${favProbe.w}x${favProbe.h} < 48x48 (house minimum, #2052)`);
+    else pass(`(j) /nodes fav-star bbox ${favProbe.w}x${favProbe.h} ≥ 48x48`);
     if (!favProbe.hasPh) fail('(j) /nodes fav-star missing ph-icon sprite');
     else pass('(j) /nodes fav-star uses ph-icon sprite');
     if (favProbe.hasStarText) fail('(j) /nodes fav-star still contains ★ or ☆ text');

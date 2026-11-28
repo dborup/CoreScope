@@ -39,6 +39,7 @@
   var wired = false;
   var drawerEl = null;
   var backdropEl = null;
+  var versionEl = null;
   var dragging = false;
   var startX = 0;
   var startY = 0;
@@ -89,6 +90,61 @@
   function phIconHTML(name) {
     return '<svg class="ph-icon" aria-hidden="true" focusable="false">' +
            '<use href="/icons/phosphor-sprite.svg#ph-' + name + '"></use></svg>';
+  }
+
+  // ── Version footer (#111) ───────────────────────────────────────────────
+  // GET /api/health reports {version, commit, buildTime}; the server fills
+  // any it cannot resolve with "unknown". The reading is the shared
+  // page-load one (readHealthOnce, also the baseline for version-notice.js,
+  // #614), cached for the page lifetime -- failures included -- so opening
+  // or re-opening the drawer adds no requests. Values are written
+  // with textContent / title only.
+  var RELEASES_URL = 'https://github.com/dborup/CoreScope/releases';
+  var versionRequested = false;
+
+  function healthField(h, k) {
+    var v = h && h[k];
+    if (typeof v !== 'string') return '';
+    v = v.trim();
+    return (v && v.toLowerCase() !== 'unknown') ? v : '';
+  }
+
+  function applyVersion(el, h) {
+    var version = healthField(h, 'version');
+    if (!version) return; // keep the neutral "CoreScope" label
+    el.textContent = 'CoreScope ' + version;
+    var bits = [];
+    var commit = healthField(h, 'commit');
+    var built = healthField(h, 'buildTime');
+    if (commit) bits.push('commit ' + commit);
+    if (built) bits.push('built ' + built);
+    if (bits.length) el.title = bits.join(' \u00B7 ');
+  }
+
+  // The one /api/health reader. Resolves to the parsed body, or null for a
+  // network error, non-OK (5xx during a restart) or invalid JSON response.
+  // Shared with version-notice.js (#614) as window.CoreHealth.
+  function readHealth() {
+    if (typeof fetch !== 'function') return Promise.resolve(null);
+    return fetch('/api/health', { headers: { Accept: 'application/json' } })
+      .then(function (r) { return r && r.ok ? r.json() : null; })
+      .then(function (h) { return h || null; }, function () { return null; });
+  }
+  // The first reading is shared: version-notice.js reads it at page load as
+  // its baseline and the drawer footer reuses it, so opening the drawer adds
+  // no request. The result, failure included, is cached for the page lifetime.
+  var firstHealth = null;
+  function readHealthOnce() {
+    if (!firstHealth) firstHealth = readHealth();
+    return firstHealth;
+  }
+  window.CoreHealth = { read: readHealth, readOnce: readHealthOnce, field: healthField };
+
+  function requestVersion() {
+    if (versionRequested || !versionEl || typeof fetch !== 'function') return;
+    versionRequested = true;
+    var el = versionEl;
+    readHealthOnce().then(function (h) { applyVersion(el, h); });
   }
 
   var EDGE_PX = 44;          // pointerdown must start within left N px (drawer trigger zone)
@@ -203,6 +259,19 @@
     renderRoutes(list);
     drawerEl.appendChild(list);
 
+    var footer = document.createElement('div');
+    footer.className = 'nav-drawer-footer';
+    var ver = document.createElement('a');
+    ver.className = 'nav-drawer-version';
+    ver.setAttribute('data-nav-drawer-version', '');
+    ver.setAttribute('href', RELEASES_URL);
+    ver.setAttribute('target', '_blank');
+    ver.setAttribute('rel', 'noopener noreferrer');
+    ver.textContent = 'CoreScope';
+    footer.appendChild(ver);
+    drawerEl.appendChild(footer);
+    versionEl = ver;
+
     document.body.appendChild(backdropEl);
     document.body.appendChild(drawerEl);
 
@@ -229,6 +298,7 @@
   function open() {
     buildDom();
     if (!isWide()) return; // Option A
+    requestVersion(); // #111: first open only
     if (!drawerWidth) drawerWidth = drawerEl.getBoundingClientRect().width || 320;
     // Capture the previously-focused element BEFORE we move focus, so close()
     // can restore it. Guard against opening twice (don't overwrite on re-open).

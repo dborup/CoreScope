@@ -1,0 +1,19 @@
+badge   24px bold    x=1009 y= 64 w= 149 Room Server
+title   44px bold    x=  44 y= 78 w= 288 Aarhus Room
+area    24px regular x=  44 y=114 w= 117 Midtjylland
+label   22px regular x=  24 y=196 w= 104 Last heard
+value   44px bold    x=  24 y=252 w= 154 4m ago
+detail  20px regular x=  24 y=284 w= 215 2026-11-15 13:16 UTC
+label   22px regular x= 408 y=196 w= 131 Relayed 24 h
+value   44px bold    x= 408 y=252 w=  49 87
+label   22px regular x= 792 y=196 w= 118 Relayed 1 h
+value   44px bold    x= 792 y=252 w=  24 0
+label   22px regular x=  24 y=366 w= 174 Seen airtime 24 h
+value   44px bold    x=  24 y=422 w= 126 <0.1%
+detail  20px regular x=  24 y=454 w= 110 lower bound
+label   22px regular x= 408 y=366 w= 123 Busiest hour
+value   44px bold    x= 408 y=422 w= 124 ≥0.6%
+detail  20px regular x= 408 y=454 w= 110 lower bound
+label   22px regular x= 792 y=366 w= 101 Neighbors
+value   44px bold    x= 792 y=422 w=  24 3
+asof    22px regular x=  24 y=594 w= 290 as of 2026-11-15 13:20 UTC

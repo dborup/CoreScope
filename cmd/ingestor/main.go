@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -23,22 +24,30 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/meshcore-analyzer/pprofbind"
 	"github.com/meshcore-analyzer/regions"
 )
 
 func main() {
-	// pprof profiling — off by default, enable with ENABLE_PPROF=true
-	if os.Getenv("ENABLE_PPROF") == "true" {
-		pprofPort := os.Getenv("PPROF_PORT")
-		if pprofPort == "" {
-			pprofPort = "6061"
-		}
+	// Admin subcommands (e.g. `admin delete-client-rx`) run a one-shot CLI and
+	// exit — they never start MQTT ingest. Dispatched before flag.Parse so the
+	// subcommand owns its own FlagSet; normal `-config` boot is unaffected.
+	if argsHaveAdmin(os.Args[1:]) {
+		os.Exit(runAdmin(os.Args[1:]))
+	}
+
+	// pprof profiling — off by default; see internal/pprofbind for the bind
+	// address and the per-role port that keeps this listener off the
+	// server's (#372).
+	if pp := pprofbind.Ingestor.Resolve(os.Getenv); pp.Enabled {
 		go func() {
-			log.Printf("[pprof] ingestor profiling at http://localhost:%s/debug/pprof/", pprofPort)
-			if err := http.ListenAndServe(":"+pprofPort, nil); err != nil {
+			log.Printf("[pprof] ingestor profiling at %s (listening on %s)", pp.URL, pp.Addr)
+			if err := http.ListenAndServe(pp.Addr, nil); err != nil {
 				log.Printf("[pprof] failed to start: %v (non-fatal)", err)
 			}
 		}()
+	} else if pp.Reason != "" {
+		log.Printf("[pprof] %s", pp.Reason)
 	}
 
 	configPath := flag.String("config", "config.json", "path to config file")
@@ -50,6 +59,14 @@ func main() {
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+
+	// Report the broker arrangement before any connection attempt, so an
+	// external-broker deploy that would ingest nothing says so up front
+	// instead of looking healthy with an empty database (#372). Errors are
+	// only fatal under MQTT_SOURCE_STRICT.
+	if fatal, msg := ReportBrokerSetup(os.Getenv, cfg.MQTTSources, cfg.sourcesDefaulted, log.Printf); fatal {
+		log.Fatal(msg)
 	}
 
 	// Apply Go runtime soft memory limit (GOMEMLIMIT). See #1010.
@@ -72,6 +89,10 @@ func main() {
 	}
 
 	sources := cfg.ResolvedSources()
+
+	// #265: surface a clientRxCoverage.sources entry that matches no configured
+	// source once, at boot, instead of silently dropping all coverage.
+	checkClientRxSources(cfg, sources)
 
 	store, err := OpenStoreWithInterval(cfg.DBPath, cfg.MetricsSampleInterval())
 	if err != nil {
@@ -102,15 +123,55 @@ func main() {
 		log.Printf("No channel keys loaded — GRP_TXT packets will not be decrypted")
 	}
 
-	regionKeys := loadRegionKeys(cfg)
+	regionKeys, regionErr := loadRegionKeys(cfg, *configPath)
+	if regionErr != nil {
+		// regions.Load already logged which file failed and why; the keys
+		// are the inline hashRegions list, so the ingestor still starts.
+		log.Printf("[regions] startup fell back to the inline hashRegions list")
+	}
 	store.BackfillDefaultScopeAsync(regionKeys)
 
 	// hashChannels/hashRegions additions in config.json otherwise require a
 	// full restart to take effect — SIGHUP reloads just these two derived
 	// key sets in place. See hot_reload.go.
-	keys := newHotKeys(channelKeys, regionKeys)
+	// #380: a key leaving the effective set is forgotten by the decode
+	// backfill on the event itself, whether or not the pass is enabled.
+	keys := newIngestorHotKeys(store, channelKeys, regionKeys)
 	stopSIGHUPReload := startSIGHUPReload(keys, *configPath)
 	defer stopSIGHUPReload()
+
+	// Shared channel proposals: approved hashtag channels join the live keys
+	// before any MQTT traffic is handled, and the ingestor applies the
+	// server's queued suggestions/decisions (the server is read-only).
+	proposals := newChannelProposalRunner(store, keys, cfg.ChannelProposals)
+	if n, err := proposals.LoadApproved(context.Background()); err != nil {
+		log.Printf("[channel-proposals] loading approved channels failed: %v", err)
+	} else if n > 0 {
+		log.Printf("[channel-proposals] %d approved shared channel(s) added to channel keys", n)
+	}
+	stopProposals := proposals.Start(2*time.Second, time.Hour)
+	defer stopProposals()
+
+	// Owner antenna-height claims (#789 M2a): the server queues claims and
+	// admin decisions; this process stores them and proves claims at advert
+	// ingest. Runs whether or not public claims are enabled, so decisions on
+	// existing claims still apply.
+	antennaClaims := newAntennaClaimRunner(store, cfg.AntennaClaims)
+	antennaClaims.RunOnce(context.Background())
+	store.antennaClaims = antennaClaims
+	stopAntennaClaims := antennaClaims.Start(2*time.Second, time.Hour)
+	defer stopAntennaClaims()
+
+	// Admin-approved region scopes are a persistent overlay on the inline and
+	// external hashRegions lists. The server only queues decisions; this
+	// process remains the sole database writer.
+	scopeApprovals := newScopeApprovalRunner(store, keys)
+	scopeApprovals.blacklisted = cfg.IsObserverBlacklisted
+	if err := scopeApprovals.LoadApproved(context.Background()); err != nil {
+		log.Printf("[scope-approval] loading approved scopes failed: %v", err)
+	}
+	stopScopeApprovals := scopeApprovals.Start()
+	defer stopScopeApprovals()
 
 	// Subscribe-early + buffer (#1608): the MQTT subscription is brought up
 	// before startup maintenance so no packets are missed while the single
@@ -122,60 +183,13 @@ func main() {
 	// Connect to each MQTT source
 	var clients []mqtt.Client
 	connectedCount := 0
-	for _, source := range sources {
-		tag := source.Name
-		if tag == "" {
-			tag = source.Broker
-		}
-
-		opts := buildMQTTOpts(source)
+	tags := mqttSourceTags(sources)
+	for i, source := range sources {
+		tag := tags[i]
+		setup := prepareMQTTSource(source, tag)
+		opts, status, liveness := setup.opts, setup.status, setup.liveness
 		connectTimeout := source.ConnectTimeoutOrDefault()
 		log.Printf("MQTT [%s] connect timeout: %ds", tag, connectTimeout)
-
-		// Pre-allocate the liveness pointer so OnConnect can reset its
-		// stale-message clock on reconnect (PR #1216 r1 item 2). IsConnectedFn
-		// is wired below once the client exists.
-		liveness := &SourceLivenessState{
-			Tag:    tag,
-			Broker: source.Broker,
-		}
-
-		// #1043: per-source status registry. Idempotent — repeated
-		// registration across reconnects returns the same state so
-		// counters accumulate across the process lifetime.
-		status := RegisterSourceStatus(tag, source.Broker)
-
-		opts.SetOnConnectHandler(func(c mqtt.Client) {
-			log.Printf("MQTT [%s] connected to %s", tag, source.Broker)
-			status.MarkConnect(time.Now())
-			// PR #1216 r1 item 2: clear the stale LastMessageUnix from
-			// before the outage so the watchdog doesn't immediately scream
-			// "stalled for 2h". Also restarts the cold-start grace window
-			// and clears the alert cooldown so a fresh stall edge can fire.
-			liveness.MarkReconnected(time.Now())
-			topics := source.Topics
-			if len(topics) == 0 {
-				topics = []string{"meshcore/#"}
-			}
-			for _, t := range topics {
-				token := c.Subscribe(t, 0, nil)
-				token.Wait()
-				if token.Error() != nil {
-					log.Printf("MQTT [%s] subscribe error for %s: %v", tag, t, token.Error())
-				} else {
-					log.Printf("MQTT [%s] subscribed to %s", tag, t)
-				}
-			}
-		})
-
-		opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
-			log.Printf("MQTT [%s] disconnected from %s: %v", tag, source.Broker, err)
-			status.MarkDisconnect(time.Now(), err)
-		})
-
-		opts.SetReconnectingHandler(func(c mqtt.Client, options *mqtt.ClientOptions) {
-			log.Printf("MQTT [%s] reconnecting to %s", tag, source.Broker)
-		})
 
 		// Capture source for closure
 		src := source
@@ -196,19 +210,15 @@ func main() {
 		// Wire IsConnectedFn now that the client exists, then register.
 		// Registration BEFORE Connect so the attempt counter is available
 		// to OnConnectAttempt on the very first dial.
-		liveness.IsConnectedFn = client.IsConnected
-		// #1335: wire force-reconnect so the watchdog can drop a
-		// half-open TCP socket and re-dial when paho.IsConnected==true
-		// but no messages have flowed past the stall threshold. Throttled
-		// per source by the watchdog itself (forceReconnectThrottle).
-		// Disconnect(250) gives in-flight publishes 250ms to drain;
-		// Connect() returns immediately and paho's reconnect machinery
-		// takes over from there. Captured-by-value `client` is the same
-		// pointer used everywhere else for this source.
-		liveness.ForceReconnectFn = func() {
-			client.Disconnect(250)
-			client.Connect()
-		}
+		// #1335: attachClient also wires force-reconnect so the watchdog
+		// can drop a half-open TCP socket and re-dial when
+		// paho.IsConnected==true but no messages have flowed past the
+		// stall threshold. Throttled per source by the watchdog itself
+		// (forceReconnectThrottle). Captured-by-value `client` is the same
+		// pointer used everywhere else for this source. See
+		// buildForceReconnectFn for why this is NOT simply
+		// "Disconnect(250) then Connect()".
+		setup.attachClient(client)
 		// PR #1216 r2 item 3: tag collisions used to log.Fatalf, which
 		// killed the entire ingestor over one config typo and recreated
 		// the #1212 total-ingest-stop class this PR exists to prevent.
@@ -227,7 +237,7 @@ func main() {
 			continue
 		}
 		if token.Error() != nil {
-			log.Printf("MQTT [%s] connection failed (non-fatal): %v", tag, token.Error())
+			log.Printf("MQTT [%s] connection failed (non-fatal): %s", tag, errForLog(token.Error(), setup.secrets...))
 			// BL1 fix: Disconnect to stop Paho's internal retry goroutines.
 			// With ConnectRetry=true, Connect() spawns background goroutines
 			// that leak if the client is simply discarded.
@@ -273,13 +283,14 @@ func main() {
 	// Packet (transmissions) retention: previously lived in cmd/server,
 	// moved to ingestor in #1283 to eliminate cross-process write
 	// contention (SQLITE_BUSY). 0 = disabled.
-	packetDays := cfg.PacketDaysOrZero()
-	if packetDays > 0 {
-		if n, err := store.PruneOldPackets(packetDays); err != nil {
-			log.Printf("[prune] error: %v", err)
-		} else if n > 0 {
-			log.Printf("[prune] startup pruned %d transmissions older than %d days", n, packetDays)
-		}
+	packetDays, channelDays := cfg.PacketDaysOrZero(), cfg.ChannelDaysOrZero()
+	if msg := channelDaysNoEffect(packetDays, channelDays); msg != "" {
+		log.Print(msg)
+	}
+	runTransmissionRetention(store, cfg, "startup")
+	// #89: route_mask_changes rows of transmissions deleted by any path.
+	if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+		log.Printf("[prune] route_mask_changes error: %v", err)
 	}
 
 	// Client-RX coverage retention: bound the opt-in coverage tables (#1727).
@@ -293,6 +304,24 @@ func main() {
 			log.Printf("[prune] startup pruned %d client_receptions older than %d days", n, clientRxDays)
 		}
 	}
+
+	// Declared-region reports are always bounded (#126): the window follows
+	// retention.clientRegionsDays, then clientRxDays, then 30 days.
+	clientRegionsDays := cfg.ClientRegionsDays()
+	if n := runClientRegionsRetention(store, clientRegionsDays); n > 0 {
+		log.Printf("[prune] startup pruned %d client_declared_regions older than %d days", n, clientRegionsDays)
+	}
+
+	// Opt-in retention for the tables nothing else prunes (#329): after the
+	// observer soft-delete and the metrics and transmission prunes above, so
+	// the observer purge's reference guards see what they left. Every window
+	// unset (the default) = nothing deleted.
+	tableRetention := cfg.TableRetention()
+	if r := tableRetention; r.Enabled() {
+		log.Printf("[prune] table retention enabled (0 = off): inactiveNodeDays=%d nodeChangeDays=%d observerPurgeDays=%d",
+			r.InactiveNodeDays, r.NodeChangeDays, r.ObserverPurgeDays)
+	}
+	runTableRetention(store, tableRetention, "startup")
 
 	vacuumPages := cfg.IncrementalVacuumPages()
 	store.RunIncrementalVacuum(vacuumPages)
@@ -309,6 +338,22 @@ func main() {
 		log.Printf("[ingest-buffer] write path ready; draining backlog (0 dropped)")
 	}
 
+	// #89: route_mask backfill runs next to live ingest, after the buffer is
+	// draining, so its one-time pending-index build (~20 s on a staging-sized
+	// DB) is absorbed by IngestBuffer instead of delaying start-up. Cancelled
+	// on shutdown so store.Close() does not wait for it; it resumes on the
+	// next start.
+	routeMaskCtx, stopRouteMaskBackfill := context.WithCancel(context.Background())
+	defer stopRouteMaskBackfill()
+	store.StartRouteMaskBackfill(routeMaskCtx)
+
+	// #215: rehash rows older than the current content-hash formula and merge
+	// the duplicates that creates, once (it is recorded as done). Same
+	// placement and shutdown as the route_mask backfill above.
+	contentHashCtx, stopContentHashMigration := context.WithCancel(context.Background())
+	defer stopContentHashMigration()
+	store.StartContentHashMigration(contentHashCtx)
+
 	// Daily ticker for node retention
 	retentionTicker := time.NewTicker(1 * time.Hour)
 	go func() {
@@ -318,14 +363,18 @@ func main() {
 		}
 	}()
 
-	// Daily ticker for observer retention (every 24h, staggered 90s after startup)
+	// Daily ticker for observer retention (every 24h, staggered 90s after
+	// startup), followed by the opt-in table retention (#329), whose observer
+	// purge must follow the soft-delete.
 	observerRetentionTicker := time.NewTicker(24 * time.Hour)
 	go func() {
 		time.Sleep(90 * time.Second) // stagger after metrics prune
 		store.RemoveStaleObservers(observerDays)
+		runTableRetention(store, tableRetention, "daily")
 		store.RunIncrementalVacuum(vacuumPages)
 		for range observerRetentionTicker.C {
 			store.RemoveStaleObservers(observerDays)
+			runTableRetention(store, tableRetention, "daily")
 			store.RunIncrementalVacuum(vacuumPages)
 		}
 	}()
@@ -347,30 +396,42 @@ func main() {
 		packetRetentionTicker = time.NewTicker(24 * time.Hour)
 		go func() {
 			for range packetRetentionTicker.C {
-				if n, err := store.PruneOldPackets(packetDays); err != nil {
-					log.Printf("[prune] error: %v", err)
-				} else if n > 0 {
+				if r := runTransmissionRetention(store, cfg, "daily"); r.Packets+r.ChannelMessages > 0 {
 					store.RunIncrementalVacuum(vacuumPages)
+				}
+				if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+					log.Printf("[prune] route_mask_changes error: %v", err)
 				}
 			}
 		}()
 		log.Printf("[prune] auto-prune enabled: packets older than %d days will be removed daily", packetDays)
+		if channelDays > packetDays {
+			log.Printf("[prune] channel messages are kept until they are %d days old", channelDays)
+		}
 	}
 
-	// Daily ticker for client-RX coverage retention (#1727).
-	if clientRxDays > 0 {
-		clientRxRetentionTicker := time.NewTicker(24 * time.Hour)
-		go func() {
-			for range clientRxRetentionTicker.C {
+	// Daily ticker for client-RX retention: coverage (#1727, opt-in window)
+	// and declared-region reports (#126, always bounded).
+	clientRxRetentionTicker := time.NewTicker(24 * time.Hour)
+	go func() {
+		for range clientRxRetentionTicker.C {
+			pruned := runClientRegionsRetention(store, clientRegionsDays)
+			if clientRxDays > 0 {
 				if n, err := store.PruneOldClientReceptions(clientRxDays); err != nil {
 					log.Printf("[prune] error: %v", err)
-				} else if n > 0 {
-					store.RunIncrementalVacuum(vacuumPages)
+				} else {
+					pruned += n
 				}
 			}
-		}()
+			if pruned > 0 {
+				store.RunIncrementalVacuum(vacuumPages)
+			}
+		}
+	}()
+	if clientRxDays > 0 {
 		log.Printf("[prune] auto-prune enabled: client_receptions older than %d days will be removed daily", clientRxDays)
 	}
+	log.Printf("[prune] auto-prune enabled: client_declared_regions older than %d days will be removed daily", clientRegionsDays)
 
 	// Hourly WAL checkpoint to prevent unbounded WAL growth.
 	// TRUNCATE resets the WAL file to zero bytes when all frames are flushed;
@@ -425,11 +486,17 @@ func main() {
 	// write handle) executes the DELETEs. Process on startup, then every
 	// 15 seconds — short enough for a one-click UX, long enough to avoid
 	// useless wake-ups.
+	// The same tick also drains the admin delete-client-rx queue (#330): the
+	// one-shot CLI enqueues a marker next to the DB and the ingestor, as the
+	// single writer, runs the DELETEs here — no second read-write process, no
+	// SQLITE_BUSY.
 	store.RunPendingPruneRequests()
+	store.RunPendingClientRxDeletes()
 	pruneQueueTicker := time.NewTicker(15 * time.Second)
 	go func() {
 		for range pruneQueueTicker.C {
 			store.RunPendingPruneRequests()
+			store.RunPendingClientRxDeletes()
 		}
 	}()
 
@@ -461,7 +528,34 @@ func main() {
 	// via cmd/server/neighbor_recomputer.go on the same cadence.
 	stopNeighborBuilder := store.StartNeighborEdgesBuilder(NeighborEdgesBuilderInterval)
 	defer stopNeighborBuilder()
+
+	// Daily neighbor_edges.count decay (#544), checked hourly. Ingestor-owned
+	// like the builder and retention above; the server only reads counts.
+	stopNeighborDecay, _ := startNeighborEdgeDecayFromConfig(store, cfg, NeighborEdgeDecayCheckInterval)
+	defer stopNeighborDecay()
 	log.Printf("[neighbor-build] enabled (interval=%s)", NeighborEdgesBuilderInterval)
+
+	// #188: re-resolve NULL resolved_path rows now that the prefix index
+	// and neighbour graph are primed (StartNeighborEdgesBuilder above).
+	if enabled, batch, pause := cfg.ResolvedPathBackfillSettings(); enabled {
+		stopResolvedPathBackfill := store.StartResolvedPathBackfill(batch, pause)
+		defer stopResolvedPathBackfill()
+	}
+
+	// #380: re-decode historical enc_<HEX> GRP_TXT rows and unknown-scoped
+	// transport rows whenever the effective key set grows (config/SIGHUP,
+	// approved shared channels, approved region scopes). Same placement as
+	// the backfills above: next to live ingest, after the buffer is draining,
+	// cancelled on shutdown and resumed from its watermark on the next start.
+	set := cfg.DecodeBackfillSettings()
+	decodeBackfillValidateSignatures = cfg.ShouldValidateSignatures()
+	stopDecodeBackfill := store.StartDecodeBackfill(keys, set)
+	defer stopDecodeBackfill()
+	if set.Enabled {
+		log.Printf("[decode-backfill] enabled (batch=%d window=%d pause=%s poll=%s)", set.BatchSize, set.IDWindow, set.Pause, set.Poll)
+	} else {
+		log.Printf("[decode-backfill] disabled by config (no pass runs; removed keys are still forgotten)")
+	}
 
 	// #1212: per-source stall watchdog. Detects "silently dead" sources
 	// where the client reports connected but no messages have flowed. Logs
@@ -475,6 +569,8 @@ func main() {
 	<-sig
 
 	log.Println("Shutting down...")
+	stopRouteMaskBackfill()
+	stopContentHashMigration()
 	retentionTicker.Stop()
 	metricsRetentionTicker.Stop()
 	if packetRetentionTicker != nil {
@@ -491,6 +587,38 @@ func main() {
 	log.Println("Done.")
 }
 
+// channelDaysNoEffect returns the startup warning for a retention.channelDays
+// that is set but changes nothing (#296), or "" when it applies or is unset.
+func channelDaysNoEffect(packetDays, channelDays int) string {
+	switch {
+	case channelDays <= 0:
+		return ""
+	case packetDays <= 0:
+		return fmt.Sprintf("[prune] retention.channelDays=%d has no effect: packetDays is 0, so no transmissions are pruned", channelDays)
+	case channelDays <= packetDays:
+		return fmt.Sprintf("[prune] retention.channelDays=%d has no effect: it is not longer than packetDays=%d", channelDays, packetDays)
+	}
+	return ""
+}
+
+// runTransmissionRetention runs one transmission retention pass
+// (retention.packetDays, #1283; retention.channelDays, #296) and logs what it
+// removed. when names the pass in the log ("startup", "daily").
+func runTransmissionRetention(store *Store, cfg *Config, when string) PruneResult {
+	packetDays, channelDays := cfg.PacketDaysOrZero(), cfg.ChannelDaysOrZero()
+	r, err := store.PruneTransmissions(packetDays, channelDays)
+	if err != nil {
+		log.Printf("[prune] error: %v", err)
+	}
+	if r.Packets > 0 {
+		log.Printf("[prune] %s pruned %d transmissions older than %d days", when, r.Packets, packetDays)
+	}
+	if r.ChannelMessages > 0 {
+		log.Printf("[prune] %s pruned %d channel messages older than %d days", when, r.ChannelMessages, channelDays)
+	}
+	return r
+}
+
 // buildMQTTOpts creates MQTT client options for a source with bounded reconnect
 // backoff, connect timeout, and TLS/auth configuration.
 //
@@ -501,10 +629,7 @@ func main() {
 // #1212 (prod outage on 2026-05-15 where the disconnect was logged but no
 // reconnect activity was ever visible).
 func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
-	tag := source.Name
-	if tag == "" {
-		tag = source.Broker
-	}
+	tag := mqttSourceTag(source)
 	opts := mqtt.NewClientOptions().
 		AddBroker(source.Broker).
 		SetAutoReconnect(true).
@@ -521,7 +646,10 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		// (paho default 30s actually — making this explicit so it can't
 		// drift, and so operators reading the code know it's intentional
 		// per the #1335 RCA).
-		SetKeepAlive(30 * time.Second)
+		SetKeepAlive(30 * time.Second).
+		// #118: explicit ID, generated once per client when not configured;
+		// paho reuses it on every reconnect. See mqtt_client_id.go.
+		SetClientID(mqttClientID(source))
 
 	opts.SetConnectionAttemptHandler(func(broker *url.URL, tlsCfg *tls.Config) *tls.Config {
 		// Look up the per-source liveness state (registered in main) so we
@@ -534,7 +662,7 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		if s != nil {
 			attempt = atomic.AddInt64(&s.AttemptCount, 1)
 		}
-		log.Printf("MQTT [%s] connection attempt #%d to %s", tag, attempt, broker.String())
+		log.Printf("MQTT [%s] connection attempt #%d to %s", tag, attempt, brokerForLog(broker.String()))
 		return tlsCfg
 	})
 
@@ -552,6 +680,96 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		opts.SetTLSConfig(&tls.Config{})
 	}
 	return opts
+}
+
+// buildForceReconnectFn builds the watchdog's forced-reconnect action for a
+// source (#1335, hardened against a race found while investigating a 100+
+// minute reconnect failure).
+//
+// paho's own client.IsConnected() — used as liveness.IsConnectedFn — reports
+// true not only when genuinely connected but for the ENTIRE time paho's
+// background AutoReconnect/ConnectRetry loop is retrying (status
+// reconnecting/connecting). So the watchdog's LivenessStalled classification
+// (IsConnected==true, no messages) fires just as often for "paho is actively,
+// correctly retrying a still-down broker" as it does for the true #1335
+// half-open-TCP case. Naively doing Disconnect(250) then Connect() in the
+// first case is actively harmful: paho's Disconnecting() must block until the
+// CURRENT in-flight connection attempt plus its backoff sleep unwind (up to
+// ConnectTimeout+MaxReconnectInterval, tens of seconds) before status
+// actually reaches `disconnected`. Disconnect(250) returns to the caller
+// after the 250ms quiesce regardless, so the following Connect() usually runs
+// while status is still the transitional `disconnecting` state — paho then
+// returns an error token (silently discarded by the old code) AND, because
+// Disconnect() was called at all, tears down paho's own retry loop for good
+// ("user requested no auto reconnection"). The client is left with nothing
+// retrying until the watchdog's next trigger fires, which can repeat the same
+// race — compounding into very long outages.
+//
+// client.IsConnectionOpen() (unlike IsConnected()) is strictly status ==
+// connected — never true while paho is reconnecting/connecting — so it
+// reliably distinguishes "genuinely connected, maybe half-open" (safe to
+// Disconnect then Connect; Disconnecting() does not need to wait on any
+// in-flight retry loop from status connected, so it completes well within
+// the 250ms quiesce) from "paho is already retrying on its own" (must NOT
+// call Disconnect).
+//
+// What Connect() then does depends on paho's status (paho.mqtt.golang
+// v1.5.0, client.go Connect and status.go Connecting):
+//   - reconnecting (AutoReconnect loop): a no-op that returns a success token;
+//   - connecting (the initial ConnectRetry loop) or disconnecting: an error
+//     token, errStatusMustBeDisconnected;
+//   - disconnected (paho gave up): starts a fresh attempt.
+//
+// For that status error, IsConnected() tells whether paho reports a retry
+// pending. In connecting it does (ConnectRetry keeps retrying), so the line
+// is info, not a failure (#102). In disconnecting it reflects paho's
+// willReconnect flag, which is sticky after any earlier auto-reconnect and is
+// left set by a Disconnect(), so there it is a strong hint, not a guarantee.
+// The info line therefore keeps paho's error and claims no more than paho
+// reports. With IsConnected() false the error is logged as a failure.
+//
+// Either line logs the error with secrets (mqttSourceSecrets) masked
+// (errForLog): paho's errors may quote the broker URL. The classification
+// reads the raw error, whose text it compares.
+func buildForceReconnectFn(client mqtt.Client, tag string, secrets ...string) func() {
+	return func() {
+		if client.IsConnectionOpen() {
+			client.Disconnect(250)
+		}
+		// Connect() resolves synchronously (Error() readable immediately,
+		// no Wait() needed) for both error returns and the "already
+		// retrying, treated as a safe no-op" success case — only a genuine
+		// fresh connection attempt leaves the token pending in the
+		// background, and we must not block this call on that.
+		err := client.Connect().Error()
+		switch {
+		case err == nil:
+		case connectRetryInProgress(client, err):
+			log.Printf("MQTT [%s] WATCHDOG force-reconnect: Connect() returned %s; paho reports a retry pending (IsConnected=true), not starting a new attempt", tag, errForLog(err, secrets...))
+		default:
+			log.Printf("MQTT [%s] WATCHDOG force-reconnect Connect() failed: %s", tag, errForLog(err, secrets...))
+		}
+	}
+}
+
+// pahoErrStatusMustBeDisconnected is the text of paho's unexported
+// errStatusMustBeDisconnected (paho.mqtt.golang v1.5.0 status.go), which
+// Connect() returns when status is connecting or disconnecting. The paho
+// test TestForceReconnect_RealPaho_InitialRetryLoopIsNotAConnectFailure_102
+// fails if an upgrade changes it.
+const pahoErrStatusMustBeDisconnected = "status can only transition to connecting from disconnected"
+
+// connectRetryInProgress reports whether a Connect() error is paho's status
+// error while paho reports a retry pending (#102). buildMQTTOpts sets
+// ConnectRetry and AutoReconnect, so IsConnected() is true in status
+// connecting (the initial retry loop keeps going) and in disconnecting when
+// paho's willReconnect flag is set. That flag is sticky: an earlier
+// auto-reconnect sets it, a successful reconnect never clears it, and a
+// Disconnect() from connected or reconnecting leaves it alone. In
+// disconnecting a true result is therefore a strong hint that a retry
+// follows, not a guarantee.
+func connectRetryInProgress(client mqtt.Client, err error) bool {
+	return err.Error() == pahoErrStatusMustBeDisconnected && client.IsConnected()
 }
 
 func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, channelKeys map[string]string, regionKeys map[string][]byte, cfg *Config) {
@@ -572,9 +790,11 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		return
 	}
 
-	// Mobile client RX coverage: dedicated topic meshcore/client/{PUBLIC_KEY}/packets.
-	// A roaming companion reports where it directly heard a node; handled in isolation
-	// from the observer/observations path. EMQX ACL binds parts[2] to the client's own key.
+	// Mobile client topics: meshcore/client/{PUBLIC_KEY}/packets (RX coverage) and
+	// meshcore/client/{PUBLIC_KEY}/regions (declared-region reports). A roaming
+	// companion reports where it directly heard a node, or a repeater's answer to a
+	// region query; both are handled in isolation from the observer/observations
+	// path. EMQX ACL binds parts[2] to the client's own key.
 	//
 	// The client namespace always returns from this branch, whatever the config
 	// says: the gate and the sub-topic only decide handle-vs-drop. Falling through
@@ -588,7 +808,28 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 			log.Printf("MQTT [%s] client %.8s blacklisted, dropping", tag, parts[2])
 			return
 		}
+		// Declared-region reports (#126, docs/client-regions.md): their own
+		// gate, the same source allowlist, and exactly four topic segments.
+		if cfg.ClientRegionsEnabled() && len(parts) == 4 && parts[3] == "regions" {
+			if !cfg.ClientRxSourceAllowed(source.Name) {
+				cfg.warnClientRxSourceDrop(tag, source.Name, time.Now())
+				return
+			}
+			handleClientRegions(store, cfg, tag, source.Name, parts[2], m.Payload(), time.Now())
+			return
+		}
 		if cfg.ClientRxCoverageEnabled() && len(parts) >= 4 && parts[3] == "packets" {
+			// Optional per-source allowlist (#265). Trust in this topic is the
+			// broker's binding of the topic pubkey to the publisher, which not
+			// every configured source necessarily provides; when the operator
+			// names the sources that do, coverage from any other source is
+			// dropped here — before any client_receptions / client_observers
+			// write — with a throttled, bounded warning. No allowlist ⇒ every
+			// source is accepted, as before.
+			if !cfg.ClientRxSourceAllowed(source.Name) {
+				cfg.warnClientRxSourceDrop(tag, source.Name, time.Now())
+				return
+			}
 			handleClientPacket(store, tag, parts[2], msg, channelKeys)
 		}
 		return
@@ -609,7 +850,34 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 	// Global observer IATA whitelist: if configured, drop messages from observers
 	// in non-whitelisted IATA regions. Applies to ALL message types (status + packets).
 	if len(parts) > 1 && !cfg.IsObserverIATAAllowed(parts[1]) {
+		// Not silently (#110): a throttled, bounded warning per region.
+		cfg.warnIATADrop(tag, parts[1], time.Now())
 		return
+	}
+
+	// #338: the observer id (parts[2]) is the identity key every observer-bearing
+	// topic below writes rows under — the neighbors, status and raw-packet paths
+	// all read it, and RecordNaiveSkew / UpsertObserverAt /
+	// TouchObserverNeighborsReport insert observer rows keyed on it. An
+	// over-limit, non-UTF-8, control-bearing or bidi-bearing id is rejected here
+	// (the whole message is dropped) rather than truncated: shortening two
+	// distinct ids to a shared cap would MERGE separate observers into one row,
+	// the upstream behaviour #338 forbids. The gate deliberately sits ABOVE the
+	// neighbors/status/packet dispatch so one check covers all three; moving it
+	// below any of them reopens that path (pinned in
+	// observer_metadata_bounds_review_test.go). The guard is `> 2` and not
+	// `>= 4`, because meshcore/<region>/<observer_id> — three segments, no
+	// sub-topic — is itself a raw-packet ingestion topic; narrowing it to `> 3`
+	// ungates that form, which is pinned separately in
+	// observer_bounds_followups_395_test.go. Non-observer message topics
+	// (meshcore/message/{channel,direct}/...) carry a short literal in parts[2]
+	// and always pass. Diagnostics are rate-limited and never log the full id —
+	// see observer_metadata_bounds.go.
+	if len(parts) > 2 {
+		if reason := observerIDRejectReason(parts[2]); reason != "" {
+			observerIDDrops.record(tag, parts[2], reason, time.Now())
+			return
+		}
 	}
 
 	// Neighbors report topic: meshcore/<region>/<observer_id>/neighbors (#1865).
@@ -632,6 +900,22 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		name, _ := msg["origin"].(string)
 		iata := parts[1]
 		meta := extractObserverMeta(msg)
+		// A replayed status message is the broker handing us the observer's
+		// last published snapshot — it is not evidence the observer is alive
+		// now. Stamping last_seen from it resurrects dead observers, so the
+		// replay path only refreshes metadata.
+		//
+		// Two ways to recognise one: the retain flag (our own subscribe), and
+		// the payload itself (a replay that reached us through the mosquitto
+		// bridge, where the flag does not survive the hop — see
+		// statusIsLiveness).
+		if m.Retained() || !statusIsLiveness(msg, time.Now().UTC()) {
+			if err := store.UpsertObserverRetained(observerID, name, iata, meta); err != nil {
+				log.Printf("MQTT [%s] retained observer status error: %v", tag, err)
+			}
+			log.Print(formatStatusLog(tag, firstNonEmpty(name, observerID), iata))
+			return
+		}
 		// observer.last_seen is "when did the analyzer last hear from this
 		// observer" — fundamentally an ingest-time question. Passing "" makes
 		// UpsertObserverAt use time.Now(), independent of the envelope timestamp
@@ -831,6 +1115,9 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 					log.Printf("MQTT [%s] mark foreign error: %v", tag, err)
 				}
 			}
+			// #789 M2a: a new advert with a verified signature may prove
+			// an owner antenna-height claim.
+			store.antennaClaims.observeAdvert(&decoded.Payload, pktData.Hash, isNew && err == nil)
 			if isNew {
 				if err := store.IncrementAdvertCount(decoded.Payload.PubKey); err != nil {
 					log.Printf("MQTT [%s] advert count error: %v", tag, err)
@@ -1456,29 +1743,33 @@ func loadChannelKeys(cfg *Config, configPath string) map[string]string {
 	return keys
 }
 
-func loadRegionKeys(cfg *Config) map[string][]byte {
-	keys := make(map[string][]byte)
-	for _, raw := range cfg.HashRegions {
-		name, ok := regions.Normalize(raw)
-		if !ok {
-			log.Printf("[regions] skipping empty hashRegions entry")
-			continue
-		}
-		if _, exists := keys[name]; exists {
-			log.Printf("[regions] duplicate region %q ignored", name)
-			continue
-		}
-		h := sha256.Sum256([]byte(name))
-		keys[name] = h[:16]
+// loadRegionKeys derives one HMAC key per configured region scope. The
+// names come from regions.Load, so the inline hashRegions list and the
+// optional hashRegionsPath file are merged, normalized and deduplicated by
+// the same code the server reads its configured set with — the two
+// processes cannot disagree about which scopes are configured.
+//
+// An unusable hashRegionsPath returns the error together with keys derived
+// from the inline list alone: startup logs it and carries on, while
+// hotKeys.reload propagates it so a live reload keeps the previous keys.
+func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
+	res, err := regions.Load(cfg.HashRegions, cfg.HashRegionsPath, configPath, log.Printf)
+	keys := make(map[string][]byte, len(res.Names))
+	for _, name := range res.Names {
+		keys[name] = regions.Key(name)
 	}
 	if len(keys) > 0 {
 		log.Printf("[regions] %d region key(s) loaded", len(keys))
 	}
-	return keys
+	return keys, err
 }
 
-// matchScope performs one HMAC-SHA256 per configured region. Expected
-// len(regionKeys) ≤ 50; beyond that, consider a pre-indexed lookup table.
+// matchScope performs one HMAC-SHA256 per effective region, including any
+// admin-approved overlay names. Deployments using hashRegionsPath may have
+// ~1100 names, and approval adds at most regions.MaxApprovedScopes more. Cost
+// is linear in the region count: BenchmarkMatchScopeApprovalCap measured
+// ~0.62 ms and ~8,650 allocations per scoped packet at 1,100 regions, and
+// ~0.71 ms at 1,228 (i7-1260P). Approval adds no database I/O here.
 //
 // code1 is only 16 bits (65534 usable values after the 0x0000/0xFFFF
 // remap), so with enough configured regions a *different*, unrelated
@@ -1492,8 +1783,22 @@ func loadRegionKeys(cfg *Config) map[string][]byte {
 // more matches means the code1 doesn't uniquely identify a region for
 // this payload, so we report unknown-scoped ("") rather than guess.
 func matchScope(regionKeys map[string][]byte, payloadType byte, payloadRaw []byte, code1 string) string {
-	if code1 == "0000" || len(regionKeys) == 0 || len(payloadRaw) == 0 {
+	match, matchCount := matchScopeDetail(regionKeys, payloadType, payloadRaw, code1)
+	if matchCount > 1 {
+		log.Printf("[regions] ambiguous scope match for code1=%s: %d regions collide (including %q) — reporting unknown-scoped instead of guessing", code1, matchCount, match)
 		return ""
+	}
+	return match
+}
+
+// matchScopeDetail is matchScope without the decision: it returns the last
+// region whose HMAC produced code1 and how many regions did. Callers that
+// only want the name use matchScope; the #380 decode backfill needs the count
+// so it can report an abstention separately from "no region matched", without
+// changing what ingest stores.
+func matchScopeDetail(regionKeys map[string][]byte, payloadType byte, payloadRaw []byte, code1 string) (string, int) {
+	if code1 == "0000" || len(regionKeys) == 0 || len(payloadRaw) == 0 {
+		return "", 0
 	}
 	var match string
 	matchCount := 0
@@ -1514,11 +1819,7 @@ func matchScope(regionKeys map[string][]byte, payloadType byte, payloadRaw []byt
 			matchCount++
 		}
 	}
-	if matchCount > 1 {
-		log.Printf("[regions] ambiguous scope match for code1=%s: %d regions collide (including %q) — reporting unknown-scoped instead of guessing", code1, matchCount, match)
-		return ""
-	}
-	return match
+	return match, matchCount
 }
 
 // Version info (set via ldflags)
@@ -1543,6 +1844,17 @@ func init() {
 // by ordering, so absent != gone). Report pubkeys are uppercase; nodes.public_key
 // is lowercase hex, so keys are lowercased before the UPDATE. Unknown neighbors
 // are a no-op (the UPDATE matches no row) until a later advert creates the node.
+//
+// #337 bounds the report as untrusted input before any of that: node public
+// keys must be full 64-char hex (normalizeNodePubkey — lowercased, never
+// truncated, so identity is preserved), scope strings over
+// maxReportScopeBytes are dropped as evidence, status strings over
+// maxReportStatusBytes are dropped, the neighbor array is capped at
+// maxReportNeighbors, and normalizeReportTS rejects any timestamp more than
+// maxReportFutureSkew ahead of now. None of that authenticates the publisher:
+// anyone able to publish on this topic can claim any origin_id and any
+// neighbor set, and a well-formed key or an in-window timestamp proves nothing
+// about ownership. See the trust model in neighbor_report_bounds.go.
 func handleNeighborsReport(store *Store, tag string, observerID string, msg map[string]interface{}) {
 	reportedAt, _ := msg["timestamp"].(string)
 	// #7 / default_scope follow-up: both UpdateNodeConfiguredScope and
@@ -1563,8 +1875,19 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 	// Metrics already have their own pre-existing guards against a blank
 	// timestamp -- and it says nothing about the rest of the report either;
 	// it only means these two specific evidence types were ignored.
+	//
+	// #337 adds a second rejection reason to the same once-per-report line:
+	// a timestamp that parses but sits more than maxReportFutureSkew ahead of
+	// now. The two are different observer faults (a broken serializer vs. a
+	// wrong clock), so the line names which one it saw, but the
+	// once-per-report discipline and the trailing "configured-scope and
+	// default-scope evidence ignored" wording are unchanged.
 	if normalizeReportTS(reportedAt) == "" {
-		log.Printf("MQTT [%s] neighbors report from observer %.8s: invalid/missing timestamp %q; configured-scope and default-scope evidence ignored", tag, observerID, reportedAt)
+		reason := "invalid/missing"
+		if t, ok := parseReportTS(reportedAt); ok && reportTSTooFarAhead(t) {
+			reason = "far-future"
+		}
+		log.Printf("MQTT [%s] neighbors report from observer %.8s: %s timestamp %q; configured-scope and default-scope evidence ignored", tag, observerID, reason, reportedAt)
 	}
 
 	// #1865 follow-up: record that this observer sends /neighbors reports
@@ -1575,14 +1898,35 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 		log.Printf("MQTT [%s] neighbors report touch error for observer %.8s: %v", tag, observerID, err)
 	}
 
-	// self: the observer's own configured scopes.
-	originID, _ := msg["origin_id"].(string)
-	if originID == "" {
-		originID = observerID
+	// self: the observer's own configured scopes, keyed by origin_id.
+	//
+	// #337: origin_id is validated as a full node public key before either
+	// self write. It was previously only lowercased and checked non-empty, so
+	// a malformed value reached two conditional-UPDATE transactions that
+	// could never match a row. Observers whose MQTT topic id is not a public
+	// key at all are real (the CI fixture carries one named "kpabap"), and
+	// origin_id falls back to that id when the payload omits it — so an
+	// invalid fallback is an expected, silent no-op, exactly as before. Only
+	// an origin_id the publisher actually SENT and got wrong is worth a log
+	// line, and it shares the report's single line below rather than adding
+	// one per report from every non-pubkey observer.
+	rawOriginID, originSent := msg["origin_id"].(string)
+	if !originSent || rawOriginID == "" {
+		rawOriginID = observerID
+		originSent = false
 	}
-	originID = strings.ToLower(originID)
-	if self, ok := msg["self"].(map[string]interface{}); ok && originID != "" {
+	originID, originValid := normalizeNodePubkey(rawOriginID)
+	droppedBadKey, droppedLongScope, droppedLongStatus := 0, 0, 0
+	if self, ok := msg["self"].(map[string]interface{}); ok && originValid {
 		if sc, ok := self["scopes"].(string); ok {
+			// #337: UpdateNodeConfiguredScope refuses an oversized list on
+			// its own; counted here so the refusal reaches the summary line.
+			// self.scopes comes from the observer's local config, not the
+			// air, so the MAX_PACKET_PAYLOAD derivation does not cover it and
+			// an operator over the bound needs to be told.
+			if reportScopeTooLong(sc) {
+				droppedLongScope++
+			}
 			if err := store.UpdateNodeConfiguredScope(originID, sc, reportedAt); err != nil {
 				log.Printf("MQTT [%s] neighbors self scope error: %v", tag, err)
 			}
@@ -1604,19 +1948,65 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 	// per the observer's own firmware neighbor table -- collected below for
 	// the #1865 follow-up "Direct Neighbors" panel regardless of status.
 	neighbors, _ := msg["neighbors"].([]interface{})
+	// #337: cap the array before allocating or iterating. The firmware's own
+	// report is 10 KB-capped and already truncates by ordering, so dropping
+	// the tail is the same shortening a legitimately oversized report
+	// receives; a hostile publisher is bound by nothing but the broker, and
+	// every surviving entry costs a conditional-UPDATE transaction plus two
+	// inserts. See maxReportNeighbors for the derivation.
+	droppedOverCap := 0
+	if len(neighbors) > maxReportNeighbors {
+		droppedOverCap = len(neighbors) - maxReportNeighbors
+		neighbors = neighbors[:maxReportNeighbors]
+	}
 	entries := make([]ObserverNeighborEntry, 0, len(neighbors))
 	for _, raw := range neighbors {
 		n, ok := raw.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		pubkey, _ := n["pubkey"].(string)
-		pubkey = strings.ToLower(pubkey)
-		if pubkey == "" {
+		rawPubkey, _ := n["pubkey"].(string)
+		// #337: a neighbor key must be a full 64-char node public key.
+		// observer_neighbors and observer_neighbor_metrics insert it verbatim
+		// with no foreign key back to nodes, so a malformed key is a
+		// permanent row that joins to nothing; the metrics table is
+		// append-only, so it would gain one such row per report. The full key
+		// is kept (lowercased, never shortened to a prefix) for every key
+		// that passes.
+		pubkey, ok := normalizeNodePubkey(rawPubkey)
+		if !ok {
+			droppedBadKey++
 			continue
 		}
 		status, _ := n["status"].(string)
+		// #337: status is publisher-controlled too. An oversized one cannot
+		// be "responded", so it never reaches the evidence write below; it is
+		// dropped and the neighbor kept, as for an oversized scope string.
+		if reportStatusTooLong(status) {
+			droppedLongStatus++
+			status = ""
+		}
 		scopes, _ := n["scopes"].(string)
+		// #337: an oversized scope string is malformed input, not evidence.
+		// The neighbor itself stays — it is still a real zero-hop entry in
+		// the observer's firmware neighbor table, and losing the scope query
+		// must not lose the neighbor, the same rule a timeout already gets.
+		// Its reported status is passed through unchanged (inventing a status
+		// value here would put a string no firmware sends onto a wire-visible
+		// contract) and only its scopes are dropped, which the server already
+		// renders as "no scope data" (scopes == "" reads back as a nil Scopes
+		// in GetObserverNeighbors).
+		//
+		// Critically this must NOT fall through to the status=="responded"
+		// write below with an emptied scopes string: that would store a
+		// "responded, zero scopes configured" row — the valid-empty state
+		// #8 deliberately made distinguishable from no-evidence — on the
+		// strength of a string we just rejected as unusable.
+		scopeUsable := !reportScopeTooLong(scopes)
+		if !scopeUsable {
+			droppedLongScope++
+			scopes = ""
+		}
 		// snr/heard_secs_ago are present regardless of scope-query status --
 		// they come from the firmware's own RF neighbor table, not the OTA
 		// scope query (#1865 follow-up, spotted by dborup in a live payload).
@@ -1629,7 +2019,7 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 			hs := int(v)
 			heardSecsAgo = &hs
 		}
-		if status == "responded" {
+		if status == "responded" && scopeUsable {
 			if err := store.UpdateNodeConfiguredScope(pubkey, scopes, reportedAt); err != nil {
 				log.Printf("MQTT [%s] neighbors scope error for %.8s: %v", tag, pubkey, err)
 			}
@@ -1643,6 +2033,31 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 	}
 	if err := store.RecordObserverNeighborMetrics(observerID, entries, reportedAt); err != nil {
 		log.Printf("MQTT [%s] neighbor metrics record error for observer %.8s: %v", tag, observerID, err)
+	}
+
+	// #337: one bounded line per report summarising what the bounds dropped,
+	// never one line per entry -- a hostile report is exactly the case where
+	// per-entry logging would turn a rejected payload into a log-volume
+	// amplifier. Names only what was actually dropped, and is silent when
+	// nothing was, which is every legitimate report.
+	var dropped []string
+	if droppedOverCap > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d entr(ies) over the %d cap", droppedOverCap, maxReportNeighbors))
+	}
+	if droppedBadKey > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d malformed pubkey(s)", droppedBadKey))
+	}
+	if droppedLongScope > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d oversized scope string(s)", droppedLongScope))
+	}
+	if droppedLongStatus > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d oversized status string(s)", droppedLongStatus))
+	}
+	if originSent && !originValid {
+		dropped = append(dropped, "malformed origin_id (self block skipped)")
+	}
+	if len(dropped) > 0 {
+		log.Printf("MQTT [%s] neighbors report from observer %.8s: bounds dropped %s", tag, observerID, strings.Join(dropped, "; "))
 	}
 }
 

@@ -44,6 +44,8 @@ func resetReachState(t *testing.T, servers ...*Server) {
 			s.reach.cacheMu.Unlock()
 			s.reach.degreeMu.Lock()
 			s.reach.degreeSnap = nil
+			s.reach.rankView = nil
+			s.reach.degreeFailAt, s.reach.degreeFailErr = time.Time{}, nil
 			s.reach.degreeMu.Unlock()
 		}
 	}
@@ -61,6 +63,14 @@ func newReachIntegrationDB(t *testing.T, obsPath string) (*DB, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return seedReachIntegrationDB(t, conn, obsPath)
+}
+
+// seedReachIntegrationDB creates and fills the schema above on an
+// already-open connection, so a test can supply one on a fault-injecting
+// driver instead of the plain one (#593 F3).
+func seedReachIntegrationDB(t *testing.T, conn *sql.DB, obsPath string) (*DB, string) {
+	t.Helper()
 	n := pk64("01fa") // target — unique 2-byte token "01fa"
 	a := pk64("aabb") // predecessor → we hear A
 	b := pk64("ccdd") // successor → B hears us
@@ -68,7 +78,7 @@ func newReachIntegrationDB(t *testing.T, obsPath string) (*DB, string) {
 	stmts := []string{
 		`CREATE TABLE nodes (public_key TEXT, name TEXT, role TEXT, lat REAL, lon REAL, last_seen TEXT, first_seen TEXT, advert_count INTEGER)`,
 		`CREATE TABLE transmissions (id INTEGER PRIMARY KEY, from_pubkey TEXT, payload_type INTEGER)`,
-		`CREATE TABLE observers (id TEXT)`,
+		`CREATE TABLE observers (id TEXT, name TEXT)`,
 		`CREATE TABLE observations (id INTEGER PRIMARY KEY, transmission_id INTEGER, observer_idx INTEGER, snr REAL, path_json TEXT, timestamp INTEGER)`,
 		`CREATE TABLE neighbor_edges (node_a TEXT, node_b TEXT, count INTEGER)`,
 	}

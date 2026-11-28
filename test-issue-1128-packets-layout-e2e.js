@@ -25,6 +25,9 @@
  */
 'use strict';
 const { chromium } = require('playwright');
+// The fixture is freshened once per shard: pin the packets window so the
+// rows do not depend on when this suite runs in it (#787).
+const { pinPacketsTimeWindow } = require('./tests/e2e-packets-window');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 
@@ -51,6 +54,7 @@ function parseAlpha(s) {
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
   });
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await pinPacketsTimeWindow(ctx);
   const page = await ctx.newPage();
   page.setDefaultTimeout(8000);
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
@@ -65,10 +69,8 @@ function parseAlpha(s) {
       const sel = document.getElementById('fTimeWindow');
       if (sel) { sel.value = '0'; sel.dispatchEvent(new Event('change', { bubbles: true })); }
     });
-    await page.waitForFunction(
-      () => Array.from(document.querySelectorAll('#pktBody tr'))
-              .filter(r => r.id !== 'vscroll-top' && r.id !== 'vscroll-bottom').length > 0,
-      { timeout: 8000 });
+    // A packet row: an empty list also has one row, "No packets found" (#787).
+    await page.waitForSelector('#pktBody tr[data-hash]', { state: 'attached', timeout: 8000 });
     // Allow hop-resolver async pass to settle so chips reflect resolved names.
     await page.waitForTimeout(400);
   });

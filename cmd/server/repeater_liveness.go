@@ -1,9 +1,12 @@
 package main
 
 import (
+	"math"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/meshcore-analyzer/lora"
 )
 
 // RepeaterRelayInfo describes whether a repeater has been observed
@@ -32,6 +35,14 @@ type RepeaterRelayInfo struct {
 	// `flood.max.unscoped 0` and should not forward these, so a non-trivial
 	// count flags a base-config problem (consumed by the ArcScope advisor).
 	UnscopedRelayCount24h int `json:"unscopedRelayCount24h"`
+	// EstAirtimePct24h and EstAirtimePeakPct estimate the repeater's relay
+	// duty cycle (#697): LoRa time-on-air of every packet it relayed in the
+	// last 24 h, adverts included, as a percentage of 24 h and of its busiest
+	// rolling hour. A lower bound: only flood packets an observer heard with
+	// the repeater in the raw path count; its own adverts and direct-routed
+	// traffic do not.
+	EstAirtimePct24h  float64 `json:"estAirtimePct24h"`
+	EstAirtimePeakPct float64 `json:"estAirtimePeakPct"`
 	// TransportedScopes is the deduplicated, sorted set of region scope
 	// names (transmissions.scope_name) across ALL non-advert packets in
 	// which this pubkey appears as a path hop. Unlike RelayCount1h/24h this
@@ -48,6 +59,16 @@ type RepeaterRelayInfo struct {
 	// follow-up). Nil when WindowHours <= 0 (recency undetermined, same
 	// convention as RelayActive staying false in that case).
 	TransportedScopesRecent []string `json:"transportedScopesRecent,omitempty"`
+
+	// Regions keeps its window selection independent of the configured
+	// liveness window. These immutable values never enter existing node JSON.
+	regionScopes          []regionScopeRelay
+	regionScopesTruncated bool
+
+	// relayCountRecent is RelayCount24h narrowed to the #881 moments busy
+	// window (computeRelayInfoFromEntriesWindowed); 0 when no window is set.
+	// Unexported, so it never enters node JSON.
+	relayCountRecent int
 }
 
 // maxTransportedScopes bounds the per-node TransportedScopes list so a
@@ -123,84 +144,158 @@ type relayEntry struct {
 	// scope is the tx's region scope name (transmissions.scope_name).
 	// Empty when absent / on older schemas. Used for TransportedScopes (#1751).
 	scope string
-	// fromPrefix marks entries that came from the 1-byte raw-prefix
-	// fallback bucket rather than this exact (resolved-pubkey) key — see
-	// collectRelayEntriesLocked. computeRelayInfoFromEntries must not
-	// accumulate `scope` for these: MeshCore firmware only relays a
-	// TRANSPORT_FLOOD/DIRECT packet when the repeater's own configured
-	// region matches (allowPacketForward in examples/simple_repeater/
-	// MyMesh.cpp), so crediting a scope based on nothing but a shared
-	// 1-byte hash prefix asserts something the protocol wouldn't allow.
+	// fromPrefix preserves the existing scope-field contract: only exact
+	// full-key path-hop entries contribute transported scopes. Raw-prefix and
+	// byNode candidates can advance relay activity, but never broaden scope
+	// claims.
 	fromPrefix bool
+	parsed     bool
+	valid      bool
+	// self marks an entry whose key sent the advert (see origin), which is
+	// not relay airtime. It is set per key, where the entry is collected.
+	self bool
+	t    time.Time
+	// airtime is the packet's LoRa time-on-air for the configured preset.
+	airtime time.Duration
+	// origin is an ADVERT's lower-case sender key ("" for other packets).
+	origin string
 }
 
-// collectRelayEntriesLocked returns deduplicated relayEntry snapshots for
-// all StoreTx entries indexed under key (full pubkey) and its 1-byte wire
-// prefix. Caller MUST hold s.mu at least for reading.
-//
-// byPathHop is keyed by both full resolved pubkey AND raw 1-byte hop
-// prefix (e.g. "a3"). Many ingested non-advert packets only carry the
-// raw hop on the wire — resolution to the full pubkey happens later via
-// neighbor affinity. Looking up both keys and de-duping by tx ID matches
-// what the "Paths seen through node" view shows.
-//
-// The 1-byte prefix lookup CAN over-count when multiple nodes share the
-// same first byte. This trades a possible over-count for clearly false
-// zeros (issue #662).
-func (s *PacketStore) collectRelayEntriesLocked(key string) []relayEntry {
-	txList := s.byPathHop[key]
-	var prefixList []*StoreTx
-	if len(key) >= 2 {
-		// key[:2] is the first 2 hex characters — exactly 1 byte of raw
-		// hop data, matching addTxToPathHopIndex for wire-level hops.
-		prefix := key[:2]
-		if prefix != key {
-			prefixList = s.byPathHop[prefix]
-		}
-	}
+// relayToA is LoRa time-on-air by packet length for one preset, filled on
+// first use: a packet is at most 255 bytes, so a relay snapshot computes
+// each length once instead of once per packet.
+type relayToA struct {
+	preset lora.Preset
+	byLen  [256]time.Duration
+}
 
-	// Capacity hint: upper-bound is len(txList)+len(prefixList). The
-	// collect() pass below uses `seen` for true dedup, so we don't need
-	// a separate prepass (PR #1164 CR item 3: dead `uniq` map removed).
-	hint := len(txList) + len(prefixList)
-	entries := make([]relayEntry, 0, hint)
-	seen := make(map[int]bool, hint)
-	collect := func(list []*StoreTx, fromPrefix bool) {
-		for _, tx := range list {
-			if tx == nil || seen[tx.ID] {
-				continue
+func (r *relayToA) of(bytes int) time.Duration {
+	if bytes < 0 || bytes >= len(r.byLen) {
+		return lora.TimeOnAir(bytes, r.preset)
+	}
+	if r.byLen[bytes] == 0 {
+		r.byLen[bytes] = lora.TimeOnAir(bytes, r.preset)
+	}
+	return r.byLen[bytes]
+}
+
+// isSelfAdvert reports whether key (a full key or a raw hop prefix) sent
+// the advert whose sender is origin.
+func isSelfAdvert(origin, key string) bool {
+	return origin != "" && key != "" && strings.HasPrefix(origin, key)
+}
+
+func newRelayEntry(tx *StoreTx, fromPrefix bool, toa *relayToA) relayEntry {
+	pt, rt := -1, -1
+	if tx.PayloadType != nil {
+		pt = *tx.PayloadType
+	}
+	if tx.RouteType != nil {
+		rt = *tx.RouteType
+	}
+	e := relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix,
+		airtime: toa.of(len(tx.RawHex) / 2)}
+	if pt == payloadTypeAdvert {
+		e.origin = strings.ToLower(advertSenderKey(tx.ParsedDecoded()))
+	}
+	return e
+}
+
+// collectRelayEntriesLocked returns one relayEntry per transmission that is a
+// relay candidate for key (see forEachRelayCandidate) and whose raw observed
+// flood paths confirm key. Caller MUST hold s.mu at least for reading.
+//
+// Candidate membership is never proof: persisted/live resolution can include
+// heuristic guesses. Every candidate is verified against its raw observation
+// paths, without target-biased resolve. Each transmission is checked once.
+func (s *PacketStore) collectRelayEntriesLocked(key string, snapshots ...pathNodeSnapshot) []relayEntry {
+	m := newRelayKeyMatcher(key, s.pathNodeSnapshotLocked(snapshots).pm)
+	var entries []relayEntry
+	if !m.possible() {
+		return entries
+	}
+	seen := make(map[int]struct{})
+	toa := &relayToA{preset: s.resolveLoRaPreset()}
+	forEachRelayCandidate(s.byPathHop, s.byNode, m, func(tx *StoreTx, fromPrefix bool) {
+		if _, done := seen[tx.ID]; done {
+			return
+		}
+		seen[tx.ID] = struct{}{}
+		if txConfirmsRelay(tx, m) {
+			e := newRelayEntry(tx, fromPrefix, toa)
+			e.self = isSelfAdvert(e.origin, m.key)
+			entries = append(entries, e)
+		}
+	})
+	return entries
+}
+
+// forEachRelayCandidate visits key's candidate transmissions, possibly more
+// than once across buckets (callers deduplicate by ID). Within a bucket it
+// walks from the most recently indexed entry backwards; index order is not
+// chronological, so callers must not stop early based on timestamps. Bucket
+// order matters for scope provenance: the full-key path-hop bucket comes
+// first and is the only one with fromPrefix=false. Reads live index slices:
+// caller holds s.mu.
+//   - byPathHop[key]: raw full-key hops and live resolved-path indexing.
+//   - byNode[key]: decoded and resolved-path membership from every
+//     observation. Needed after a restart, where buildPathHopIndex re-indexes
+//     display paths only and drops non-display resolved hops.
+//   - byPathHop[unique 1/2/3-byte prefix]: raw wire hops.
+func forEachRelayCandidate(pathHop, byNode map[string][]*StoreTx, m relayKeyMatcher, visit func(tx *StoreTx, fromPrefix bool)) {
+	each := func(list []*StoreTx, fromPrefix bool) {
+		for i := len(list) - 1; i >= 0; i-- {
+			if list[i] != nil {
+				visit(list[i], fromPrefix)
 			}
-			seen[tx.ID] = true
-			pt := -1
-			if tx.PayloadType != nil {
-				pt = *tx.PayloadType
-			}
-			rt := -1
-			if tx.RouteType != nil {
-				rt = *tx.RouteType
-			}
-			entries = append(entries, relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix})
 		}
 	}
-	collect(txList, false)
-	collect(prefixList, true)
-	return entries
+	each(pathHop[m.key], false)
+	each(byNode[m.key], true)
+	for _, l := range relayPrefixHexLens {
+		if m.uniquePrefix(l) && m.key[:l] != m.key {
+			each(pathHop[m.key[:l]], true)
+		}
+	}
 }
 
 // computeRelayInfoFromEntries derives RepeaterRelayInfo from pre-snapshotted
 // relayEntry values. Safe to call without any lock held.
 func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) RepeaterRelayInfo {
+	return computeRelayInfoFromEntriesAt(entries, windowHours, time.Now().UTC())
+}
+
+func computeRelayInfoFromEntriesAt(entries []relayEntry, windowHours float64, now time.Time) RepeaterRelayInfo {
+	return computeRelayInfoFromEntriesWindowed(entries, windowHours, now, 0)
+}
+
+// computeRelayInfoFromEntriesWindowed is computeRelayInfoFromEntriesAt that
+// also counts relayCountRecent over the last recent (≤ 24 h; 0: not
+// counted): one more comparison per entry the 24 h count already visits.
+func computeRelayInfoFromEntriesWindowed(entries []relayEntry, windowHours float64, now time.Time, recent time.Duration) RepeaterRelayInfo {
 	info := RepeaterRelayInfo{WindowHours: windowHours}
 
-	now := time.Now().UTC()
 	cutoff1h := now.Add(-time.Hour)
 	cutoff24h := now.Add(-24 * time.Hour)
+	cutoffRecent := now.Add(-recent)
 
 	var latest time.Time
 	var latestRaw string
 	var scopeSet map[string]struct{}
 	var scopeLatest map[string]time.Time
+	var regionLatest map[string]time.Time
+	var airtime relayAirtimeHours
 	for _, e := range entries {
+		t, ok := e.t, e.valid
+		if !e.parsed {
+			t, ok = parseRelayTS(e.ts)
+		}
+		// A relayed advert costs the same airtime as any other packet, so it
+		// counts here, before adverts leave the relay counts below. The
+		// repeater's own adverts are not relaying.
+		if ok && !e.self {
+			airtime.add(now, t, e.airtime)
+		}
 		// Self-originated adverts are not relay activity.
 		if e.pt == payloadTypeAdvert {
 			continue
@@ -215,9 +310,18 @@ func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) Repe
 			}
 			scopeSet[e.scope] = struct{}{}
 		}
-		t, ok := parseRelayTS(e.ts)
 		if !ok {
 			continue
+		}
+		// Keep the latest non-future evidence separately: a future-dated
+		// row must neither activate Regions nor hide an older valid relay.
+		if !e.fromPrefix && e.scope != "" && !t.After(now) {
+			if regionLatest == nil {
+				regionLatest = make(map[string]time.Time)
+			}
+			if t.After(regionLatest[e.scope]) {
+				regionLatest[e.scope] = t
+			}
 		}
 		// Map scope-filter parity follow-up: track the latest parseable
 		// timestamp per scope so recency can be judged per-scope, not
@@ -242,11 +346,16 @@ func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) Repe
 			if t.After(cutoff1h) {
 				info.RelayCount1h++
 			}
+			if recent > 0 && t.After(cutoffRecent) {
+				info.relayCountRecent++
+			}
 		}
 	}
+	info.EstAirtimePct24h, info.EstAirtimePeakPct = airtime.percents()
 	// #1751: emit transported scopes regardless of whether any timestamp
 	// parsed, and before the latestRaw early-return below.
 	info.TransportedScopes = sortedCappedScopes(scopeSet)
+	info.regionScopes, info.regionScopesTruncated = newestRegionScopeRelays(regionLatest)
 	if latestRaw == "" {
 		return info
 	}
@@ -270,9 +379,42 @@ func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) Repe
 	return info
 }
 
+// relayAirtimeHours sums relay time-on-air into the 24 rolling hours before
+// now: index 0 is the last hour. Packets older than 24 h or dated in the
+// future are left out.
+type relayAirtimeHours [24]time.Duration
+
+func (h *relayAirtimeHours) add(now, t time.Time, airtime time.Duration) {
+	age := now.Sub(t)
+	if age < 0 || age >= 24*time.Hour {
+		return
+	}
+	h[int(age/time.Hour)] += airtime
+}
+
+// percents returns the airtime as a share of 24 h and of the busiest hour,
+// in percent.
+func (h *relayAirtimeHours) percents() (avg24h, peakHour float64) {
+	var total, peak time.Duration
+	for _, d := range h {
+		total += d
+		if d > peak {
+			peak = d
+		}
+	}
+	return airtimePct(total, 24*time.Hour), airtimePct(peak, time.Hour)
+}
+
+// airtimePct is d as a percentage of of, rounded to four decimals: fine
+// enough that a repeater relaying one packet a day does not read as 0.
+func airtimePct(d, of time.Duration) float64 {
+	return math.Round(float64(d)/float64(of)*100*1e4) / 1e4
+}
+
 // GetRepeaterRelayInfo returns relay-activity information for a node by
-// scanning the byPathHop index for non-advert packets that name the
-// pubkey as a hop. It computes the most recent appearance timestamp,
+// scanning byPathHop for non-advert flood packets with identity-safe observed
+// hop evidence. Direct routes describe planned hops and are not relay evidence.
+// It computes the most recent appearance timestamp,
 // 1h/24h hop counts, and whether the latest appearance falls within
 // windowHours.
 //
@@ -293,9 +435,10 @@ func (s *PacketStore) GetRepeaterRelayInfo(pubkey string, windowHours float64) R
 		return RepeaterRelayInfo{WindowHours: windowHours}
 	}
 	key := strings.ToLower(pubkey)
+	metadata := s.snapshotPathNodes()
 
 	s.mu.RLock()
-	entries := s.collectRelayEntriesLocked(key)
+	entries := s.collectRelayEntriesLocked(key, metadata)
 	s.mu.RUnlock()
 
 	return computeRelayInfoFromEntries(entries, windowHours)

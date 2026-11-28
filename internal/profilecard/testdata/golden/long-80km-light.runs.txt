@@ -1,0 +1,15 @@
+badge         24px bold    x= 968 y= 58 w= 190 Terrain: Blocked
+title         40px bold    x=  44 y= 70 w= 460 North Hub → South Hub
+subtitle      22px regular x=  44 y=104 w= 445 Path profile · 80.0 km · 869.618 MHz · k = 4/3
+axis-y        16px regular x=  43 y=150 w=  45 224 m
+axis-y        16px regular x=  43 y=238 w=  45 165 m
+axis-y        16px regular x=  43 y=326 w=  45 106 m
+axis-y        16px regular x=  52 y=414 w=  36 47 m
+axis-y        16px regular x=  43 y=502 w=  45 -12 m
+pin           18px bold    x= 106 y=351 w=  13 A
+pin           18px bold    x=1152 y=327 w=  13 B
+axis-x        16px regular x=  96 y=524 w=   9 0
+axis-x        16px regular x= 607 y=524 w=  58 40.0 km
+axis-x        16px regular x=1118 y=524 w=  58 80.0 km
+summary       20px regular x=  24 y=574 w= 821 Tightest Fresnel point: clearance -107 m at 50.9 km · heights 40 m / 35 m · terrain + surface
+attribution   18px regular x=  24 y=604 w= 760 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0 — data bearbejdet

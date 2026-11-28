@@ -1,0 +1,16 @@
+badge         24px bold    x=1001 y= 58 w= 157 Terrain: Clear
+surface-badge 16px regular x= 990 y=100 w= 174 Buildings/trees: Blocked
+title         40px bold    x=  44 y= 70 w= 591 Rådhus Repeater → Havn Mast
+subtitle      22px regular x=  44 y=104 w= 445 Path profile · 2.40 km · 869.618 MHz · k = 4/3
+axis-y        16px regular x=  52 y=150 w=  36 63 m
+axis-y        16px regular x=  52 y=238 w=  36 51 m
+axis-y        16px regular x=  52 y=326 w=  36 39 m
+axis-y        16px regular x=  52 y=414 w=  36 27 m
+axis-y        16px regular x=  52 y=502 w=  36 15 m
+pin           18px bold    x= 106 y=275 w=  13 A
+pin           18px bold    x=1152 y=254 w=  13 B
+axis-x        16px regular x=  96 y=524 w=   9 0
+axis-x        16px regular x= 607 y=524 w=  58 1.20 km
+axis-x        16px regular x=1118 y=524 w=  58 2.40 km
+summary       20px regular x=  24 y=574 w= 816 Tightest Fresnel point: clearance 19.7 m at 1.40 km · heights 26 m / 20 m · terrain + surface
+attribution   18px regular x=  24 y=604 w= 760 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0 — data bearbejdet

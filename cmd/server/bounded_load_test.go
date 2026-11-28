@@ -149,7 +149,7 @@ func createTestDBWithAgedPackets(t *testing.T, numRecent, numOld int) string {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func BenchmarkLoad_30K_Unlimited(b *testing.B) {
 // createTestDBAt is like createTestDB but writes to a specific path.
 func createTestDBAt(tb testing.TB, dbPath string, numTx int) {
 	tb.Helper()
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func createTestDBAt(tb testing.TB, dbPath string, numTx int) {
 // createTestDBWithObs creates a test DB with realistic observation counts (1–5 per tx).
 func createTestDBWithObs(tb testing.TB, dbPath string, numTx int) {
 	tb.Helper()
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		tb.Fatal(err)
 	}

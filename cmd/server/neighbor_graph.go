@@ -271,6 +271,15 @@ func BuildFromStoreWithLog(store *PacketStore, enableLog bool) *NeighborGraph {
 
 // BuildFromStoreWithOptions constructs the neighbor graph with explicit options.
 func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborGraph {
+	// Use cached nodes+PM (avoids DB call if cache is fresh).
+	allNodes, pm := store.getCachedNodesAndPM()
+	return buildFromStoreWithNodes(store, opts, allNodes, pm)
+}
+
+// buildFromStoreWithNodes is BuildFromStoreWithOptions with the node list and
+// prefix map already read (getCachedNodesAndPM, which may query SQL). It runs
+// no SQL itself, so a caller can hold a build mutex across it (#583).
+func buildFromStoreWithNodes(store *PacketStore, opts BuildOptions, allNodes []nodeInfo, pm *prefixMap) *NeighborGraph {
 	g := NewNeighborGraph()
 	g.maxEdgeKm = opts.MaxEdgeKm
 	if opts.EnableLog {
@@ -279,15 +288,16 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 		}
 	}
 
+	// Snapshot what we need under lock, each tx's observations included:
+	// ingest appends to them under s.mu.Lock (#470). The fields the build
+	// reads off an observation, and the tx's payload type and decoded JSON,
+	// do not change once the tx is in the store, so they are read directly.
 	store.mu.RLock()
-	// Snapshot what we need under lock.
-	packets := make([]*StoreTx, len(store.packets))
-	copy(packets, store.packets)
+	packets := make([]graphTx, len(store.packets))
+	for i, tx := range store.packets {
+		packets[i] = graphTx{tx: tx, observations: tx.Observations}
+	}
 	store.mu.RUnlock()
-
-	// Build prefix map for candidate resolution.
-	// Use cached nodes+PM (avoids DB call if cache is fresh).
-	allNodes, pm := store.getCachedNodesAndPM()
 
 	// Index node geo for upsertEdge geo-sanity checks (issue #1228).
 	geo := make(map[string]nodeGeoInfo, len(allNodes))
@@ -303,7 +313,8 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 	lowerCache := make(map[string]string, 256)
 
 	// Phase 1: Extract edges from every transmission + observation.
-	for _, tx := range packets {
+	for _, p := range packets {
+		tx := p.tx
 		isAdvert := tx.PayloadType != nil && *tx.PayloadType == PayloadADVERT
 		fromNode := extractFromNode(tx)
 		// Pre-compute lowered originator once per tx (not per observation).
@@ -312,7 +323,11 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 			fromLower = cachedToLower(lowerCache, fromNode)
 		}
 
-		for _, obs := range tx.Observations {
+		for _, obs := range p.observations {
+			// The MQTT bridge's TX copy describes a transmission, not a reception.
+			if obs.Direction == "tx" {
+				continue
+			}
 			path := parsePathJSON(obs.PathJSON)
 			observerPK := cachedToLower(lowerCache, obs.ObserverID)
 
@@ -335,7 +350,17 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 				}
 			}
 
-			// Edge 2: observer ↔ path[last] — ALL packet types
+			// Edge 2: observer ↔ path[last] — flood routes only (#952).
+			// Flood forwarders append their hash (MeshCore Mesh.cpp
+			// routeRecvPacket), so the last hop is the node the observer
+			// heard. A direct path is the remaining planned route, from
+			// which each forwarder strips itself (removeSelfFromPath), so
+			// its last hop is the route's far end; TRACE is sent direct.
+			// The route type is the observation's own; an unknown one adds
+			// no edge, as in the ingestor's neighbour builder.
+			if !isFloodObservation(obs, tx) {
+				continue
+			}
 			lastHop := cachedToLower(lowerCache, path[len(path)-1])
 			if observerPK != lastHop { // self-edge guard
 				candidates := pm.m[lastHop]
@@ -355,6 +380,12 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 	g.mu.Unlock()
 
 	return g
+}
+
+// graphTx is a transmission with its observations as of the build's snapshot.
+type graphTx struct {
+	tx           *StoreTx
+	observations []*StoreObs
 }
 
 // extractFromNode pulls the originator pubkey from a StoreTx's DecodedJSON.

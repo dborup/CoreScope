@@ -174,15 +174,18 @@ assert(iT > 0 && iP > iT && iE > iP,
 // Within "encrypted" section, ch64 (300 msgs) appears (only one entry).
 assert(tbody.indexOf('0x40') > iEnc, 'encrypted section contains 0x40');
 
-console.log('\n=== Channels page links to Analytics ===');
+// The Channels page used to carry a "Channel Analytics" chip linking to
+// #/analytics (#1042). The #1367 chat-app redesign (#1376) dropped it on
+// purpose; test-issue-1367-channels-chat-app-e2e.js covers the rendered header.
+// Keep a source-level guard so the chip does not creep back in unnoticed.
+console.log('\n=== Channels page no longer links to Analytics (#1376) ===');
 
 const channelsSrc = fs.readFileSync(
   path.join(__dirname, 'public/channels.js'),
   'utf8'
 );
-assert(/#\/analytics/.test(channelsSrc) &&
-       /Channel Analytics|channel analytics/i.test(channelsSrc),
-  'channels.js sidebar links to #/analytics with "Channel Analytics" text');
+assert(!/#\/analytics/.test(channelsSrc) && !/ch-analytics-link/.test(channelsSrc),
+  'channels.js has no #/analytics link or .ch-analytics-link chip (dropped in #1376)');
 
 console.log('\n' + (failed ? '✗ ' + failed + ' failed, ' : '') + passed + ' passed');
 process.exit(failed ? 1 : 0);

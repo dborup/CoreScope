@@ -283,11 +283,11 @@ func (s *Server) handlePathInspect(w http.ResponseWriter, r *http.Request) {
 			s.store.inspectCache = make(map[string]*inspectCachedResult)
 		}
 		now2 := time.Now()
-		for k, v := range s.store.inspectCache {
-			if now2.After(v.expiresAt) {
-				delete(s.store.inspectCache, k)
-			}
-		}
+		// Entry ceiling (#370): the key is caller-controlled (path prefixes,
+		// observer, since/until), so expiry alone is not a bound. Drop expired
+		// entries, then — for a new key still at the cap — a deterministic
+		// victim. A refresh of an existing key never evicts another entry.
+		evictInspectCacheLocked(s.store.inspectCache, cacheKey, now2)
 		s.store.inspectCache[cacheKey] = &inspectCachedResult{
 			data:      resp,
 			expiresAt: now2.Add(inspectCacheTTL),

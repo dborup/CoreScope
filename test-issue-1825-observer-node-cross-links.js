@@ -60,7 +60,8 @@ test('nodes.js links to #/observers/${encodeURIComponent(n.public_key[.toUpperCa
 test('nodes.js Observer link is a sibling of the analytics/reach anchors', () => {
   // Find the button row that contains both analytics and reach anchors and
   // assert it now also contains the observers anchor.
-  const rowRe = /<div[^>]*display:flex[^>]*flex-wrap:wrap[^>]*>[\s\S]*?<\/div>/g;
+  // The row is the flex-wrap action row, styled by its class since #920.
+  const rowRe = /<div class="node-full-actions"[^>]*>[\s\S]*?<\/div>/g;
   let found = false;
   let m;
   while ((m = rowRe.exec(nodesSrc)) !== null) {

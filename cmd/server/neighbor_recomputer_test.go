@@ -19,7 +19,7 @@ func TestNeighborGraphRecomputerLoadsSnapshot(t *testing.T) {
 	dbPath := filepath.Join(dir, "neighbor_recomp.db")
 
 	// Bootstrap a WAL DB with the neighbor_edges table.
-	rw, err := sql.Open("sqlite", "file:"+dbPath+"?_journal_mode=WAL")
+	rw, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestServerStartupRequiresMigratedSchema(t *testing.T) {
 	// server tries to read) but WITHOUT the columns dbschema asserts
 	// (resolved_path, inactive, last_packet_at, iata, foreign_advert,
 	// from_pubkey, neighbor_edges).
-	rw, err := sql.Open("sqlite", "file:"+dbPath+"?_journal_mode=WAL")
+	rw, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}

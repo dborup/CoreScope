@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1115,13 +1116,19 @@ func TestPerfMiddlewareSlowQuery(t *testing.T) {
 	srv.store = store
 
 	router := mux.NewRouter()
-	srv.RegisterRoutes(router)
 
-	// Add a slow handler
+	// Add a slow handler. Must be registered before RegisterRoutes: since
+	// #233, RegisterRoutes ends with a catch-all PathPrefix("/api/") (any
+	// method) to turn unmatched /api/* requests into JSON 404/405 instead
+	// of falling through to the SPA. gorilla/mux matches in registration
+	// order, so a route added after RegisterRoutes returns would be
+	// shadowed by that catch-all.
 	router.HandleFunc("/api/test-slow", func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(110 * time.Millisecond)
 		writeJSON(w, map[string]string{"ok": "true"})
 	}).Methods("GET")
+
+	srv.RegisterRoutes(router)
 
 	req := httptest.NewRequest("GET", "/api/test-slow", nil)
 	w := httptest.NewRecorder()
@@ -1837,7 +1844,7 @@ func TestEnrichObs(t *testing.T) {
 		t.Skip("no observations loaded")
 	}
 
-	enriched := store.enrichObs(obs)
+	enriched := store.GetPacketByID(obs.ID)
 	if enriched["observer_id"] == nil {
 		t.Error("expected observer_id")
 	}
@@ -1993,6 +2000,7 @@ func TestHandleConfigEndpoints(t *testing.T) {
 		"/api/config/cache",
 		"/api/config/client",
 		"/api/config/regions",
+		"/api/config/regions/groups",
 		"/api/config/theme",
 		"/api/config/map",
 	}
@@ -2284,26 +2292,15 @@ func TestStoreGetAnalyticsSubpaths(t *testing.T) {
 	})
 }
 
-func TestSubpathPrecomputedIndex(t *testing.T) {
+func TestSubpathCountsFromPackets(t *testing.T) {
 	db := setupRichTestDB(t)
 	defer db.Close()
 	store := NewPacketStore(db, nil)
 	store.Load()
-	// #1008: indexes built in background goroutine; wait before reading.
-	if !store.WaitIndexesReady(5 * time.Second) {
-		t.Fatal("indexes never became ready")
-	}
-
-	// After Load(), the precomputed index must be populated.
-	if len(store.spIndex) == 0 {
-		t.Fatal("expected spIndex to be populated after Load()")
-	}
-	if store.spTotalPaths == 0 {
-		t.Fatal("expected spTotalPaths > 0 after Load()")
-	}
 
 	// The rich test DB has paths ["aa","bb"], ["aabb","ccdd"], and
-	// ["eeff","0011","2233"].  That yields 5 unique raw subpaths.
+	// ["eeff","0011","2233"].  That yields 5 unique raw subpaths, counted
+	// on demand from the packets (#413).
 	expectedRaw := map[string]int{
 		"aa,bb":          1,
 		"aabb,ccdd":      1,
@@ -2311,21 +2308,20 @@ func TestSubpathPrecomputedIndex(t *testing.T) {
 		"0011,2233":      1,
 		"eeff,0011,2233": 1,
 	}
-	for key, want := range expectedRaw {
-		got, ok := store.spIndex[key]
-		if !ok {
-			t.Errorf("expected spIndex[%q] to exist", key)
-		} else if got != want {
-			t.Errorf("spIndex[%q] = %d, want %d", key, got, want)
-		}
+	fast := store.GetAnalyticsSubpaths("", 2, 8, 100)
+	gotRaw := map[string]int{}
+	for _, sp := range fast["subpaths"].([]map[string]interface{}) {
+		gotRaw[strings.Join(sp["rawHops"].([]string), ",")] += sp["count"].(int)
 	}
-	if store.spTotalPaths != 3 {
-		t.Errorf("spTotalPaths = %d, want 3", store.spTotalPaths)
+	if !reflect.DeepEqual(gotRaw, expectedRaw) {
+		t.Errorf("raw subpath counts = %v, want %v", gotRaw, expectedRaw)
+	}
+	if tp := fast["totalPaths"]; tp != 3 {
+		t.Errorf("totalPaths = %v, want 3", tp)
 	}
 
 	// Fast-path (no region) and slow-path (with region) must return the
 	// same shape.
-	fast := store.GetAnalyticsSubpaths("", 2, 8, 100)
 	slow := store.GetAnalyticsSubpaths("SJC", 2, 4, 50)
 	for _, r := range []map[string]interface{}{fast, slow} {
 		if _, ok := r["subpaths"]; !ok {
@@ -2335,57 +2331,23 @@ func TestSubpathPrecomputedIndex(t *testing.T) {
 			t.Error("missing totalPaths in result")
 		}
 	}
-
-	// Verify fast path totalPaths matches index.
-	if tp, ok := fast["totalPaths"].(int); ok && tp != store.spTotalPaths {
-		t.Errorf("fast totalPaths=%d, spTotalPaths=%d", tp, store.spTotalPaths)
-	}
 }
 
-func TestSubpathTxIndexPopulated(t *testing.T) {
+func TestSubpathDetailMatchCount(t *testing.T) {
 	db := setupRichTestDB(t)
 	defer db.Close()
 	store := NewPacketStore(db, nil)
 	store.Load()
-	// #1008: indexes built in background goroutine; wait before reading.
-	if !store.WaitIndexesReady(5 * time.Second) {
-		t.Fatal("indexes never became ready")
-	}
 
-	// spTxIndex must be populated alongside spIndex
-	if len(store.spTxIndex) == 0 {
-		t.Fatal("expected spTxIndex to be populated after Load()")
-	}
-
-	// Every key in spIndex must also exist in spTxIndex with matching count
-	for key, count := range store.spIndex {
-		txs, ok := store.spTxIndex[key]
-		if !ok {
-			t.Errorf("spTxIndex missing key %q that exists in spIndex", key)
-			continue
-		}
-		if len(txs) != count {
-			t.Errorf("spTxIndex[%q] has %d txs, spIndex count is %d", key, len(txs), count)
-		}
-	}
-
-	// GetSubpathDetail should return correct match count via indexed lookup
+	// GetSubpathDetail counts the transmissions holding the subpath
 	detail := store.GetSubpathDetail([]string{"eeff", "0011"})
-	if detail == nil {
-		t.Fatal("expected non-nil detail for existing subpath")
-	}
-	matches, _ := detail["totalMatches"].(int)
-	if matches != 1 {
+	if matches := detail.TotalMatches; matches != 1 {
 		t.Errorf("totalMatches = %d, want 1", matches)
 	}
 
 	// Non-existent subpath should return 0 matches
 	detail2 := store.GetSubpathDetail([]string{"zzzz", "yyyy"})
-	if detail2 == nil {
-		t.Fatal("expected non-nil result even for non-existent subpath")
-	}
-	matches2, _ := detail2["totalMatches"].(int)
-	if matches2 != 0 {
+	if matches2 := detail2.TotalMatches; matches2 != 0 {
 		t.Errorf("totalMatches for non-existent subpath = %d, want 0", matches2)
 	}
 }
@@ -2401,28 +2363,19 @@ func TestSubpathDetailMixedCaseHops(t *testing.T) {
 	}
 
 	// Query with lowercase hops to establish baseline
-	lower := store.GetSubpathDetail([]string{"eeff", "0011"})
-	if lower == nil {
-		t.Fatal("expected non-nil detail for lowercase subpath")
-	}
-	lowerMatches, _ := lower["totalMatches"].(int)
+	lowerMatches := store.GetSubpathDetail([]string{"eeff", "0011"}).TotalMatches
 	if lowerMatches == 0 {
 		t.Fatal("expected >0 matches for lowercase subpath")
 	}
 
 	// Query with mixed-case hops — must return the same results (case-insensitive)
-	mixed := store.GetSubpathDetail([]string{"EEFF", "0011"})
-	if mixed == nil {
-		t.Fatal("expected non-nil detail for mixed-case subpath")
-	}
-	mixedMatches, _ := mixed["totalMatches"].(int)
+	mixedMatches := store.GetSubpathDetail([]string{"EEFF", "0011"}).TotalMatches
 	if mixedMatches != lowerMatches {
 		t.Errorf("mixed-case totalMatches = %d, want %d (same as lowercase)", mixedMatches, lowerMatches)
 	}
 
 	// All-uppercase should also match
-	upper := store.GetSubpathDetail([]string{"EEFF", "0011"})
-	upperMatches, _ := upper["totalMatches"].(int)
+	upperMatches := store.GetSubpathDetail([]string{"EEFF", "0011"}).TotalMatches
 	if upperMatches != lowerMatches {
 		t.Errorf("uppercase totalMatches = %d, want %d", upperMatches, lowerMatches)
 	}
@@ -2600,11 +2553,8 @@ func TestStoreGetSubpathDetail(t *testing.T) {
 	store.Load()
 
 	result := store.GetSubpathDetail([]string{"aabb", "ccdd"})
-	if result == nil {
-		t.Error("expected non-nil result")
-	}
-	if _, ok := result["hops"]; !ok {
-		t.Error("expected hops field")
+	if len(result.Hops) != 2 || len(result.Nodes) != 2 {
+		t.Errorf("expected 2 hops and 2 nodes, got %v / %v", result.Hops, result.Nodes)
 	}
 }
 
@@ -3341,17 +3291,20 @@ func TestHashSizeTransportDirectZeroHopSkipped(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count)
 		VALUES ('obs1', 'Obs', 'SJC', ?, '2026-01-01T00:00:00Z', 10)`, recent)
 
-	// RouteDirect (2) zero-hop: path byte 0x40 → hop_count=0, hash_size bits=01
-	// Should be skipped (existing behavior)
+	// RouteDirect (2) zero-hop with an all-zero path byte: the sender wiped the
+	// size bits, so there is nothing to read. Should be skipped.
+	// (This fixture used to be 0x40. A zero hop count with the size bits SET is
+	// a deliberate declaration — see TestZeroHopDirectAdvertDeclaredSizeIsEvidence
+	// — so the skip is keyed on the byte's content, not on the route type.)
 	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
-		VALUES ('1240aabbccdd', 'direct_zh', ?, 2, 4, '{"pubKey":"bbbb000000000001","name":"Direct-ZH","type":"ADVERT"}')`, recent)
+		VALUES ('1200aabbccdd', 'direct_zh', ?, 2, 4, '{"pubKey":"bbbb000000000001","name":"Direct-ZH","type":"ADVERT"}')`, recent)
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (1, 1, 10.0, -90, '[]', ?)`, recentEpoch)
 
-	// RouteTransportDirect (3) zero-hop: 4 transport bytes + path byte 0x40 → hop_count=0
-	// Should ALSO be skipped (this was the missing case)
+	// RouteTransportDirect (3) zero-hop: 4 transport bytes + all-zero path byte
+	// Should ALSO be skipped (this was the missing case in #747)
 	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
-		VALUES ('130102030440aabb', 'tdirect_zh', ?, 3, 4, '{"pubKey":"bbbb000000000002","name":"TDirect-ZH","type":"ADVERT"}')`, recent)
+		VALUES ('130102030400aabb', 'tdirect_zh', ?, 3, 4, '{"pubKey":"bbbb000000000002","name":"TDirect-ZH","type":"ADVERT"}')`, recent)
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (2, 1, 10.0, -90, '[]', ?)`, recentEpoch)
 
@@ -3442,6 +3395,69 @@ func TestAnalyticsHashSizesZeroHopSkip(t *testing.T) {
 	}
 	if !found {
 		t.Error("node should appear in multiByteNodes with hashSize=2; zero-hop advert should not overwrite to 1")
+	}
+}
+
+// TestAnalyticsHashSizesZeroHopSkipTransportDirect is the TRANSPORT_DIRECT
+// sibling of TestAnalyticsHashSizesZeroHopSkip (#608 follow-up; review of
+// #600, finding N5). computeAnalyticsHashSizes' isUndeclaredZeroHop guards
+// both RouteDirect AND RouteTransportDirect, but only the RouteDirect arm
+// had a test -- dropping `routeType == RouteTransportDirect` from the
+// condition survived the whole cmd/server suite (on master too, so this was
+// pre-existing, not introduced by #608).
+func TestAnalyticsHashSizesZeroHopSkipTransportDirect(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	recent := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	recentEpoch := now.Add(-1 * time.Hour).Unix()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count)
+		VALUES ('obs1', 'Obs', 'SJC', ?, '2026-01-01T00:00:00Z', 10)`, recent)
+
+	pk := "dddd000000000001"
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES (?, 'ZH-Analytics-TD', 'repeater')`, pk)
+
+	decoded := `{"pubKey":"` + pk + `","name":"ZH-Analytics-TD","type":"ADVERT"}`
+
+	// First: a flood advert with hashSize=2 (reliable, multi-hop)
+	// header 0x11 = route_type 1 (flood), payload_type 4
+	// pathByte 0x41 = hashSize bits 01 → size 2, hop_count 1
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+		VALUES ('1141aabbccdd', 'td_flood', ?, 1, 4, ?)`, recent, decoded)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 10.0, -90, '["aabb"]', ?)`, recentEpoch)
+
+	// Second: a TRANSPORT_DIRECT zero-hop advert, pathByte=0x00 at offset 5
+	// (behind the 4 transport-code bytes) → would give hashSize=1.
+	// header 0x13 = route_type 3 (transport direct), payload_type 4
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+		VALUES ('13aabbccdd00', 'td_direct', ?, 3, 4, ?)`, recent, decoded)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (2, 1, 10.0, -90, '[]', ?)`, recentEpoch)
+
+	store := NewPacketStore(db, nil)
+	store.Load()
+
+	result := store.GetAnalyticsHashSizes("", "")
+
+	multiByteNodes, ok := result["multiByteNodes"].([]map[string]interface{})
+	if !ok {
+		t.Fatal("expected multiByteNodes slice in analytics hash sizes")
+	}
+
+	found := false
+	for _, n := range multiByteNodes {
+		if n["pubkey"] == pk {
+			found = true
+			if hs, ok := n["hashSize"].(int); ok && hs != 2 {
+				t.Errorf("expected hashSize=2 from flood advert, got %d", hs)
+			}
+		}
+	}
+	if !found {
+		t.Error("node should appear in multiByteNodes with hashSize=2; TRANSPORT_DIRECT zero-hop advert should not overwrite to 1")
 	}
 }
 
@@ -3810,7 +3826,7 @@ func TestDBGetNetworkStatus(t *testing.T) {
 
 	cfg := &Config{}
 	ht := cfg.GetHealthThresholds()
-	result, err := db.GetNetworkStatus(ht)
+	result, err := db.GetNetworkStatus(ht, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4306,8 +4322,8 @@ func TestResolveRegionObserversCacheMissNewRegion(t *testing.T) {
 
 func TestIndexByNodePreCheck(t *testing.T) {
 	store := &PacketStore{
-		byNode:     make(map[string][]*StoreTx),
-		nodeHashes: make(map[string]map[string]bool),
+		byNode:    make(map[string][]*StoreTx),
+		nodeTxIDs: newNodeTxIndex(),
 	}
 
 	t.Run("indexes ADVERT with pubKey", func(t *testing.T) {
@@ -4365,8 +4381,8 @@ func TestIndexByNodePreCheck(t *testing.T) {
 // After #800, resolved_path entries are handled via the decode-window, not indexByNode.
 func TestIndexByNodeResolvedPath(t *testing.T) {
 	store := &PacketStore{
-		byNode:     make(map[string][]*StoreTx),
-		nodeHashes: make(map[string]map[string]bool),
+		byNode:    make(map[string][]*StoreTx),
+		nodeTxIDs: newNodeTxIndex(),
 	}
 
 	t.Run("decoded JSON pubkeys still indexed", func(t *testing.T) {
@@ -4415,8 +4431,8 @@ func BenchmarkIndexByNode(b *testing.B) {
 
 	b.Run("no_pubkey_skip", func(b *testing.B) {
 		store := &PacketStore{
-			byNode:     make(map[string][]*StoreTx),
-			nodeHashes: make(map[string]map[string]bool),
+			byNode:    make(map[string][]*StoreTx),
+			nodeTxIDs: newNodeTxIndex(),
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -4430,8 +4446,8 @@ func BenchmarkIndexByNode(b *testing.B) {
 
 	b.Run("with_pubkey_parse", func(b *testing.B) {
 		store := &PacketStore{
-			byNode:     make(map[string][]*StoreTx),
-			nodeHashes: make(map[string]map[string]bool),
+			byNode:    make(map[string][]*StoreTx),
+			nodeTxIDs: newNodeTxIndex(),
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {

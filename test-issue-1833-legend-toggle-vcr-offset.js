@@ -37,25 +37,30 @@ function extractRule(source, selector) {
   return source.slice(open + 1, close);
 }
 
-console.log('#1833: .legend-toggle-btn must offset for --vcr-bar-height');
+console.log('#1833: .feed-show-btn must offset for --vcr-bar-height (legend toggle moved to the map controls in #875)');
 
-step('.legend-toggle-btn rule exists', () => {
-  assert(/\.legend-toggle-btn\s*\{/.test(css), '.legend-toggle-btn rule missing from live.css');
-});
-
-step('.legend-toggle-btn bottom uses var(--vcr-bar-height)', () => {
-  // There may be several `.legend-toggle-btn { ... }` blocks (media queries,
-  // fullscreen). Only the one that declares `bottom` matters here.
-  const re = /\.legend-toggle-btn\s*\{([^}]*)\}/g;
-  let m, bottomValue = null;
-  while ((m = re.exec(css))) {
-    const bodyMatch = m[1].match(/(?:^|;|\s)bottom\s*:\s*([^;]+);/);
-    if (bodyMatch) { bottomValue = bodyMatch[1].trim(); break; }
+// The offset only works when it is resolved against the same box as the
+// absolute-positioned VCR bar. At 641..768px .live-page is shortened by the
+// bottom navigation reserve; a fixed button remains viewport-relative and
+// consequently drops into the higher-z-index VCR bar.
+function findDeclaration(source, selector, prop) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(escaped + '\\s*\\{([^}]*)\\}', 'g');
+  const propRe = new RegExp('(?:^|;|\\s)' + prop + '\\s*:\\s*([a-z-]+)\\s*;');
+  let m;
+  while ((m = re.exec(source))) {
+    const hit = m[1].match(propRe);
+    if (hit) return hit[1];
   }
-  assert(bottomValue !== null, 'no .legend-toggle-btn rule declares `bottom`');
+  return null;
+}
+
+step('.feed-show-btn shares the .live-page containing block with .vcr-bar', () => {
+  const position = findDeclaration(css, '.feed-show-btn', 'position');
+  assert(position !== null, 'no .feed-show-btn rule declares `position`');
   assert(
-    /var\(\s*--vcr-bar-height/.test(bottomValue),
-    '.legend-toggle-btn bottom does not reference --vcr-bar-height (got: ' + bottomValue + ')'
+    position === 'absolute',
+    '.feed-show-btn must be position:absolute (got: ' + position + ')'
   );
 });
 

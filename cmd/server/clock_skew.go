@@ -220,6 +220,14 @@ func NewClockSkewEngine() *ClockSkewEngine {
 	}
 }
 
+// Invalidate makes the next Recompute run even if the last one is younger
+// than computeInterval (#116: after the startup load).
+func (e *ClockSkewEngine) Invalidate() {
+	e.mu.Lock()
+	e.lastComputed = time.Time{}
+	e.mu.Unlock()
+}
+
 // Recompute recalculates all clock skew data from the packet store.
 // Called periodically or on demand. Holds store RLock externally.
 // Uses read-copy-update: heavy computation runs outside the write lock,
@@ -819,11 +827,10 @@ func (s *PacketStore) computeFleetClockSkewForArea(area string) []*NodeClockSkew
 		areaNodes = s.resolveAreaNodes(area)
 	}
 
+	// Refresh node metadata before taking the store lock.
+	allNodes, _ := s.getCachedNodesAndPM()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	// Build name/role lookup from DB cache (requires s.mu held).
-	allNodes, _ := s.getCachedNodesAndPM()
 	nameMap := make(map[string]nodeInfo, len(allNodes))
 	for _, ni := range allNodes {
 		nameMap[ni.PublicKey] = ni

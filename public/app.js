@@ -13,6 +13,165 @@ function isTransportRoute(rt) { return rt === 0 || rt === 3; }
 /** Byte offset of path_len in raw_hex: 5 for transport routes (4 bytes of next/last hop codes precede it), 1 otherwise. */
 function getPathLenOffset(routeType) { return isTransportRoute(routeType) ? 5 : 1; }
 /**
+ * #608: the ONE place that reads the route bits (low 2 bits of the header
+ * byte) out of a raw frame. rawPathLenByte/rawPayloadOffset/senderPathHashSize
+ * all derive their offset from THIS frame's own header, never from an
+ * externally-supplied route_type, so a per-observation raw_hex is always
+ * read with its own route. null when the header byte is missing or not hex.
+ */
+function routeTypeFromRawHex(rawHex) {
+  if (typeof rawHex !== 'string' || !/^[0-9a-f]{2}/i.test(rawHex)) return null;
+  return parseInt(rawHex.slice(0, 2), 16) & 0x03;
+}
+/** firmware src/MeshCore.h MAX_PACKET_PAYLOAD: Packet::readFrom rejects a payload longer than this. */
+const MAX_PACKET_PAYLOAD = 184;
+/**
+ * #322 (1): the ONE implementation of the path-hash width rules. Given a
+ * path-length byte, the route it belongs to, and the frame's header byte,
+ * return the sender-selected hash width (1-3 bytes) or null when the byte
+ * encodes no width. Both senderPathHashSize() below and the packet-detail Path
+ * Length row (public/packets.js buildFieldTable) call this, so the rules live
+ * in one place (AGENTS.md: one implementation) and cannot drift. Each caller
+ * still reads its own path byte at its own offset -- senderPathHashSize derives
+ * route+offset from the header byte, the Path Length row from pkt.route_type --
+ * so there is one offset source per caller; only the width semantics are here.
+ * The rules are the firmware's (firmware/src/Packet.h getPathHashSize()/
+ * isRouteDirect(), firmware/docs/packet_format.md "path_length"):
+ *   - null for TRACE (headerByte path-type 9): those path bytes are per-hop SNR,
+ *     not a hash width (internal/packetpath/route.go PathBytesAreHops);
+ *   - null for a 0b11 width field: a 4-byte width is reserved/invalid, the
+ *     backend evidence model only knows 1/2/3 (cmd/server/observed_path_hash_sizes.go);
+ *   - null for the 0x00 zero-hop marker on a direct route (2 or 3, Packet.h
+ *     isRouteDirect(), sendZeroHop());
+ *   - otherwise (pathByte >> 6) + 1.
+ */
+function pathHashSizeFromByte(pathByte, routeType, headerByte) {
+  if (typeof pathByte !== 'number' || isNaN(pathByte)) return null;
+  if (typeof headerByte === 'number' && !isNaN(headerByte) && ((headerByte >> 2) & 0x0F) === 9) return null; // TRACE path bytes are SNR
+  if (pathByte === 0 && (routeType === 2 || routeType === 3)) return null; // direct zero-hop marker
+  const size = (pathByte >> 6) + 1;
+  return size <= 3 ? size : null;
+}
+/**
+ * #594: a raw frame's path_length byte, read at the offset its own header
+ * byte's route implies (getPathLenOffset; firmware src/Packet.cpp
+ * Packet::readFrom), or null when the header or path byte is missing or not hex.
+ */
+function rawPathLenByte(rawHex) {
+  const routeType = routeTypeFromRawHex(rawHex);
+  if (routeType == null) return null;
+  const offset = getPathLenOffset(routeType) * 2;
+  const pathHex = rawHex.slice(offset, offset + 2);
+  return /^[0-9a-f]{2}$/i.test(pathHex) ? parseInt(pathHex, 16) : null;
+}
+/**
+ * #594: byte offset of a raw frame's payload: header, the 4 transport-code
+ * bytes on routes 0/3, path_length, then hash_count x hash_size path bytes
+ * (firmware docs/packet_format.md). null when the frame does not decode the way
+ * Packet::readFrom accepts it: no path byte, the reserved 4-byte hash size, a
+ * path over MAX_PATH_SIZE (64) bytes (Packet::isValidPathLen), no payload, or
+ * a payload over MAX_PACKET_PAYLOAD (#608; Packet::readFrom).
+ */
+function rawPayloadOffset(rawHex) {
+  const pathByte = rawPathLenByte(rawHex);
+  if (pathByte == null) return null;
+  const hashSize = (pathByte >> 6) + 1;
+  const pathBytes = (pathByte & 0x3F) * hashSize;
+  if (hashSize === 4 || pathBytes > 64) return null;
+  const offset = getPathLenOffset(routeTypeFromRawHex(rawHex)) + 1 + pathBytes;
+  const totalBytes = Math.floor(rawHex.length / 2);
+  if (offset >= totalBytes) return null;
+  if (totalBytes - offset > MAX_PACKET_PAYLOAD) return null;
+  return offset;
+}
+/** Sender-selected path-hash width in this frame, or null when not encoded. */
+function senderPathHashSize(rawHex) {
+  const pathByte = rawPathLenByte(rawHex);
+  if (pathByte == null) return null;
+  const header = parseInt(rawHex.slice(0, 2), 16);
+  return pathHashSizeFromByte(pathByte, routeTypeFromRawHex(rawHex), header);
+}
+/**
+ * #353: the ONE decision for "this path-hash width reads as a warning". A
+ * 1-byte hash collides often across nodes; the operator recommends 2/3-byte.
+ * The threshold is hardcoded for now (AGENTS.md rule 8: customizer later).
+ */
+function isPathHashSizeWarn(size) {
+  return pathHashSizeValue(size) === 1;
+}
+/** A 1/2/3 path-hash width from a number or numeric string, else null. */
+function pathHashSizeValue(size) {
+  if (typeof size !== 'number' && typeof size !== 'string') return null;
+  const n = Number(size);
+  return n === 1 || n === 2 || n === 3 ? n : null;
+}
+/**
+ * #353: the ONE markup for a path-hash width, shared by the channel "Sent
+ * with" badge, the packet-detail Hash Size row and the node-detail badge.
+ * Returns '' unless size is 1/2/3. opts.block is the caller's BEM class (the
+ * warn variant adds `${block}--warn` plus the shared `path-hash-warn`),
+ * opts.cls extra leading classes, opts.title the neutral tooltip.
+ *
+ * Round 3 (operator decision on #353): a 1-byte hash is a *recommendation*,
+ * not an error. The variant uses the amber warning palette (--path-hash-warn
+ * -> --warning), a warning (not error) icon, and recommendation wording. So it
+ * never relies on the amber colour alone, the recommendation is also spelled
+ * out in text: a visible label when opts.recInLabel is set (the standalone
+ * node badge), otherwise an sr-only clause appended after the factual label
+ * (the inline channel badge and the packet-detail value row).
+ *
+ * The setting names come from firmware/docs/faq.md 3.9.3 (companion app) and
+ * 3.9.4 / cli_commands.md (repeater `path.hash.mode`); faq.md 3.9.6 is why the
+ * tooltip says to switch only once most repeaters run 1.14+.
+ */
+function renderPathHashSize(size, text, opts) {
+  const n = pathHashSizeValue(size);
+  if (n == null) return '';
+  const o = opts || {};
+  const cls = (o.cls ? o.cls + ' ' : '') + o.block;
+  const label = escapeHtml(text);
+  if (!isPathHashSizeWarn(n)) {
+    return '<span class="' + cls + '"' + (o.title ? ' title="' + escapeHtml(o.title) + '"' : '') + '>' + label + '</span>';
+  }
+  const tip = 'Recommended: use a 2- or 3-byte path hash. A 1-byte hash is the firmware default, but its ' +
+    'prefixes collide more often across nodes, so hops can be ambiguous. ' +
+    'Companion: MeshCore app Settings → Experimental Settings (message path hash size). ' +
+    'Repeater adverts: set path.hash.mode 1 (2-byte) or 2 (3-byte). ' +
+    'Repeaters older than firmware 1.14 drop 2/3-byte packets, so switch once most of your mesh runs 1.14+.';
+  const rec = o.recInLabel ? '' : '<span class="sr-only"> — recommended: 2- or 3-byte path hash</span>';
+  return '<span class="' + cls + ' ' + o.block + '--warn path-hash-warn" title="' + tip + '">' +
+    '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' +
+    label + rec + '</span>';
+}
+/**
+ * #480: the ONE decision for "this flood carries no region scope". Decided
+ * from the transmission's route type only: FLOOD (1) is unscoped,
+ * TRANSPORT_FLOOD (0) is scoped whether or not its name is known (an unknown
+ * name has scope_name = '' and is NOT "no scope"). DIRECT (2) and
+ * TRANSPORT_DIRECT (3) are not flood scope, so they get no marker.
+ */
+function isUnscopedFlood(routeType) {
+  return routeType === 1 || routeType === '1';
+}
+/**
+ * #480: the ONE markup for the "no scope" recommendation, shared by the
+ * Channels message meta line and the packet-detail Scope row. Same amber
+ * --path-hash-warn recommendation style as #353, a warning (not error) icon.
+ * The explanation states only the firmware behaviour (companion default flood
+ * scope; repeater flood.max.unscoped / region denyf, firmware
+ * docs/cli_commands.md) and never attributes a low heard-count to it. Returns
+ * '' unless the route type is an unscoped FLOOD.
+ */
+function renderNoScope(routeType) {
+  if (!isUnscopedFlood(routeType)) return '';
+  const tip = 'Sent without a scope. The message floods outside your region, and repeaters that limit ' +
+    'unscoped traffic (flood.max.unscoped / region denyf) may stop it. ' +
+    'Recommended: set a default scope (region) in the companion app.';
+  return '<span class="no-scope path-hash-warn" title="' + escapeHtml(tip) + '">' +
+    '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' +
+    'no scope<span class="sr-only"> — sent without a scope. Recommended: set a default scope (region) in the companion app</span></span>';
+}
+/**
  * scopeName is optional (callers that don't pass it get the original
  * unscoped "T" badge). Pass a packet's scope_name to also surface the
  * region-scope state directly in the badge label (not just on hover): a
@@ -130,7 +289,7 @@ const CLIENT_TTL = {
   channels: 15000, channelMessages: 10000, analyticsRF: 300000,
   analyticsTopology: 300000, analyticsChannels: 300000, analyticsHashSizes: 300000,
   analyticsSubpaths: 300000, analyticsSubpathDetail: 300000,
-  nodeAnalytics: 60000, nodeSearch: 10000
+  nodeAnalytics: 60000, nodeSearch: 10000, observerComparison: 20000
 };
 // Fetch server cache config and use as client TTLs (server values are in seconds)
 fetch('/api/config/cache').then(r => r.json()).then(cfg => {
@@ -138,7 +297,7 @@ fetch('/api/config/cache').then(r => r.json()).then(cfg => {
     if (k in CLIENT_TTL && typeof v === 'number') CLIENT_TTL[k] = v * 1000;
   }
 }).catch(() => {});
-async function api(path, { ttl = 0, bust = false } = {}) {
+async function api(path, { ttl = 0, bust = false, retry503 = true } = {}) {
   const t0 = performance.now();
   if (!bust && ttl > 0) {
     const cached = _apiCache.get(path);
@@ -150,8 +309,14 @@ async function api(path, { ttl = 0, bust = false } = {}) {
       return cached.data;
     }
   }
-  // Deduplicate in-flight requests
-  if (_inflight.has(path)) return _inflight.get(path);
+  // Deduplicate in-flight requests. #172: per retry503 too, so a caller
+  // that retries 503s itself never waits on the retry loop below, and a
+  // default caller never gets a 503 that loop would have ridden out.
+  const inflightKey = retry503 ? path : path + '\n#no-retry503';
+  // #243: an explicit refresh (bust) never joins an in-flight request, which
+  // may have been answered before the change the caller wants to see. It
+  // takes the in-flight slot instead, so later callers join the newer one.
+  if (!bust && _inflight.has(inflightKey)) return _inflight.get(inflightKey);
   const promise = (async () => {
     // Issue #1659: 503 with Retry-After indicates server-side warm-up
     // (analytics recomputer first-pass, index build, etc.). Retry with
@@ -166,6 +331,11 @@ async function api(path, { ttl = 0, bust = false } = {}) {
     // per attempt, decremented at most once) and exhausted-retries
     // threw without decrementing at all — banner stuck across three
     // analytics endpoints, multiplied.
+    //
+    // #172: retry503:false skips this loop for a caller that retries on
+    // its own (analytics.js outlasts the server's 60s warm-up and cancels
+    // its retries on navigation). Every error carries the HTTP status, and
+    // a 503's valid Retry-After as retryAfterSeconds.
     let attempt = 0;
     let delay = 1000;
     const maxAttempts = 6;
@@ -173,7 +343,7 @@ async function api(path, { ttl = 0, bust = false } = {}) {
     try {
       while (true) {
         const res = await fetch('/api' + path);
-        if (res.status === 503 && attempt < maxAttempts) {
+        if (res.status === 503 && retry503 && attempt < maxAttempts) {
           const ra = parseInt(res.headers.get('Retry-After'), 10);
           const wait = isFinite(ra) && ra > 0 ? ra * 1000 : delay;
           if (!notified) { _warmupNotify_1659(true); notified = true; }
@@ -182,7 +352,19 @@ async function api(path, { ttl = 0, bust = false } = {}) {
           attempt++;
           continue;
         }
-        if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
+        if (!res.ok) {
+          const err = new Error(`API ${res.status}: ${path}`);
+          err.status = res.status;
+          const ra = parseInt(res.headers.get('Retry-After'), 10);
+          if (res.status === 503 && isFinite(ra) && ra > 0) err.retryAfterSeconds = ra;
+          // #530: a 429 carries its raw Retry-After for the one caller that
+          // retries it (the Reach view). api() itself never retries a 429.
+          if (res.status === 429) err.retryAfter = res.headers.get('Retry-After');
+          // #199: a JSON error body travels as err.body (e.g. the node-detail
+          // 404's inactive_node / observer); a non-JSON body leaves it unset.
+          try { err.body = await res.json(); } catch (_) { /* not JSON */ }
+          throw err;
+        }
         const data = await res.json();
         const ms = performance.now() - t0;
         _apiPerf.calls++;
@@ -190,7 +372,21 @@ async function api(path, { ttl = 0, bust = false } = {}) {
         _apiPerf.log.push({ path, ms: Math.round(ms), time: Date.now() });
         if (_apiPerf.log.length > 200) _apiPerf.log.shift();
         if (ms > 500) console.warn(`[SLOW API] ${path} took ${Math.round(ms)}ms`);
-        if (ttl > 0) _apiCache.set(path, { data, expires: Date.now() + ttl });
+        if (res.status === 202) {
+          // #120: 202 Accepted is "not ready yet" (the lazy distance index
+          // answers {status:"building"} until it is built), never data to
+          // keep: caching it would serve the placeholder back for the whole
+          // TTL. A valid Retry-After travels to the caller as a
+          // non-enumerable property, so the JSON body itself is unchanged.
+          const ra = parseInt(res.headers.get('Retry-After'), 10);
+          if (data && typeof data === 'object' && isFinite(ra) && ra > 0) {
+            Object.defineProperty(data, 'retryAfterSeconds', { value: ra, enumerable: false });
+          }
+        } else if (ttl > 0 && _inflight.get(inflightKey) === promise) {
+          // #243: a request a bust has superseded keeps its late answer out
+          // of the cache, where it would replace the newer data.
+          _apiCache.set(path, { data, expires: Date.now() + ttl });
+        }
         return data;
       }
     } finally {
@@ -199,14 +395,18 @@ async function api(path, { ttl = 0, bust = false } = {}) {
       if (notified) _warmupNotify_1659(false);
     }
   })();
-  _inflight.set(path, promise);
+  _inflight.set(inflightKey, promise);
   // `.finally()` returns its own derived promise that mirrors `promise`'s
   // outcome; discarding it uncaught leaves the real caller's rejection
   // (delivered via the returned `promise` below, unaffected by this)
   // duplicated as a second, unobserved rejection on this derived one.
   // The `.catch()` here only silences that duplicate -- it does not
   // touch `promise` itself or its resolution to callers.
-  promise.finally(() => _inflight.delete(path)).catch(() => {});
+  // #243: remove the entry only while it is still this request's; a bust
+  // may have taken the slot over.
+  promise.finally(() => {
+    if (_inflight.get(inflightKey) === promise) _inflight.delete(inflightKey);
+  }).catch(() => {});
   return promise;
 }
 
@@ -252,11 +452,19 @@ function _warmupNotify_1659(active) {
 //   (e.g. '&lastHeard=30d&area=x', '&sortBy=lastSeen&region=y'); pass '' for none.
 // safetyCap: hard ceiling on BOTH pages fetched and nodes returned — the result
 //   is sliced to it (callers like live.js pass their render ceiling here).
-// Returns { nodes, counts, total }: counts is from the first page; total is the
-//   real deduped/capped node count (NOT the server's per-query `total`).
+// Returns { nodes, counts, total, truncated }: counts is from the first page;
+//   total is the real deduped/capped node count (NOT the server's per-query
+//   `total`). truncated is true when `nodes` may not be the complete
+//   population for the query — either the page loop never saw a short page
+//   before hitting safetyCap (so more rows may exist beyond it), or dedup
+//   left more unique rows than safetyCap and the final slice below dropped
+//   some. A caller that presents `nodes` as a complete population (e.g.
+//   analytics.js's Role Breakdown, #560) must check this rather than
+//   silently showing a partial count as whole.
 async function fetchAllNodes(extraQuery = '', { ttl = 0, pageSize = 500, safetyCap = 10000 } = {}) {
   const accumulated = [];
   let counts = {};
+  let stoppedShort = false;
   for (let offset = 0; offset < safetyCap; offset += pageSize) {
     const data = await api(`/nodes?limit=${pageSize}&offset=${offset}${extraQuery}`, { ttl });
     const page = data && Array.isArray(data.nodes) ? data.nodes
@@ -267,7 +475,7 @@ async function fetchAllNodes(extraQuery = '', { ttl = 0, pageSize = 500, safetyC
     // COUNT(*) for the query, but the handler overwrites it with the filtered
     // length under area/geo/blacklist filtering — so we never loop on it, nor
     // surface it; a short page is the reliable end-of-data signal. See #1606.
-    if (page.length < pageSize) break;
+    if (page.length < pageSize) { stoppedShort = true; break; }
   }
   // Dedup by public_key: the sort window (last_seen DESC by default) can shift
   // under concurrent ingest, repeating a row across a page boundary. Rows
@@ -281,7 +489,8 @@ async function fetchAllNodes(extraQuery = '', { ttl = 0, pageSize = 500, safetyC
   // it to the next pageSize multiple), so e.g. live.js's LIVE_MAP_MAX_NODES is
   // honored exactly rather than overshooting by up to pageSize-1.
   const nodes = Array.from(seen.values()).slice(0, safetyCap);
-  return { nodes, counts, total: nodes.length };
+  const truncated = !stoppedShort || seen.size > nodes.length;
+  return { nodes, counts, total: nodes.length, truncated };
 }
 
 function invalidateApiCache(prefix) {
@@ -666,6 +875,41 @@ function buildHexLegend(ranges) {
 let ws = null;
 let wsListeners = [];
 
+// #117: a half-open connection (a proxy or NAT dropping state, a laptop that
+// slept, a handshake that never completes) can leave the shared socket
+// looking OPEN but silent, with no onclose, so every view stops updating.
+// The server writes WS_HEARTBEAT on each 30 s ping tick
+// (cmd/server/websocket.go wsHeartbeat), and any received frame counts as
+// life. A socket silent for WS_STALE_MS, measured from its creation, is
+// replaced once. 75 s = two heartbeat intervals plus slack, so one late or
+// lost heartbeat is tolerated.
+const WS_STALE_MS = 75000;
+const WS_HEARTBEAT = '{"type":"heartbeat"}';
+let wsLastFrameAt = 0;
+let wsWatchdogTimer = null;
+let wsReconnectTimer = null; // the one pending reconnect, if any
+
+// #937: after a server restart every open page (kiosk screens stay open for
+// days) would reconnect in lock-step. The delay after each close starts at
+// WS_RECONNECT_MS (roles.js, operator setting `wsReconnectMs`), doubles per
+// attempt that never opened, is capped at WS_RECONNECT_MAX_MS (a larger
+// configured base is kept as is) and gets ±WS_RECONNECT_JITTER, never above
+// the cap: near the cap the range is only cut, not clamped, so the delays
+// stay spread instead of piling up on the cap. onopen resets it. Watchdog,
+// resume and pull reconnect at once.
+const WS_RECONNECT_MAX_MS = 30000;
+const WS_RECONNECT_JITTER = 0.2;
+let wsReconnectAttempts = 0;
+
+function wsReconnectDelay(attempt) {
+  const base = Number(window.WS_RECONNECT_MS) || 3000;
+  const cap = Math.max(base, WS_RECONNECT_MAX_MS);
+  const nominal = Math.min(base * Math.pow(2, attempt), cap);
+  const lo = nominal * (1 - WS_RECONNECT_JITTER);
+  const hi = Math.min(nominal * (1 + WS_RECONNECT_JITTER), cap);
+  return Math.round(lo + Math.random() * (hi - lo));
+}
+
 // --- Brand-logo packet-driven pulse (#1173) ---
 // Replaces the legacy live-dot indicator. Class-toggle only (CSS animations); colors come from
 // --logo-accent / --logo-accent-hi tokens. Test seam at window.__corescopeLogo.
@@ -809,19 +1053,77 @@ const Logo = (function () {
   return api;
 })();
 
+// Detach the current socket's handlers, then close it. A replaced socket's
+// close event can arrive much later (a half-open connection waits out the
+// closing handshake) and must not schedule another connection.
+function dropWS() {
+  clearTimeout(wsWatchdogTimer);
+  wsWatchdogTimer = null;
+  if (!ws) return;
+  const old = ws;
+  ws = null;
+  old.onopen = old.onclose = old.onerror = old.onmessage = null;
+  try { old.close(); } catch (_) {}
+}
+
+// Watchdog and resume check. Inert while a reconnect is already scheduled
+// (ordinary close keeps its backoff delay) or with no socket.
+function checkWSLiveness() {
+  clearTimeout(wsWatchdogTimer);
+  wsWatchdogTimer = null;
+  if (!ws || wsReconnectTimer) return;
+  const silentMs = Date.now() - wsLastFrameAt;
+  // Date.now(), not performance.now(): a tab resumed from sleep must be
+  // measured against real elapsed time. A negative reading means the wall
+  // clock stepped back, so the silence cannot be measured; treat it as stale
+  // instead of re-arming for the size of the step. Either step direction
+  // costs at most one extra reconnect.
+  if (silentMs >= 0 && silentMs < WS_STALE_MS) {
+    wsWatchdogTimer = setTimeout(checkWSLiveness, WS_STALE_MS - silentMs);
+    return;
+  }
+  Logo.setConnected(false);
+  connectWS();
+}
+
+// Opens the shared socket, replacing (detaching + closing) any previous one
+// and cancelling a pending reconnect, so onclose, the watchdog, resume
+// checks and pull-to-reconnect can never leave two live sockets.
 function connectWS() {
+  clearTimeout(wsReconnectTimer);
+  wsReconnectTimer = null;
+  dropWS();
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}`);
-  ws.onopen = () => Logo.setConnected(true);
-  ws.onclose = () => {
+  const sock = new WebSocket(`${proto}//${location.host}`);
+  ws = sock;
+  wsLastFrameAt = Date.now(); // from creation: a stuck handshake is caught too
+  wsWatchdogTimer = setTimeout(checkWSLiveness, WS_STALE_MS);
+  sock.onopen = () => {
+    wsReconnectAttempts = 0;
+    Logo.setConnected(true);
+    // A deploy restarts the server, so a reconnect is a cheap moment to
+    // check for a new version (#614, see version-notice.js).
+    window.dispatchEvent(new Event('corescope:ws-open'));
+  };
+  sock.onclose = () => {
+    if (ws !== sock) return;
+    clearTimeout(wsWatchdogTimer);
+    wsWatchdogTimer = null;
     Logo.setConnected(false);
     // WS_RECONNECT_MS comes from roles.js (operator setting `wsReconnectMs`).
     // It used to be honoured only by the live map's private socket; now that
     // every view shares this one, the setting applies here or nowhere.
-    setTimeout(connectWS, window.WS_RECONNECT_MS || 3000);
+    clearTimeout(wsReconnectTimer);
+    const delay = wsReconnectDelay(wsReconnectAttempts);
+    wsReconnectAttempts++;
+    wsReconnectTimer = setTimeout(connectWS, delay);
   };
-  ws.onerror = () => ws.close();
-  ws.onmessage = (e) => {
+  sock.onerror = () => sock.close();
+  sock.onmessage = (e) => {
+    wsLastFrameAt = Date.now();
+    // Consumed here, before the logo pulse, cache invalidation and every
+    // onWS listener (and so every pause buffer).
+    if (e.data === WS_HEARTBEAT) return;
     Logo.pulse(e);
     try {
       const msg = JSON.parse(e.data);
@@ -833,9 +1135,32 @@ function connectWS() {
           invalidateApiCache('/nodes');
         }, 5000);
       }
-      wsListeners.forEach(fn => fn(msg));
+      // Each listener in its own try: one that throws must not starve the
+      // listeners after it.
+      wsListeners.forEach(fn => {
+        try { fn(msg); } catch (err) { console.error('[ws] listener error', err); }
+      });
     } catch {}
   };
+}
+
+// Timers in a hidden or sleeping tab can run late (or not at all), so check
+// as soon as the page is visible or back online instead of waiting out a
+// watchdog that may be minutes behind. A pending backoff reconnect (up to
+// WS_RECONNECT_MAX_MS) is not waited out either (#937): these events are per
+// client, so reconnecting at once brings back no stampede. connectWS()
+// cancels the pending timer; the attempt count is kept, so a server that is
+// still down continues the backoff.
+function resumeWS() {
+  if (wsReconnectTimer) connectWS();
+  else checkWSLiveness();
+}
+
+function setupWSResumeCheck() {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) resumeWS();
+  });
+  window.addEventListener('online', resumeWS);
 }
 
 function onWS(fn) { wsListeners.push(fn); }
@@ -896,16 +1221,12 @@ function pullReconnect() {
   // If WS is connected (readyState OPEN), give a brief "Connected"
   // confirmation but still cycle so the user sees fresh data.
   const wasOpen = ws && ws.readyState === 1;
-  if (wasOpen) {
-    _showPullToast('Connected', true);
-    // Fast cycle: close and let onclose reconnect immediately
-    try { ws.close(); } catch (e) {}
-  } else {
-    _showPullToast('Reconnecting…', true);
-    try { if (ws) ws.close(); } catch (e) {}
-    // onclose handler schedules reconnect; force one now in case ws was null
-    try { connectWS(); } catch (e) {}
-  }
+  _showPullToast(wasOpen ? 'Connected' : 'Reconnecting…', true);
+  // #117: replace the socket now in both cases. An OPEN socket may be
+  // half-open, and its close event can take about a minute after close();
+  // connectWS() detaches and closes the old socket and cancels a pending
+  // reconnect itself, so this cannot stack sockets.
+  try { connectWS(); } catch (e) {}
 }
 
 function _isTouchDevice() {
@@ -1142,6 +1463,7 @@ registerPage('tools-landing', {
             '<a href="#/tools/path-inspector" class="tools-card"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Path Inspector</h3><p>Resolve prefix paths to candidate full-pubkey routes with confidence scoring.</p></a>' +
             '<a href="#/tools/trace/" class="tools-card"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Trace Viewer</h3><p>View detailed packet traces by hash.</p></a>' +
             '<a href="#/tools/observer-neighbors" class="tools-card"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-share-network"/></svg> Observer Neighbors</h3><p>Every observer\'s firmware-reported direct neighbors, network-wide in one searchable list.</p></a>' +
+            '<a href="#/tools/antenna-claims" class="tools-card"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-ruler"/></svg> Antenna Height Claims</h3><p>Admin: review antenna heights that node owners proved by putting a code in the node\'s name.</p></a>' +
           '</div>' +
         '</div>' +
         '<div class="tools-section">' +
@@ -1176,16 +1498,20 @@ function navigate() {
   closeNav();
 
   // Backward-compat redirect: #/traces/<hash> → #/tools/trace/<hash> (issue #944).
+  // Uses replaceState (not location.hash =) so this redirect doesn't add its
+  // own history entry, otherwise the back button gets stuck bouncing off it.
   if (location.hash.startsWith('#/traces/')) {
-    location.hash = location.hash.replace('#/traces/', '#/tools/trace/');
+    history.replaceState(null, '', location.hash.replace('#/traces/', '#/tools/trace/'));
+    navigate();
     return;
   }
 
   // Backward-compat redirect: #/roles → #/analytics?tab=roles (issue #1085).
   // The Roles page was folded into the Analytics tab strip; old links and
-  // bookmarks must keep working.
+  // bookmarks must keep working. Uses replaceState for the same reason as above.
   if (location.hash === '#/roles' || location.hash.startsWith('#/roles?') || location.hash.startsWith('#/roles/')) {
-    location.hash = '#/analytics?tab=roles';
+    history.replaceState(null, '', '#/analytics?tab=roles');
+    navigate();
     return;
   }
 
@@ -1247,6 +1573,9 @@ function navigate() {
     } else if (routeParam === 'gps-sanity') {
       basePage = 'gps-sanity-tool';
       routeParam = null;
+    } else if (routeParam === 'antenna-claims') {
+      basePage = 'antenna-claims-tool';
+      routeParam = null;
     } else if (!routeParam) {
       // Default tools landing shows menu with both entries.
       basePage = 'tools-landing';
@@ -1259,7 +1588,7 @@ function navigate() {
 
   // Update nav active state
   document.querySelectorAll('.nav-link[data-route]').forEach(el => {
-    el.classList.toggle('active', el.dataset.route === basePage || (el.dataset.route === 'tools' && (basePage === 'traces' || basePage === 'path-inspector' || basePage === 'observer-neighbors-tool' || basePage === 'new-nodes-tool' || basePage === 'node-changes-tool' || basePage === 'network-digest-tool' || basePage === 'position-gaps-tool' || basePage === 'gps-sanity-tool' || basePage === 'tools-landing')));
+    el.classList.toggle('active', el.dataset.route === basePage || (el.dataset.route === 'tools' && (basePage === 'traces' || basePage === 'path-inspector' || basePage === 'observer-neighbors-tool' || basePage === 'new-nodes-tool' || basePage === 'node-changes-tool' || basePage === 'network-digest-tool' || basePage === 'position-gaps-tool' || basePage === 'gps-sanity-tool' || basePage === 'antenna-claims-tool' || basePage === 'tools-landing')));
   });
   // Update "More" button to show active state if a low-priority page is selected
   var moreBtn = document.getElementById('navMoreBtn');
@@ -1273,18 +1602,27 @@ function navigate() {
     pages[currentPage].destroy();
   }
   currentPage = basePage;
+  // #563: one title owner; also clears any previous page's entity label.
+  if (window.PageTitle) window.PageTitle.setRoute(basePage);
+  // #531: a link's ?region= is the selection before the new page fetches
+  // anything. After destroy(), so the old page's listeners are gone.
+  if (window.RegionFilter) RegionFilter.syncFromUrl(location.hash);
+  // #740 M3a: the same for a link's DAGI param (?kommune=, ?postnr=, …).
+  if (window.DagiFilter) DagiFilter.syncFromUrl(location.hash);
 
   // #1572 — defensive: ensure body.live-fullscreen is cleared whenever
   // we navigate to a non-live route. Live page's destroy() also clears
   // it, but this guards against any boot path (deep-link, restore) that
   // somehow puts the body into fullscreen state outside /live.
+  // #883: the same for body.kiosk (Live's kiosk mode, never persisted).
   if (basePage !== 'live' && document.body) {
     document.body.classList.remove('live-fullscreen');
+    document.body.classList.remove('kiosk', 'kiosk-idle');
   }
 
   const app = document.getElementById('app');
   // Pages with fixed-height containers (maps, virtual-scroll, split-panels)
-  const fixedPages = { packets: 1, nodes: 1, map: 1, live: 1, channels: 1, 'audio-lab': 1 };
+  const fixedPages = { packets: 1, nodes: 1, map: 1, regions: 1, live: 1, channels: 1, 'audio-lab': 1 };
   app.classList.toggle('app-fixed', basePage in fixedPages);
 
   // Issue #1369: ?embed=1 chrome suppression for cross-domain iframe embeds.
@@ -1315,7 +1653,7 @@ function navigate() {
       else { app.setAttribute('tabindex', '-1'); app.focus({ preventScroll: true }); }
     });
   } else {
-    app.innerHTML = `<div style="padding:40px;text-align:center;color:#6b7280"><h2>${route}</h2><p>Page not yet implemented.</p></div>`;
+    app.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-muted)"><h2>${escapeHtml(route)}</h2><p>Page not yet implemented.</p></div>`;
   }
 }
 
@@ -1333,6 +1671,7 @@ window.addEventListener('timestamp-mode-changed', () => {
 });
 window.addEventListener('DOMContentLoaded', () => {
   connectWS();
+  setupWSResumeCheck();
   setupPullToReconnect();
 
   // --- Dark Mode ---
@@ -1340,12 +1679,19 @@ window.addEventListener('DOMContentLoaded', () => {
   const darkCheckbox = document.getElementById('darkModeCheckbox');
   const savedTheme = localStorage.getItem('meshcore-theme');
   function applyTheme(theme) {
+    applyThemeTransient(theme);
+    localStorage.setItem('meshcore-theme', theme);
+  }
+  // #883 M2: the same without saving the viewer's choice. Live's kiosk mode
+  // shows its own theme (&theme=, dark by default) and puts the viewer's
+  // back on exit (LiveKiosk.applyKioskTheme).
+  function applyThemeTransient(theme) {
     document.documentElement.setAttribute('data-theme', theme);
     if (darkCheckbox) darkCheckbox.checked = theme === 'dark';
-    localStorage.setItem('meshcore-theme', theme);
     // Re-apply user theme CSS vars for the correct mode (light/dark)
     reapplyUserThemeVars(theme === 'dark');
   }
+  window.applyThemeTransient = applyThemeTransient;
   function reapplyUserThemeVars(dark) {
     try {
       var userTheme = JSON.parse(localStorage.getItem('meshcore-user-theme') || '{}');
@@ -1516,6 +1862,11 @@ window.addEventListener('DOMContentLoaded', () => {
     // Always rebuilt from the CURRENT originals, so a link removed since the
     // last run cannot survive as a stale clone in the menu.
     function rebuildMoreMenu(links) {
+      // #634 (upstream 2333): clearing the menu drops a focused clone onto
+      // <body>. Remember its destination and restore focus afterwards, whether
+      // it is still in More or has moved to the inline strip.
+      const focused = navMoreMenu.contains(document.activeElement) ? document.activeElement : null;
+      let focusTarget = focused && links.find(l => l.getAttribute('href') === focused.getAttribute('href'));
       navMoreMenu.innerHTML = '';
       const hidden = links.filter(a => a.classList.contains('is-overflow'));
       hidden.forEach(function(link) {
@@ -1531,7 +1882,10 @@ window.addEventListener('DOMContentLoaded', () => {
         clone.addEventListener('click', closeNav);
         clone.addEventListener('click', closeMoreMenu);
         navMoreMenu.appendChild(clone);
+        if (link === focusTarget) focusTarget = clone;
       });
+      if (hidden.length === 0) closeMoreMenu();
+      if (focusTarget) focusTarget.focus();
       // If nothing overflows, hide the More button entirely so wide
       // viewports don't show a useless dropdown trigger.
       navMoreWrap.classList.toggle('is-hidden', hidden.length === 0);
@@ -1896,16 +2250,21 @@ window.addEventListener('DOMContentLoaded', () => {
       return;
     }
     favDropdown.innerHTML = '<div class="fav-dd-loading">Loading...</div>';
+    // #902: one cached bulk roster for the whole list, so a favorite that is
+    // also a reporting observer is credited. A failure only drops the credit.
+    // Fetched in parallel with the health reads, not before them.
+    const observerIdxP = api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null).then(MyMeshObservers.index);
     const items = await Promise.all(favs.map(async (pk) => {
       try {
-        const h = await api('/nodes/' + pk + '/health', { ttl: CLIENT_TTL.nodeHealth });
-        const age = h.stats.lastHeard ? Date.now() - new Date(h.stats.lastHeard).getTime() : null;
-        const statusCls = age === null ? 'status-err' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? 'status-ok' : age < HEALTH_THRESHOLDS.nodeSilentMs ? 'status-warn' : 'status-err';
-        const statusLabel = age === null ? 'unknown' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? 'healthy' : age < HEALTH_THRESHOLDS.nodeSilentMs ? 'degraded' : 'silent';
+        const [h, observerIdx] = await Promise.all([api('/nodes/' + pk + '/health', { ttl: CLIENT_TTL.nodeHealth }), observerIdxP]);
+        const heardAt = getHealthLastHeard(h.node, h.stats);
+        const status = getNodeHealth(h.node.role, heardAt, MyMeshObservers.reportedAt(observerIdx, pk)).status;
+        const statusCls = getHealthStatusClass(h.node.role, status);
+        const statusLabel = getHealthLabel(h.node.role, status) || 'unknown';
         return '<a href="#/nodes/' + pk + '" class="fav-dd-item" data-key="' + pk + '">'
           + '<span class="fav-dd-status ' + statusCls + '" title="' + statusLabel + '" aria-label="' + statusLabel + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>'
-          + '<span class="fav-dd-name">' + (h.node.name || truncate(pk, 12)) + '</span>'
-          + '<span class="fav-dd-meta">' + (h.stats.lastHeard ? timeAgo(h.stats.lastHeard) : 'never') + '</span>'
+          + '<span class="fav-dd-name">' + escapeHtml(h.node.name || truncate(pk, 12)) + '</span>'
+          + '<span class="fav-dd-meta">' + (heardAt ? timeAgo(heardAt) : 'never') + '</span>'
           + favStar(pk, 'fav-dd-star')
           + '</a>';
       } catch {
@@ -1995,7 +2354,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const chList = Array.isArray(channels) ? channels : [];
         for (const c of chList) {
           if (c.name && c.name.toLowerCase().includes(q.toLowerCase())) {
-            html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/channels/${c.channel_hash}">
+            html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/channels/${escapeHtml(c.channel_hash)}">
               <span class="search-result-type">Channel</span>${escapeHtml(c.name)}</div>`;
           }
         }
@@ -2043,55 +2402,144 @@ window.addEventListener('DOMContentLoaded', () => {
   // (removed — no auth yet)
 
   // --- Nav Stats ---
+  // #491: all nav-only triggers share one foreground cadence. Shared api()
+  // caching/invalidation and other /stats consumers remain independent.
+  // Hardcoded for now; a later customizer setting can expose this interval.
+  const NAV_STATS_INTERVAL_MS = 15000;
+  let navStatsTimer = null;
+  let navStatsFlashTimer = null;
+  let navStatsLastStart = -Infinity;
+  let navStatsInFlight = false;
+  let navStatsActive = true;
+  let navStatsWasHidden = document.hidden;
+
+  function clearNavStatsTimers() {
+    clearTimeout(navStatsTimer);
+    clearTimeout(navStatsFlashTimer);
+    navStatsTimer = navStatsFlashTimer = null;
+    const el = document.getElementById('navStats');
+    if (el) el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated'));
+  }
+
   async function updateNavStats() {
     try {
-      const stats = await api('/stats', { ttl: CLIENT_TTL.stats });
+      // The scheduler owns retries too: api()'s automatic 503 retry loop
+      // could otherwise fetch while hidden. Other consumers keep its default.
+      const stats = await api('/stats', { ttl: CLIENT_TTL.stats, retry503: false });
+      if (!navStatsActive || document.hidden) return;
       const el = document.getElementById('navStats');
       if (el) {
         el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs`;
         el.querySelectorAll('.stat-val').forEach(s => s.classList.add('updated'));
-        setTimeout(() => { el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated')); }, 600);
+        clearTimeout(navStatsFlashTimer);
+        navStatsFlashTimer = setTimeout(() => {
+          navStatsFlashTimer = null;
+          el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated'));
+        }, 600);
         // navPriorityFn IS the coalescing scheduler, so this cannot stack up
-        // even though updateNavStats runs on a 15s interval and on every
-        // debounced WebSocket event.
+        // or rebuild the navigation for every WebSocket event.
         if (navPriorityFn) navPriorityFn();
       }
     } catch {}
   }
-  updateNavStats();
-  setInterval(updateNavStats, 15000);
-  debouncedOnWS(function () { updateNavStats(); });
+
+  function requestNavStats() {
+    if (!navStatsActive || document.hidden || navStatsInFlight) return;
+    const remaining = NAV_STATS_INTERVAL_MS - (performance.now() - navStatsLastStart);
+    if (remaining > 0) {
+      if (navStatsTimer === null) navStatsTimer = setTimeout(() => {
+        navStatsTimer = null;
+        requestNavStats();
+      }, remaining);
+      return;
+    }
+    clearTimeout(navStatsTimer);
+    navStatsTimer = null;
+    navStatsLastStart = performance.now();
+    navStatsInFlight = true;
+    updateNavStats().finally(() => {
+      navStatsInFlight = false;
+      if (!navStatsActive || document.hidden) return;
+      navStatsTimer = setTimeout(() => {
+        navStatsTimer = null;
+        requestNavStats();
+      }, Math.max(0, NAV_STATS_INTERVAL_MS - (performance.now() - navStatsLastStart)));
+    });
+  }
+
+  function navStatsVisibilityChanged() {
+    const wasHidden = navStatsWasHidden;
+    navStatsWasHidden = document.hidden;
+    if (document.hidden) clearNavStatsTimers();
+    else if (wasHidden) {
+      navStatsLastStart = -Infinity;
+      requestNavStats();
+    }
+  }
+
+  function suspendNavStats(event) {
+    navStatsActive = false;
+    clearNavStatsTimers();
+    offWS(requestNavStats);
+    document.removeEventListener('visibilitychange', navStatsVisibilityChanged);
+    if (!event.persisted) {
+      window.removeEventListener('pagehide', suspendNavStats);
+      window.removeEventListener('pageshow', resumeNavStats);
+    }
+  }
+  function resumeNavStats(event) {
+    if (!event.persisted || navStatsActive) return;
+    navStatsActive = true;
+    navStatsWasHidden = document.hidden;
+    navStatsLastStart = -Infinity;
+    onWS(requestNavStats);
+    document.addEventListener('visibilitychange', navStatsVisibilityChanged);
+    requestNavStats();
+  }
+
+  onWS(requestNavStats);
+  document.addEventListener('visibilitychange', navStatsVisibilityChanged);
+  window.addEventListener('pagehide', suspendNavStats);
+  window.addEventListener('pageshow', resumeNavStats);
+  requestNavStats();
 
   // --- Theme Customization ---
-  // Fetch theme config and apply via customizer v2 pipeline
-  fetch('/api/config/theme', { cache: 'no-store' }).then(r => r.json()).then(cfg => {
-    // Normalize timestamp defaults
-    cfg = cfg || {};
-    if (!cfg.timestamps) cfg.timestamps = {};
-    const tsCfg = cfg.timestamps;
-    if (tsCfg.defaultMode !== 'absolute' && tsCfg.defaultMode !== 'ago') tsCfg.defaultMode = 'ago';
-    if (tsCfg.timezone !== 'utc' && tsCfg.timezone !== 'local') tsCfg.timezone = 'local';
-    if (tsCfg.formatPreset !== 'iso' && tsCfg.formatPreset !== 'iso-seconds' && tsCfg.formatPreset !== 'locale') tsCfg.formatPreset = 'iso';
-    if (typeof tsCfg.customFormat !== 'string') tsCfg.customFormat = '';
-    tsCfg.allowCustomFormat = tsCfg.allowCustomFormat === true;
-
-    // Customizer v2: set server defaults and run full pipeline
-    // (reads localStorage overrides → merges → sets SITE_CONFIG → applies CSS → dispatches theme-changed)
-    if (window._customizerV2) {
-      window._customizerV2.init(cfg);
-    } else {
-      // Fallback if customize-v2.js didn't load
-      window.SITE_CONFIG = cfg;
-    }
-  }).catch(() => {
-    window.SITE_CONFIG = { timestamps: { defaultMode: 'ago', timezone: 'local', formatPreset: 'iso', customFormat: '', allowCustomFormat: false } };
-    if (window._customizerV2) window._customizerV2.init(window.SITE_CONFIG);
-  });
+  // Theme config plus the operator's display defaults (#969), then the
+  // customizer v2 pipeline.
+  bootSiteConfig(fetch('/api/config/theme', { cache: 'no-store' }), window.MeshConfigReady);
 
   // Navigate immediately — don't gate data-fetching pages on cosmetic theme fetch
   if (!location.hash || location.hash === '#/') location.hash = '#/home';
   else navigate();
 });
+
+/**
+ * #969 — starts the customizer once both config fetches have settled: the
+ * theme (/api/config/theme) and the client config (/api/config/client,
+ * window.MeshConfigReady), which carries the operator's `timestamps` and
+ * `moments.display` (roles.js keeps them as MC_OPERATOR_DISPLAY). One
+ * init with every server default, so the customizer's phantom-override
+ * cleanup never compares a viewer's value against a default that is about
+ * to change. Either fetch may fail: a missing theme is {}, missing
+ * operator values are the built-ins.
+ * @param {Promise<Response>} themeRequest - the /api/config/theme fetch
+ * @param {Promise} clientReady - window.MeshConfigReady
+ * @returns {Promise<Object>} the config handed to the customizer
+ */
+function bootSiteConfig(themeRequest, clientReady) {
+  return Promise.all([
+    Promise.resolve(themeRequest).then(r => r.json()).catch(() => null),
+    Promise.resolve(clientReady).catch(() => {}),
+  ]).then(([theme]) => {
+    // Customizer v2: set server defaults and run full pipeline
+    // (reads localStorage overrides → merges → sets SITE_CONFIG → applies CSS → dispatches theme-changed)
+    const cfg = window.withOperatorDisplayDefaults(theme, window.MC_OPERATOR_DISPLAY);
+    if (window._customizerV2) window._customizerV2.init(cfg);
+    else window.SITE_CONFIG = cfg; // fallback if customize-v2.js didn't load
+    return cfg;
+  });
+}
+window.bootSiteConfig = bootSiteConfig;
 
 /**
  * Reusable ARIA tab-bar initialiser.
@@ -2141,60 +2589,63 @@ function initTabBar(container, onChange) {
   });
 }
 
+// #258: columns are measured from at most COL_MEASURE_MAX_ROWS body rows. A body
+// with fewer than COL_MEASURE_MIN_ROWS usable rows only gives provisional widths.
+const COL_MEASURE_MAX_ROWS = 30;
+const COL_MEASURE_MIN_ROWS = 5;
+
 /**
- * Make table columns resizable with drag handles. Widths saved to localStorage.
- * Call after table is in DOM. Re-call safe (idempotent per table).
- * @param {string} tableSelector - CSS selector for the table
- * @param {string} storageKey - localStorage key for persisted widths
+ * #258: the body rows a column measurement can use, i.e. rows with exactly one
+ * cell per header cell. A row that spans columns (a virtual-scroll spacer, "No
+ * packets found", a group-detail row) belongs to no single column; measured by
+ * index, it used to inflate column 0.
  */
-function makeColumnsResizable(tableSelector, storageKey) {
-  const table = document.querySelector(tableSelector);
-  if (!table) return;
-  const thead = table.querySelector('thead');
-  if (!thead) return;
-  const ths = Array.from(thead.querySelectorAll('tr:first-child th'));
-  if (ths.length < 2) return;
-
-  if (table.dataset.resizable) return;
-  table.dataset.resizable = '1';
-  table.style.tableLayout = 'fixed';
-
-  const containerW = table.parentElement.clientWidth;
-  const saved = localStorage.getItem(storageKey);
-  let widths;
-
-  if (saved) {
-    try { widths = JSON.parse(saved); } catch { widths = null; }
-    // Validate: must be array of correct length with values summing to ~100 (percentages)
-    if (widths && Array.isArray(widths) && widths.length === ths.length) {
-      const sum = widths.reduce((s, w) => s + w, 0);
-      if (sum > 90 && sum < 110) {
-        // Saved percentages — apply directly
-        table.style.tableLayout = 'fixed';
-        table.style.width = '100%';
-        ths.forEach((th, i) => { th.style.width = widths[i] + '%'; });
-        // Skip measurement, jump to adding handles
-        addResizeHandles();
-        return;
-      }
+function columnMeasureRows(tbody, colCount, limit) {
+  const out = [];
+  if (!tbody) return out;
+  for (const row of tbody.rows) {
+    const cells = row.children;
+    if (cells.length !== colCount) continue;
+    let spans = false;
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i].colSpan > 1) { spans = true; break; }
     }
-    widths = null; // Force remeasure
+    if (spans) continue;
+    out.push(row);
+    if (out.length >= limit) break;
   }
+  return out;
+}
 
-  if (!widths) {
-    // Measure actual max content width per column by scanning visible rows
-    const tbody = table.querySelector('tbody');
-    const rows = tbody ? Array.from(tbody.querySelectorAll('tr')).slice(0, 30) : [];
+/** Saved column widths (percentages) for storageKey, or null if none are valid. */
+function readSavedColumnWidths(storageKey, colCount) {
+  const saved = localStorage.getItem(storageKey);
+  if (!saved) return null;
+  let widths;
+  try { widths = JSON.parse(saved); } catch { return null; }
+  if (!Array.isArray(widths) || widths.length !== colCount) return null;
+  const sum = widths.reduce((s, w) => s + w, 0);
+  return sum > 90 && sum < 110 ? widths : null;
+}
 
-    // Temporarily set auto layout to measure
+// Max content width per column (header + rows), measured in auto layout without
+// wrapping. TableResponsive's column hiding is lifted while measuring: the first
+// measure runs before TableResponsive.register(), and a re-measure (#258) runs
+// before it has marked the newly rendered cells, so without that the header and
+// the rows would disagree on which columns exist.
+function measureColumnWidths(table, ths, rows) {
+  const tr = window.TableResponsive;
+  const measure = () => {
     table.style.tableLayout = 'auto';
     table.style.width = 'auto';
-    // Remove nowrap temporarily so we get true content width
+    // The resize handles stick out of their th (right: -4px), which would add
+    // to its scrollWidth; the first measure runs before they exist.
+    const handles = table.querySelectorAll('.col-resize-handle');
+    handles.forEach(h => { h.style.display = 'none'; });
+    // Remove wrapping temporarily so we get true content width
     const cells = table.querySelectorAll('td, th');
     cells.forEach(c => { c.dataset.origWs = c.style.whiteSpace || ''; c.style.whiteSpace = 'nowrap'; });
-
-    // Measure each column's max content width across header + rows
-    widths = ths.map((th, i) => {
+    const widths = ths.map((th, i) => {
       let maxW = th.scrollWidth;
       rows.forEach(row => {
         const td = row.children[i];
@@ -2202,11 +2653,16 @@ function makeColumnsResizable(tableSelector, storageKey) {
       });
       return maxW + 4; // small padding buffer
     });
-
     cells.forEach(c => { c.style.whiteSpace = c.dataset.origWs || ''; delete c.dataset.origWs; });
-  }
+    handles.forEach(h => { h.style.display = ''; });
+    return widths;
+  };
+  return tr && typeof tr.unhidden === 'function' ? tr.unhidden(table, measure) : measure();
+}
 
-  // Now fit to container: if total > container, squish widest first
+// Fit measured widths to the container: if the total is too wide, squish the
+// widest columns first; if there is room left, give it to the 2 widest.
+function fitColumnWidths(widths, containerW) {
   const totalNeeded = widths.reduce((s, w) => s + w, 0);
   const finalWidths = [...widths];
 
@@ -2244,12 +2700,71 @@ function makeColumnsResizable(tableSelector, storageKey) {
     const topTotal = topN.reduce((s, x) => s + x.w, 0);
     topN.forEach(x => { finalWidths[x.i] += Math.round(surplus * (x.w / topTotal)); });
   }
+  return finalWidths;
+}
 
+// Measure the columns from `rows` and set them as percentages of the table.
+function applyMeasuredColumnWidths(table, ths, rows) {
+  const containerW = table.parentElement.clientWidth;
+  const finalWidths = fitColumnWidths(measureColumnWidths(table, ths, rows), containerW);
   table.style.width = '100%';
   const totalFinal = finalWidths.reduce((s, w) => s + w, 0);
   ths.forEach((th, i) => { th.style.width = (finalWidths[i] / totalFinal * 100) + '%'; });
+}
 
+/**
+ * Make table columns resizable with drag handles. Widths saved to localStorage.
+ * Call after table is in DOM. Re-call safe (idempotent per table).
+ * Without saved widths the columns are measured from the header and the first
+ * body rows; if the body has too few rows for that, once more when it fills (#258).
+ * @param {string} tableSelector - CSS selector for the table
+ * @param {string} storageKey - localStorage key for persisted widths
+ */
+function makeColumnsResizable(tableSelector, storageKey) {
+  const table = document.querySelector(tableSelector);
+  if (!table) return;
+  const thead = table.querySelector('thead');
+  if (!thead) return;
+  const ths = Array.from(thead.querySelectorAll('tr:first-child th'));
+  if (ths.length < 2) return;
+
+  if (table.dataset.resizable) return;
+  table.dataset.resizable = '1';
+  table.style.tableLayout = 'fixed';
+
+  const saved = readSavedColumnWidths(storageKey, ths.length);
+  if (saved) {
+    // Saved percentages — apply directly, no measurement
+    table.style.width = '100%';
+    ths.forEach((th, i) => { th.style.width = saved[i] + '%'; });
+    addResizeHandles();
+    return;
+  }
+
+  const tbody = table.querySelector('tbody');
+  const authoredWidths = ths.map(th => th.style.width);
+  const rows = columnMeasureRows(tbody, ths.length, COL_MEASURE_MAX_ROWS);
+  applyMeasuredColumnWidths(table, ths, rows);
   addResizeHandles();
+
+  // #258: an (almost) empty first render, e.g. a quiet packets time window,
+  // only gives provisional widths. Measure once more when real rows arrive,
+  // unless the user has saved widths by then. Until then each body render costs
+  // a cheap guard; after the re-measure the observer is gone.
+  if (tbody && rows.length < COL_MEASURE_MIN_ROWS && typeof MutationObserver === 'function') {
+    const filled = new MutationObserver(() => {
+      if (!table.isConnected || readSavedColumnWidths(storageKey, ths.length)) { filled.disconnect(); return; }
+      if (tbody.rows.length < COL_MEASURE_MIN_ROWS) return;
+      const rowsNow = columnMeasureRows(tbody, ths.length, COL_MEASURE_MAX_ROWS);
+      if (rowsNow.length < COL_MEASURE_MIN_ROWS) return;
+      filled.disconnect();
+      // Measure as the first time: the widths the page itself gave the header
+      // cells, not the provisional ones.
+      ths.forEach((th, i) => { th.style.width = authoredWidths[i]; });
+      applyMeasuredColumnWidths(table, ths, rowsNow);
+    });
+    filled.observe(tbody, { childList: true });
+  }
 
   function addResizeHandles() {
   // Add resize handles
@@ -2297,6 +2812,8 @@ function makeColumnsResizable(tableSelector, storageKey) {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
+    // Anchor the handle to static headers without overriding sticky headers.
+    if (getComputedStyle(th).position === 'static') th.style.position = 'relative';
     th.appendChild(handle);
   });
   } // end addResizeHandles

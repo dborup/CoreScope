@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,31 +8,24 @@ import (
 	"time"
 )
 
-// captureNeighborGraphRejectLog redirects the global logger to a buffer for
-// the life of the test (restored via t.Cleanup, matching this package's
-// existing log.SetOutput test convention — see schema_degradation_per_store_test.go)
-// and returns a function that extracts just the
+// captureNeighborGraphRejectLog redirects the global logger into the shared
+// locked capture for the life of the test (restored via t.Cleanup) and
+// returns a function that extracts just the
 // "[neighbor-graph] reject geo-far edge" lines, so incidental log output
 // from elsewhere in the build doesn't make callers flaky.
 //
-// Safe under concurrent log.Printf callers: the standard logger serializes
-// each Output() call (format + single Write) behind its own mutex, so a
-// plain bytes.Buffer never sees overlapping writes.
+// The capture must be locked (#301, #310): callers read it while the logger
+// still points at it. The standard logger serializes each Output() call
+// against the other writers, but it does not order a write against this
+// read, and goroutines from an earlier test keep logging into whatever
+// buffer is installed. A plain bytes.Buffer is therefore a data race, not a
+// safe shortcut -- see TestNeighborGraphRejectLogCapture_ReadDuringConcurrentLogging_310.
 func captureNeighborGraphRejectLog(t *testing.T) func() []string {
 	t.Helper()
-	var buf bytes.Buffer
-	prevOut := log.Writer()
-	prevFlags := log.Flags()
-	prevPrefix := log.Prefix()
-	log.SetOutput(&buf)
-	t.Cleanup(func() {
-		log.SetOutput(prevOut)
-		log.SetFlags(prevFlags)
-		log.SetPrefix(prevPrefix)
-	})
+	read := newLogCapture(t)
 	return func() []string {
 		var lines []string
-		for _, l := range strings.Split(buf.String(), "\n") {
+		for _, l := range strings.Split(read(), "\n") {
 			if strings.Contains(l, "[neighbor-graph] reject geo-far edge") {
 				lines = append(lines, l)
 			}

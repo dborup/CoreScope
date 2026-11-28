@@ -22,3 +22,38 @@ func IsTransportRoute(routeType int) bool {
 func PathBytesAreHops(payloadType byte) bool {
 	return payloadType != PayloadTRACE
 }
+
+// Route mask bits for transmissions.route_mask (#89): bit r is set when a
+// frame carrying raw route type r (header bits 1-0) was observed for the
+// transmission's content hash. The mask is monotonic: bits are OR-ed in and
+// never cleared.
+const (
+	RouteMaskFlood  = int64(1)<<RouteTransportFlood | int64(1)<<RouteFlood   // routes 0 and 1
+	RouteMaskDirect = int64(1)<<RouteDirect | int64(1)<<RouteTransportDirect // routes 2 and 3
+	RouteMaskAll    = RouteMaskFlood | RouteMaskDirect
+)
+
+// RouteTypeFromHeader returns the route type carried in the low two bits of
+// a packet header byte (firmware src/Packet.h PH_ROUTE_MASK).
+func RouteTypeFromHeader(header byte) int {
+	return int(header & 0x03)
+}
+
+// RouteTypeFromRawHex returns the route type of a hex-encoded frame's header
+// byte. ok is false when the header byte is missing or not valid hex.
+func RouteTypeFromRawHex(rawHex string) (routeType int, ok bool) {
+	header, ok := hexByteAt(rawHex, 0)
+	if !ok {
+		return 0, false
+	}
+	return RouteTypeFromHeader(header), true
+}
+
+// RouteMaskBit returns the transmissions.route_mask bit for a raw route type,
+// or 0 for values outside 0..3 (which must not set any bit).
+func RouteMaskBit(routeType int) int64 {
+	if routeType < RouteTransportFlood || routeType > RouteTransportDirect {
+		return 0
+	}
+	return int64(1) << uint(routeType)
+}

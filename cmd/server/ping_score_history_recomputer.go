@@ -111,7 +111,11 @@ const pingScoreHistoryMaxRetentionPacketDays = math.MaxInt64 / int64(24*time.Hou
 // before PruneOldPackets (cmd/ingestor/main.go) removes them, so the
 // history engine's DataPruned/permanent-unreconstructable/gap detection
 // must judge age against exactly this window -- never an invented
-// default.
+// default. One exception (#296): retention.channelDays, when longer,
+// keeps channel messages (payload_type 5, so every ping trigger's
+// transmission) and their observations past packetDays. The engine still
+// judges by packetDays, which is conservative: it may treat a window as
+// pruned while its channel data is still on disk, never the reverse.
 //
 //   - cfg == nil, or cfg.Retention == nil: returns (0, nil) -- retention
 //     is simply not configured. Matches PacketDaysOrZero's own "no

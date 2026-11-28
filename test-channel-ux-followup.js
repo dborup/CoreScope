@@ -1,7 +1,7 @@
 /**
  * Follow-up UX fixes to #1037 channel modal/sidebar redesign:
  *
- *   1. ✕ remove button must hit a 44×44px touch target (WCAG 2.5.5).
+ *   1. ✕ remove button must hit a 48×48px house touch target (#2052).
  *   2. Channel rows must NOT display "0 messages" — when no messages
  *      have been decrypted yet, omit the count entirely.
  *   3. Modal footer wording: keys removed via ✕ button, not by
@@ -25,12 +25,13 @@ function assert(cond, msg) {
   else { failed++; console.error('  ✗ ' + msg); }
 }
 
-console.log('\n=== Fix 1: ✕ touch target ≥ 44×44px (on shared .ch-icon-btn base) ===');
-const iconBtnRule = (cssSrc.match(/\.ch-icon-btn\s*\{[^}]*\}/) || [''])[0];
-assert(/min-width:\s*44px/.test(iconBtnRule),
-  '.ch-icon-btn declares min-width: 44px');
-assert(/min-height:\s*44px/.test(iconBtnRule),
-  '.ch-icon-btn declares min-height: 44px');
+console.log('\n=== Fix 1: shared touch-target sizing owns channel icon minimums ===');
+// Computed 48x48 hit areas are asserted by test-touch-targets.js. Keep the
+// component rules from silently overriding that shared policy again (#2052).
+const iconBtnRules = cssSrc.match(/(?:^|\n)[^{}]*\.ch-icon-btn\s*\{[^}]*\}/g) || [];
+assert(iconBtnRules.length > 0, '.ch-icon-btn component rules exist');
+assert(iconBtnRules.every(rule => !/min-(?:width|height)\s*:/.test(rule)),
+  '.ch-icon-btn component rules inherit minimum sizes from the shared touch-target group');
 
 console.log('\n=== Fix 2: no "0 messages" in default row ===');
 // renderChannelRow must not emit a literal "0 messages" preview when
@@ -43,8 +44,14 @@ assert(!/\$\{ch\.messageCount\s*\|\|\s*0\}\s*packets/.test(chSrc),
 console.log('\n=== Fix 3: privacy footer wording ===');
 assert(!/Clear browser data to remove stored keys/.test(chSrc),
   'old "Clear browser data to remove stored keys" copy is gone');
-assert(/Use\s+✕\s+to remove individual channels/.test(chSrc),
-  'new copy points at the ✕ button for individual key removal');
+// #354 moved Remove from an inline close button into the row's actions menu,
+// so the hint must point there, not at a close button that no longer exists.
+assert(!/Use the close button to remove individual channels/.test(chSrc),
+  'old "close button" copy is gone (no inline close button any more)');
+assert(/Use a saved channel's actions menu to share or remove it/.test(chSrc),
+  'copy points at the actions menu for individual key removal');
+assert(/ROW_MENU_ITEMS[\s\S]*?data-remove-channel[\s\S]*?ph-trash/.test(chSrc),
+  'the Remove item the copy points at renders in the actions menu with the trash icon');
 
 console.log('\n=== Fix 4: Share/reshare affordance on user-added rows ===');
 // Source-level: data attribute and helper exist. Behavior-level checks
@@ -131,9 +138,14 @@ if (renderRowSrc) {
   // automatically — no hand-rolled duplicate of the psk:* rule.
   const helperSrc = extractFn(chSrc, 'function channelDisplayName(ch');
   assert(helperSrc, 'extracted channelDisplayName source for behavior sandbox');
+  // #155: the unread badge is a shared helper too; eval the real one.
+  const badgeSrc = extractFn(chSrc, 'function renderUnreadBadge(ch)');
+  assert(badgeSrc, 'extracted renderUnreadBadge source for behavior sandbox');
   vm.createContext(sandbox);
   vm.runInContext('const PRIVATE_CHANNEL_LABEL = "Private Channel";\n' + helperSrc, sandbox);
+  vm.runInContext(badgeSrc, sandbox);
   vm.runInContext(renderRowSrc, sandbox);
+  sandbox.openRowMenuHash = null;
   const userRow = sandbox.renderChannelRow({
     hash: 'user:Crew',
     name: 'Crew',
@@ -142,12 +154,13 @@ if (renderRowSrc) {
     messageCount: 0,
     lastActivityMs: Date.now(),
   });
-  assert(/data-share-channel="user:Crew"/.test(userRow),
-    'renderChannelRow emits a share button for user-added channels');
-  assert(/aria-haspopup="dialog"/.test(userRow),
-    'share button announces it opens a dialog (aria-haspopup="dialog")');
-  assert(/data-remove-channel="user:Crew"/.test(userRow),
-    'renderChannelRow emits a remove button for user-added channels');
+  // #354: Share/Remove live in the row's overflow menu, not inline.
+  assert(/data-row-menu="user:Crew"/.test(userRow),
+    'renderChannelRow emits the actions-menu trigger for user-added channels');
+  assert(/data-share-channel[\s\S]{0,120}popup: 'dialog'/.test(chSrc),
+    'the actions menu offers Share, announcing it opens a dialog');
+  assert(/data-remove-channel/.test(chSrc) && /ROW_MENU_ITEMS/.test(chSrc),
+    'the actions menu offers Remove for user-added channels');
   assert(!/0 messages/.test(userRow) && !/your key/.test(userRow),
     'user-added preview omits "0 messages" and "your key" when no activity');
   // Non-user-added encrypted row should NOT carry share/remove.
@@ -155,8 +168,8 @@ if (renderRowSrc) {
     hash: 'abc123', name: 'Net', userAdded: false, encrypted: true,
     messageCount: 0, lastActivityMs: 0,
   });
-  assert(!/data-share-channel/.test(encRow),
-    'encrypted (non-user) rows do NOT expose a share button');
+  assert(!/data-share-channel|data-row-menu/.test(encRow),
+    'encrypted (non-user) rows do NOT expose share or the actions menu');
   assert(!/0 packets/.test(encRow),
     'encrypted preview omits "0 packets" when count is zero');
 }

@@ -40,7 +40,9 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	golang.org/x/image v0.23.0 // indirect
 	golang.org/x/sys v0.22.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.8.0 // indirect
@@ -60,3 +62,66 @@ replace github.com/meshcore-analyzer/mbcapqueue => ../../internal/mbcapqueue
 require github.com/meshcore-analyzer/regions v0.0.0
 
 replace github.com/meshcore-analyzer/regions => ../../internal/regions
+
+require github.com/meshcore-analyzer/channelregistry v0.0.0
+
+replace github.com/meshcore-analyzer/channelregistry => ../../internal/channelregistry
+
+require github.com/meshcore-analyzer/brokerurl v0.0.0
+
+replace github.com/meshcore-analyzer/brokerurl => ../../internal/brokerurl
+
+require github.com/meshcore-analyzer/pprofbind v0.0.0
+
+replace github.com/meshcore-analyzer/pprofbind => ../../internal/pprofbind
+
+require github.com/meshcore-analyzer/dhm v0.0.0
+
+replace github.com/meshcore-analyzer/dhm => ../../internal/dhm
+
+require github.com/meshcore-analyzer/mastedb v0.0.0
+
+replace github.com/meshcore-analyzer/mastedb => ../../internal/mastedb
+
+// internal/profilecard (#727): the share-card renderer. It draws through
+// internal/cardkit (#811 M1), which brings golang.org/x/image, pinned
+// there at v0.23.0 to keep go 1.22, and golang.org/x/text.
+require github.com/meshcore-analyzer/profilecard v0.0.0
+
+replace github.com/meshcore-analyzer/profilecard => ../../internal/profilecard
+
+// internal/nodecard (#811 M2): the node share-card renderer, served by
+// GET /api/nodes/{pubkey}/card.png since #811 M3.
+require github.com/meshcore-analyzer/nodecard v0.0.0
+
+replace github.com/meshcore-analyzer/nodecard => ../../internal/nodecard
+
+// internal/packetcard (#812 M1): the packet share-card renderer, served by
+// GET /api/packets/{hash}/card.png since #812 M2.
+require github.com/meshcore-analyzer/packetcard v0.0.0
+
+replace github.com/meshcore-analyzer/packetcard => ../../internal/packetcard
+
+require github.com/meshcore-analyzer/cardkit v0.0.0 // indirect
+
+replace github.com/meshcore-analyzer/cardkit => ../../internal/cardkit
+
+require github.com/meshcore-analyzer/copdem v0.0.0
+
+replace github.com/meshcore-analyzer/copdem => ../../internal/copdem
+
+require github.com/meshcore-analyzer/heritage v0.0.0
+
+replace github.com/meshcore-analyzer/heritage => ../../internal/heritage
+
+require github.com/meshcore-analyzer/buildings v0.0.0
+
+replace github.com/meshcore-analyzer/buildings => ../../internal/buildings
+
+require github.com/meshcore-analyzer/skraafoto v0.0.0
+
+replace github.com/meshcore-analyzer/skraafoto => ../../internal/skraafoto
+
+require github.com/meshcore-analyzer/configkey v0.0.0
+
+replace github.com/meshcore-analyzer/configkey => ../../internal/configkey

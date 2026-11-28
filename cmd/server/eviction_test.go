@@ -17,9 +17,8 @@ func makeTestStore(count int, startTime time.Time, intervalMin int) *PacketStore
 		byObsID:       make(map[int]*StoreObs, count*2),
 		byObserver:    make(map[string][]*StoreObs),
 		byNode:        make(map[string][]*StoreTx),
-		nodeHashes:    make(map[string]map[string]bool),
+		nodeTxIDs:    newNodeTxIndex(),
 		byPayloadType: make(map[int][]*StoreTx),
-		spIndex:       make(map[string]int),
 		distHops:      make([]distHopRecord, 0),
 		distPaths:     make([]distPathRecord, 0),
 		rfCache:       make(map[string]*cachedResult),
@@ -72,22 +71,14 @@ func makeTestStore(count int, startTime time.Time, intervalMin int) *PacketStore
 		store.byPayloadType[pt] = append(store.byPayloadType[pt], tx)
 
 		// Index by node
-		pk := fmt.Sprintf("pk%04d", i)
-		if store.nodeHashes[pk] == nil {
-			store.nodeHashes[pk] = make(map[string]bool)
-		}
-		store.nodeHashes[pk][hash] = true
-		store.byNode[pk] = append(store.byNode[pk], tx)
+		store.addToByNode(tx, fmt.Sprintf("pk%04d", i))
 
 		// Add to distance index
 		store.distHops = append(store.distHops, distHopRecord{tx: tx, Hash: hash})
 		store.distPaths = append(store.distPaths, distPathRecord{tx: tx, Hash: hash})
 
-		// Subpath index
-		addTxToSubpathIndex(store.spIndex, tx)
-
 		// Track bytes for self-accounting
-		store.trackedBytes += estimateStoreTxBytes(tx)
+		store.trackedBytes += rechargeTx(tx)
 		for _, obs := range tx.Observations {
 			store.trackedBytes += estimateStoreObsBytes(obs)
 		}
@@ -221,8 +212,8 @@ func TestEvictStale_CleansNodeIndexes(t *testing.T) {
 	if len(store.byNode) != 10 {
 		t.Fatalf("expected 10 nodes indexed, got %d", len(store.byNode))
 	}
-	if len(store.nodeHashes) != 10 {
-		t.Fatalf("expected 10 nodeHashes, got %d", len(store.nodeHashes))
+	if len(store.nodeTxIDs) != 10 {
+		t.Fatalf("expected 10 nodeTxIDs, got %d", len(store.nodeTxIDs))
 	}
 
 	evicted := store.EvictStale()
@@ -234,8 +225,8 @@ func TestEvictStale_CleansNodeIndexes(t *testing.T) {
 	if len(store.byNode) != 0 {
 		t.Fatalf("expected 0 nodes, got %d", len(store.byNode))
 	}
-	if len(store.nodeHashes) != 0 {
-		t.Fatalf("expected 0 nodeHashes, got %d", len(store.nodeHashes))
+	if len(store.nodeTxIDs) != 0 {
+		t.Fatalf("expected 0 nodeTxIDs, got %d", len(store.nodeTxIDs))
 	}
 	if len(store.byPayloadType) != 0 {
 		t.Fatalf("expected 0 payload types, got %d", len(store.byPayloadType))
@@ -259,9 +250,8 @@ func TestEvictStale_CleansResolvedPathNodeIndexes(t *testing.T) {
 		byObsID:       make(map[int]*StoreObs),
 		byObserver:    make(map[string][]*StoreObs),
 		byNode:        make(map[string][]*StoreTx),
-		nodeHashes:    make(map[string]map[string]bool),
+		nodeTxIDs:    newNodeTxIndex(),
 		byPayloadType: make(map[int][]*StoreTx),
-		spIndex:       make(map[string]int),
 		distHops:      make([]distHopRecord, 0),
 		distPaths:     make([]distPathRecord, 0),
 		rfCache:       make(map[string]*cachedResult),
@@ -314,8 +304,8 @@ func TestEvictStale_CleansResolvedPathNodeIndexes(t *testing.T) {
 	if len(store.byNode[relayPK]) != 1 {
 		t.Fatalf("expected 1 entry in byNode[%s], got %d", relayPK, len(store.byNode[relayPK]))
 	}
-	if !store.nodeHashes[relayPK][tx.Hash] {
-		t.Fatalf("expected nodeHashes[%s] to contain %s", relayPK, tx.Hash)
+	if !store.nodeTxIDs[relayPK].has(tx) {
+		t.Fatalf("expected nodeTxIDs[%s] to contain %d", relayPK, tx.ID)
 	}
 
 	evicted := store.RunEviction()
@@ -327,8 +317,8 @@ func TestEvictStale_CleansResolvedPathNodeIndexes(t *testing.T) {
 	if len(store.byNode[relayPK]) != 0 {
 		t.Fatalf("expected byNode[%s] to be empty after eviction, got %d", relayPK, len(store.byNode[relayPK]))
 	}
-	if _, exists := store.nodeHashes[relayPK]; exists {
-		t.Fatalf("expected nodeHashes[%s] to be deleted after eviction", relayPK)
+	if _, exists := store.nodeTxIDs[relayPK]; exists {
+		t.Fatalf("expected nodeTxIDs[%s] to be deleted after eviction", relayPK)
 	}
 	// Verify resolved pubkey index is cleaned up
 	h := resolvedPubkeyHash(relayPK)
@@ -565,14 +555,11 @@ func TestEstimateStoreTxBytes(t *testing.T) {
 		PathJSON:    `["aa","bb"]`,
 	}
 	est := estimateStoreTxBytes(tx)
-	// Manual calculation: base + string lengths + index entries + perTxMaps + path hops + subpaths
+	// Manual calculation: base + string lengths + index entries + path hops
 	hops := int64(len(txGetParsedPath(tx)))
 	manualCalc := int64(storeTxBaseBytes) + int64(len(tx.RawHex)+len(tx.Hash)+len(tx.DecodedJSON)+len(tx.PathJSON)) + int64(numIndexesPerTx*indexEntryBytes)
-	manualCalc += perTxMapsBytes
+	manualCalc += int64(decodedCacheFactor * len(tx.DecodedJSON))
 	manualCalc += hops * perPathHopBytes
-	if hops > 1 {
-		manualCalc += (hops * (hops - 1) / 2) * perSubpathEntryBytes
-	}
 	if est != manualCalc {
 		t.Fatalf("estimateStoreTxBytes = %d, want %d (manual calc)", est, manualCalc)
 	}
@@ -587,8 +574,9 @@ func TestEstimateStoreObsBytes(t *testing.T) {
 		PathJSON:   `["aa"]`,
 	}
 	est := estimateStoreObsBytes(obs)
-	// storeObsBaseBytes(192) + len(ObserverID=6) + len(PathJSON=6) + 2*48(96) = 300
-	expected := int64(192 + 6 + 6 + 2*48)
+	// storeObsBaseBytes(176) + len(ObserverID=6) + len(PathJSON=6) + 2*48(96);
+	// no dedup key is allocated or charged per observation (#411)
+	expected := int64(176 + 6 + 6 + 2*48)
 	if est != expected {
 		t.Fatalf("estimateStoreObsBytes = %d, want %d", est, expected)
 	}

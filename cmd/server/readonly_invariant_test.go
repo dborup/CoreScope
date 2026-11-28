@@ -29,6 +29,9 @@ func TestServerSourceHasNoCachedRWCalls(t *testing.T) {
 		regexp.MustCompile(`\bcachedRW\s*\(`),
 		regexp.MustCompile(`mode=rw`),
 		regexp.MustCompile(`sql\.Open\([^)]*\?[^)]*_journal_mode=WAL[^)]*\)`),
+		// Setting a journal mode takes a write lock; WAL is the
+		// ingestor's to set (#576).
+		regexp.MustCompile(`_pragma=journal_mode`),
 		// The node directory is ingestor-owned; the server opens mode=ro
 		// since #1289 and may never write it.
 		//
@@ -92,6 +95,10 @@ func TestServerDBHasNoWriteMethods(t *testing.T) {
 		"PruneOldPackets",
 		"PruneOldMetrics",
 		"RemoveStaleObservers",
+		// #329 opt-in table retention: ingestor-only.
+		"PruneInactiveNodes",
+		"PruneNodeChanges",
+		"PurgeStaleObservers",
 		// #738 / one-click geo-prune: the DELETE must live on the
 		// ingestor's *Store. The server's HTTP handler now enqueues a
 		// marker file (see internal/prunequeue); it does not write.
@@ -143,7 +150,7 @@ func TestServerDBConnIsReadOnly(t *testing.T) {
 // Kept in *_test.go so it does NOT add any write capability to the
 // production server binary.
 func bootstrapMinimalDB(path string) error {
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)", path)
 	rw, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return err
@@ -202,4 +209,123 @@ func nodeTableWritePattern(verb, trailer string) *regexp.Regexp {
 		expr += `\b`
 	}
 	return regexp.MustCompile(expr)
+}
+
+// txTableWritePattern matches DML against the ingestor-owned packet tables
+// (transmissions, observations, observers, dropped_packets) and the tables
+// hung off them, in the shapes nodeTableWritePattern covers, plus the owner
+// antenna-height claims (#789 M2a) and their admin contacts (#898), which
+// only the ingestor writes.
+func txTableWritePattern(verb string) *regexp.Regexp {
+	const table = "[\"`\\[]?(transmissions|observations|observers|dropped_packets|ping_triggers|route_mask_changes|node_antenna_claims|node_claim_admin_contacts)[\"`\\]]?"
+	return regexp.MustCompile(`(?i)` + verb + `\s+` + table + `\b`)
+}
+
+// packetTableWritePatterns are the statements TestServerHasNoPacketTableWrites
+// forbids in every server source file.
+func packetTableWritePatterns() []*regexp.Regexp {
+	return []*regexp.Regexp{
+		txTableWritePattern(`INSERT\s+(OR\s+\w+\s+)?INTO`),
+		txTableWritePattern(`UPDATE(\s+OR\s+\w+)?`),
+		txTableWritePattern(`DELETE\s+FROM`),
+		txTableWritePattern(`REPLACE\s+INTO`),
+	}
+}
+
+// TestServerHasNoPacketTableWrites keeps cmd/server/ off the packet tables;
+// writing them is the ingestor's job (#1283).
+//   - #215: the content-hash migration UPDATEd transmissions/observations and
+//     DELETEd transmissions from the server's mode=ro handle. Every statement
+//     failed, was logged as a collision, and was retried at every start. It
+//     now lives in cmd/ingestor/hash_migrate.go.
+//   - #223: POST /api/packets INSERTed into transmissions, observers and
+//     observations on the same handle and answered 500. It was removed.
+//
+// INSERT, UPDATE, DELETE and REPLACE on these tables are forbidden in every
+// server source file, with no exceptions: the documented write exceptions
+// (ping_score_history.go, its own database; backup.go, VACUUM INTO) do not
+// touch them. The hash migration files (hash_migrate*.go) may not issue any
+// statement at all: no transaction or Exec on the connection either.
+func TestServerHasNoPacketTableWrites(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	everywhere := packetTableWritePatterns()
+	migrationOnly := []*regexp.Regexp{
+		regexp.MustCompile(`\.conn\.(Begin|BeginTx|Exec|ExecContext|Prepare|PrepareContext)\s*\(`),
+	}
+	var violations []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(".", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		patterns := everywhere
+		if strings.HasPrefix(name, "hash_migrate") {
+			patterns = append(append([]*regexp.Regexp{}, everywhere...), migrationOnly...)
+		}
+		for _, p := range patterns {
+			for _, loc := range p.FindAllIndex(b, -1) {
+				line := 1 + strings.Count(string(b[:loc[0]]), "\n")
+				violations = append(violations, fmt.Sprintf("%s:%d: %s", name, line, strings.Join(strings.Fields(string(b[loc[0]:loc[1]])), " ")))
+			}
+		}
+	}
+	if len(violations) > 0 {
+		t.Errorf("cmd/server/ writes the packet tables; that belongs in cmd/ingestor (#215, #223, #1283):\n  %s", strings.Join(violations, "\n  "))
+	}
+}
+
+// TestServerHasNoPacketTableWritesIsSensitive keeps the guard honest: it must
+// match the statements the old migration (#215) and the removed POST
+// handler (#223) issued, and must not match reads or look-alike tables.
+func TestServerHasNoPacketTableWritesIsSensitive(t *testing.T) {
+	matches := func(stmt string) bool {
+		for _, p := range packetTableWritePatterns() {
+			if p.MatchString(stmt) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, stmt := range []string{
+		`UPDATE transmissions SET hash = ? WHERE id = ?`,
+		`UPDATE observations SET transmission_id = ? WHERE transmission_id = ?`,
+		`DELETE FROM transmissions WHERE id = ?`,
+		`update "observations" set x = 1`,
+		`UPDATE OR IGNORE observations SET transmission_id = 1`,
+		`INSERT INTO transmissions (hash, raw_hex) VALUES (?, ?)`,
+		`INSERT OR IGNORE INTO observers (id, name, last_seen, first_seen) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO observations (transmission_id, observer_idx) VALUES (?, ?)`,
+		"insert into\n\t\"observations\" (x) values (1)",
+		`REPLACE INTO dropped_packets (id) VALUES (1)`,
+		`DELETE FROM route_mask_changes`,
+		`UPDATE node_antenna_claims SET status = 'approved'`,
+		`INSERT INTO node_antenna_claims (request_id) VALUES (?)`,
+		`DELETE FROM node_antenna_claims WHERE status = 'expired'`,
+		`DELETE FROM node_claim_admin_contacts WHERE request_id = ?`,
+		`INSERT INTO node_claim_admin_contacts (request_id, contact) VALUES (?, ?)`,
+	} {
+		if !matches(stmt) {
+			t.Errorf("the guard does not match %q", stmt)
+		}
+	}
+	for _, stmt := range []string{
+		`INSERT INTO ping_score_history_entries (a) VALUES (1)`,
+		`SELECT COUNT(*) FROM observations`,
+		`INSERT INTO observations_archive (a) VALUES (1)`,
+		`INSERT INTO observer_neighbors (a) VALUES (1)`,
+		`SELECT pubkey FROM node_antenna_claims WHERE status = 'approved'`,
+		`LEFT JOIN node_claim_admin_contacts ac ON ac.request_id = c.request_id`,
+		`tx_inserted`,
+	} {
+		if matches(stmt) {
+			t.Errorf("the guard must not match %q", stmt)
+		}
+	}
 }

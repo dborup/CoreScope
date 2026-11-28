@@ -76,6 +76,8 @@ type Store struct {
 	stmtGetTxByHash            *sql.Stmt
 	stmtInsertTransmission     *sql.Stmt
 	stmtUpdateTxFirstSeen      *sql.Stmt
+	stmtOrTxRouteMask          *sql.Stmt
+	stmtInsertRouteMaskChange  *sql.Stmt
 	stmtBumpTxLastSeen         *sql.Stmt
 	stmtInsertObservation      *sql.Stmt
 	stmtUpsertNode             *sql.Stmt
@@ -93,6 +95,22 @@ type Store struct {
 
 	sampleIntervalSec int
 	backfillWg        sync.WaitGroup
+
+	// antennaClaims proves owner antenna-height claims at advert ingest
+	// (#789 M2a); nil: no claims are matched. Set before ingest starts.
+	antennaClaims *antennaClaimRunner
+
+	// pruneMu serialises the channelDays prunes of PruneTransmissions.
+	// packetPruneFloor is the packet cutoff of the last completed one (""
+	// before the first), where the next one starts its walk (#296).
+	pruneMu          sync.Mutex
+	packetPruneFloor string
+	// firstSeenLow is the lowest first_seen InsertTransmission has written
+	// since PruneTransmissions last took it ("" for none), so a backdated
+	// row below packetPruneFloor is still walked (#296). A leaf lock: the
+	// ingest path takes it under writerMu, never under pruneMu's long hold.
+	firstSeenLowMu sync.Mutex
+	firstSeenLow   string
 
 	// prefixIdx holds the prefix → pubkey index used by the
 	// resolved_path writer (#1547). Rebuilt on startup and once per
@@ -413,6 +431,29 @@ func applySchema(db *sql.DB) error {
 			name      TEXT,
 			last_seen TEXT
 		);
+
+		-- Declared-region reports relayed on meshcore/client/{pubkey}/regions
+		-- (#126, docs/client-regions.md). One row per report, never per-target
+		-- state. The UNIQUE index makes a redelivery a no-op and also serves the
+		-- per-target read ordered by reported_at; idx_cdr_reported backs
+		-- retention, idx_cdr_collector the admin delete-client-rx erasure.
+		CREATE TABLE IF NOT EXISTS client_declared_regions (
+			id               INTEGER PRIMARY KEY AUTOINCREMENT,
+			collector_pubkey TEXT NOT NULL,
+			target_pubkey    TEXT NOT NULL,
+			regions_csv      TEXT NOT NULL,
+			truncated        INTEGER NOT NULL DEFAULT 0,
+			reported_at      TEXT NOT NULL,
+			ingested_at      TEXT NOT NULL,
+			repeater_clock   INTEGER,
+			lat              REAL,
+			lon              REAL,
+			pos_acc_m        REAL,
+			mqtt_source      TEXT NOT NULL DEFAULT '',
+			UNIQUE(target_pubkey, reported_at, collector_pubkey)
+		);
+		CREATE INDEX IF NOT EXISTS idx_cdr_reported ON client_declared_regions(reported_at);
+		CREATE INDEX IF NOT EXISTS idx_cdr_collector ON client_declared_regions(collector_pubkey);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("base schema: %w", err)
@@ -849,20 +890,36 @@ func applySchema(db *sql.DB) error {
 func (s *Store) prepareStatements() error {
 	var err error
 
-	s.stmtGetTxByHash, err = s.db.Prepare("SELECT id, first_seen FROM transmissions WHERE hash = ?")
+	s.stmtGetTxByHash, err = s.db.Prepare("SELECT id, first_seen, route_mask FROM transmissions WHERE hash = ?")
 	if err != nil {
 		return err
 	}
 
 	s.stmtInsertTransmission, err = s.db.Prepare(`
-		INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json, channel_hash, scope_name, from_pubkey, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json, channel_hash, scope_name, from_pubkey, last_seen, route_mask)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
 	}
 
 	s.stmtUpdateTxFirstSeen, err = s.db.Prepare("UPDATE transmissions SET first_seen = ? WHERE id = ?")
+	if err != nil {
+		return err
+	}
+
+	// #89: OR a newly observed route bit into a known route_mask. The OR runs
+	// in SQL, so it is atomic against any other writer; NULL rows are left to
+	// the backfill (backfillTxRouteMask), which owns un-backfilled legacy rows.
+	s.stmtOrTxRouteMask, err = s.db.Prepare(`UPDATE transmissions SET route_mask = route_mask | ?
+		WHERE id = ? AND route_mask IS NOT NULL AND (route_mask & ?) = 0`)
+	if err != nil {
+		return err
+	}
+	// Change log for running servers (route_mask_changes): the transmission's
+	// full mask as it is inside the current transaction, right after the OR.
+	s.stmtInsertRouteMaskChange, err = s.db.Prepare(`INSERT INTO route_mask_changes (transmission_id, route_mask, created_at)
+		SELECT id, route_mask, ? FROM transmissions WHERE id = ? AND route_mask IS NOT NULL`)
 	if err != nil {
 		return err
 	}
@@ -1020,6 +1077,36 @@ func (s *Store) prepareStatements() error {
 	return nil
 }
 
+// pathHopsTransmitted reports whether data's path lists relays that already
+// transmitted the packet, which is what makes a hop evidence of liveness.
+// Two conditions, both read off this observation's own decoded header:
+//
+//   - the payload type must not repurpose the path bytes. A TRACE's header
+//     path carries per-hop SNR (Mesh.cpp:60-61) and the decoder replaces the
+//     hops with the route the trace was asked to take (BuildPacketData), so
+//     those hops name nodes the packet was aimed at, not nodes that sent it.
+//     That is packetpath.PathBytesAreHops.
+//   - the route must be FLOOD or TRANSPORT_FLOOD. A flood forwarder appends
+//     its own hash as it retransmits (Mesh::routeRecvPacket), so the path is
+//     a record of who transmitted. A direct route's path is the remaining
+//     planned route and each forwarder strips itself from the FRONT
+//     (Mesh::removeSelfFromPath), so its hops are still to come.
+//
+// Without this gate, tracing or direct-messaging a switched-off repeater
+// refreshed its last_seen and kept it looking recently heard (#623, upstream
+// 2308/2307). It is the same rule deriveHeardKey applies to RX capture
+// (client_reception.go) and the server to confirmed relays
+// (txHasObservedFloodPath in cmd/server/node_activity.go).
+//
+// The gate covers the touch only: observations.resolved_path is still written
+// for every observation, so hop analytics are unchanged.
+func pathHopsTransmitted(data *PacketData) bool {
+	if !packetpath.PathBytesAreHops(byte(data.PayloadType)) {
+		return false
+	}
+	return isFloodRoute(data.RouteType)
+}
+
 // touchRelayNodesLocked refreshes nodes.last_seen for nodes observed as
 // relay hops, so a node that forwards traffic stays fresh even when it
 // adverts rarely or not at all.
@@ -1033,10 +1120,11 @@ func (s *Store) prepareStatements() error {
 // since that refactor (the error was discarded at the call site) and is
 // removed in this change.
 //
-// Callers pass the resolved pubkeys already computed for
-// observations.resolved_path -- only unambiguously resolved hops reach
-// this function, so a 1-byte prefix collision cannot keep a silent node
-// alive. resolvedPubkeys already dedups, so no second pass here.
+// Callers pass only unique-prefix results from resolvePath, deduplicated
+// by resolvedPubkeys, so a prefix collision cannot keep a silent node alive.
+// That is the server's rule for relay evidence (confirmedRelayKey in
+// cmd/server/node_activity.go). The contextual resolution stored in
+// observations.resolved_path must not refresh liveness (#897).
 //
 // Never inserts: the UPDATE matches an existing row or does nothing.
 // Never rewinds: the last_seen guard makes out-of-order ingest a no-op.
@@ -1126,12 +1214,15 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	// Check for existing transmission
 	var existingID int64
 	var existingFirstSeen string
-	err := s.stmtGetTxByHash.QueryRow(hash).Scan(&existingID, &existingFirstSeen)
+	var existingMask sql.NullInt64
+	routeBit := packetpath.RouteMaskBit(data.RouteType)
+	err := s.stmtGetTxByHash.QueryRow(hash).Scan(&existingID, &existingFirstSeen, &existingMask)
 	if err == nil {
 		// Existing transmission
 		txID = existingID
 		if rxTime < existingFirstSeen {
 			_, _ = s.stmtUpdateTxFirstSeen.Exec(rxTime, txID)
+			s.noteFirstSeen(rxTime)
 		}
 	} else {
 		// New transmission
@@ -1143,6 +1234,7 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 			scopeNameForDB(data),
 			nilIfEmpty(data.FromPubkey),
 			epochSecondsForLastSeen(rxTime),
+			routeBit,
 		)
 		if err != nil {
 			s.Stats.WriteErrors.Add(1)
@@ -1150,6 +1242,7 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		}
 		txID, _ = result.LastInsertId()
 		s.Stats.TransmissionsInserted.Add(1)
+		s.noteFirstSeen(rxTime)
 
 		// Ping-score detection: only for a brand-new CHAN transmission
 		// (payload_type 5), never re-checked on a repeat observation of
@@ -1194,30 +1287,55 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	// the ingestor now. Per #1560: use the context-aware resolver so
 	// 1-byte prefix collisions are disambiguated via NeighborGraph
 	// adjacency (anchored on from_pubkey for ADVERTs, previous hop
-	// otherwise). Empty resolved JSON → NULL via nilIfEmpty.
-	resolved := resolvePathWithContext(
-		parsePathArray(data.PathJSON),
+	// otherwise). Per #188: flood paths are also walked backwards from the
+	// observer, whose neighbour the last hop is. Empty resolved JSON → NULL
+	// via nilIfEmpty.
+	hops := parsePathArray(data.PathJSON)
+	prefixIdx := s.prefixIdx.load()
+	resolved := resolveObservationPath(
+		hops,
 		strings.ToLower(data.FromPubkey),
+		data.ObserverID,
+		data.RouteType,
 		s.neighborGraph.load(),
-		s.prefixIdx.load(),
+		prefixIdx,
 	)
 	resolvedJSON := marshalResolvedPath(resolved)
 
-	_, err = s.stmtInsertObservation.Exec(
+	obsArgs := []interface{}{
 		txID, observerIdx, data.Direction,
 		data.SNR, data.RSSI, data.Score,
 		data.PathJSON, epochTs, nilIfEmpty(data.RawHex),
 		nilIfEmpty(resolvedJSON),
-	)
+	}
+	// #89: an observation that brings a route bit its transmission does not
+	// have yet is written together with that bit, in one transaction: an
+	// observation must never be visible without its bit, and a known mask is
+	// never backfilled again. Skipped when the bit is already set or the row
+	// is still an un-backfilled legacy row (NULL), which the backfill owns.
+	if !isNew && routeBit != 0 && existingMask.Valid && existingMask.Int64&routeBit == 0 {
+		err = s.insertObservationWithRouteBit(txID, routeBit, obsArgs)
+	} else {
+		_, err = s.stmtInsertObservation.Exec(obsArgs...)
+	}
 	if err != nil {
 		s.Stats.WriteErrors.Add(1)
 		log.Printf("[db] observation insert (non-fatal): %v", err)
 	} else {
 		s.Stats.ObservationsInserted.Add(1)
-		// A resolved hop proves the node was forwarding traffic at
-		// rxTime. Refresh its last_seen so staleness/eviction logic sees
-		// relay activity, not just ADVERTs.
-		s.touchRelayNodesLocked(resolvedPubkeys(resolved), rxTime)
+		// Refresh last_seen from relay activity, not just ADVERTs. Only a
+		// flood path is that proof -- see pathHopsTransmitted (#623). And
+		// only a hop whose prefix names one relay: adjacency can settle a
+		// colliding prefix for the displayed path, but cannot prove which
+		// of the colliding nodes transmitted (#897, upstream 2334/2329).
+		// Same hops and prefix snapshot as the stored path, not the same
+		// rule: a unique hop the stored path leaves nil because of its
+		// position (the observer as last hop, the advert originator) is
+		// still touched, as confirmedRelayKey counts it on the server.
+		// That node is alive at rxTime either way (PR #899).
+		if pathHopsTransmitted(data) {
+			s.touchRelayNodesLocked(resolvedPubkeys(resolvePath(hops, prefixIdx)), rxTime)
+		}
 		// #1690: bump transmissions.last_seen so cold-load can filter on
 		// effective recency. Conditional `last_seen < ?` so we never go
 		// backwards on out-of-order ingest.
@@ -1231,6 +1349,36 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	s.Stats.WALCommits.Add(1)
 
 	return isNew, nil
+}
+
+// insertObservationWithRouteBit ORs routeBit into the transmission's
+// route_mask, inserts (or upserts) the observation and, when the mask
+// actually changed, appends a route_mask_changes row with the resulting mask,
+// all in one transaction: either everything becomes visible or nothing does.
+// The change row is what tells a running server about a bit that arrived
+// through an upsert of an existing observation row (same id, so its
+// new-observation poll never sees it). Caller holds writerMu. The pool has a
+// single connection, which this transaction holds until it ends: every
+// statement in between must run on dbTx, never on s.db.
+func (s *Store) insertObservationWithRouteBit(txID, routeBit int64, obsArgs []interface{}) error {
+	dbTx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin route_mask transaction: %w", err)
+	}
+	defer dbTx.Rollback() // no-op after a successful Commit
+	res, err := dbTx.Stmt(s.stmtOrTxRouteMask).Exec(routeBit, txID, routeBit)
+	if err != nil {
+		return fmt.Errorf("route_mask update: %w", err)
+	}
+	if _, err := dbTx.Stmt(s.stmtInsertObservation).Exec(obsArgs...); err != nil {
+		return err
+	}
+	if changed, _ := res.RowsAffected(); changed > 0 {
+		if _, err := dbTx.Stmt(s.stmtInsertRouteMaskChange).Exec(time.Now().Unix(), txID); err != nil {
+			return fmt.Errorf("route_mask change row: %w", err)
+		}
+	}
+	return dbTx.Commit()
 }
 
 // UpsertNode inserts or updates a node.
@@ -1411,10 +1559,83 @@ func (s *Store) UpsertObserverAt(id, name, iata string, meta *ObserverMeta, last
 	if lastSeen == "" {
 		lastSeen = ingestNow
 	}
-	normalizedIATA := strings.TrimSpace(strings.ToUpper(iata))
+	// #338: bound the display-text metadata before it is stored. The id is NOT
+	// touched here — it is validated and rejected (never truncated) at the
+	// handleMessage gate, upstream of every caller; see
+	// observer_metadata_bounds.go. name/region/model/firmware/client_version/
+	// radio are normalized (controls stripped, rune-truncated) so no untrusted
+	// publisher string reaches the row unbounded, and so the bound holds for
+	// every caller of this method, not just the status/packet handlers.
+	name = normalizeObserverText(name, maxObserverNameRunes)
+	normalizedIATA := normalizeObserverRegion(iata)
+	meta = boundObserverMeta(meta)
 
-	var model, firmware, clientVersion, radio interface{}
-	var batteryMv, uptimeSecs, noiseFloor, canRelay interface{}
+	model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay := observerMetaColumns(meta)
+
+	_, err := s.stmtUpsertObserver.Exec(
+		id, name, normalizedIATA, lastSeen, lastSeen, model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay, canRelay,
+		name, normalizedIATA, ingestNow, lastSeen, model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay, canRelay,
+	)
+	if err != nil {
+		s.Stats.WriteErrors.Add(1)
+		return err
+	}
+	s.Stats.ObserverUpserts.Add(1)
+
+	// Reactivate if this observer was previously marked inactive
+	s.db.Exec(`UPDATE observers SET inactive = 0 WHERE id = ? AND inactive = 1`, id)
+	return nil
+}
+
+// UpsertObserverRetained applies the metadata from a RETAINED status message
+// without treating it as a sign of life. The broker replays retained messages
+// on every subscribe, so an ingestor restart would otherwise stamp last_seen
+// with the restart time for every observer that ever published one — making
+// dead observers permanently un-ageable by RemoveStaleObservers, and undoing
+// any inactive flag it did manage to set.
+//
+// Deliberately narrower than UpsertObserverAt: it updates metadata columns on
+// an existing row only. It does not advance last_seen, does not clear
+// inactive, does not bump packet_count, and does not INSERT — a retained-only
+// observer the analyzer has never heard from live describes a past that may be
+// months old and does not belong in the list. A live message from the same
+// observer arrives moments later and creates the row through the normal path.
+func (s *Store) UpsertObserverRetained(id, name, iata string, meta *ObserverMeta) error {
+	// #338: same display-text bounds as UpsertObserverAt (see the note there);
+	// the id is validated at the handleMessage gate, not rewritten here.
+	name = normalizeObserverText(name, maxObserverNameRunes)
+	normalizedIATA := normalizeObserverRegion(iata)
+	meta = boundObserverMeta(meta)
+	model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay := observerMetaColumns(meta)
+
+	_, err := s.db.Exec(`
+		UPDATE observers SET
+			name = COALESCE(?, name),
+			iata = COALESCE(?, iata),
+			model = COALESCE(?, model),
+			firmware = COALESCE(?, firmware),
+			client_version = COALESCE(?, client_version),
+			radio = COALESCE(?, radio),
+			battery_mv = COALESCE(?, battery_mv),
+			uptime_secs = COALESCE(?, uptime_secs),
+			noise_floor = COALESCE(?, noise_floor),
+			can_relay = COALESCE(?, can_relay),
+			can_relay_seen = CASE WHEN ? IS NULL THEN can_relay_seen ELSE 1 END
+		WHERE id = ?`,
+		name, normalizedIATA, model, firmware, clientVersion, radio,
+		batteryMv, uptimeSecs, noiseFloor, canRelay, canRelay, id,
+	)
+	if err != nil {
+		s.Stats.WriteErrors.Add(1)
+		return err
+	}
+	return nil
+}
+
+// observerMetaColumns flattens an *ObserverMeta into the driver args the
+// observer upserts bind. A nil field stays nil so the COALESCE in the SQL
+// leaves the existing column untouched (#1290).
+func observerMetaColumns(meta *ObserverMeta) (model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay interface{}) {
 	if meta != nil {
 		if meta.Model != nil {
 			model = *meta.Model
@@ -1449,20 +1670,7 @@ func (s *Store) UpsertObserverAt(id, name, iata string, meta *ObserverMeta, last
 			}
 		}
 	}
-
-	_, err := s.stmtUpsertObserver.Exec(
-		id, name, normalizedIATA, lastSeen, lastSeen, model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay, canRelay,
-		name, normalizedIATA, ingestNow, lastSeen, model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay, canRelay,
-	)
-	if err != nil {
-		s.Stats.WriteErrors.Add(1)
-		return err
-	}
-	s.Stats.ObserverUpserts.Add(1)
-
-	// Reactivate if this observer was previously marked inactive
-	s.db.Exec(`UPDATE observers SET inactive = 0 WHERE id = ? AND inactive = 1`, id)
-	return nil
+	return model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay
 }
 
 // Close checkpoints the WAL and closes the database.
@@ -1787,6 +1995,16 @@ func (s *Store) LogStats() {
 	)
 }
 
+// staleNodesWhere selects the nodes MoveStaleNodes retires: no advert in
+// nodeDays (?1 = cutoff), unless the pubkey is an observer seen since the
+// cutoff (#199). An observer never hears its own adverts, so an online
+// observer can go nodeDays without one reaching another observer. last_seen
+// stays the last advert. Observer ids arrive upper-case from the MQTT topic
+// and node keys are lower-case, hence lower() on both sides; NULL ids are
+// skipped because a single NULL makes NOT IN false for every node.
+const staleNodesWhere = `last_seen < ?1 AND lower(public_key) NOT IN (
+	SELECT lower(id) FROM observers WHERE id IS NOT NULL AND last_seen >= ?1)`
+
 // MoveStaleNodes moves nodes not seen in nodeDays to the inactive_nodes table.
 // Returns the number of nodes moved.
 func (s *Store) MoveStaleNodes(nodeDays int) (int64, error) {
@@ -1797,11 +2015,11 @@ func (s *Store) MoveStaleNodes(nodeDays int) (int64, error) {
 	}
 	defer tx.Rollback()
 
-	_, err = tx.Exec(`INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes WHERE last_seen < ?`, cutoff)
+	_, err = tx.Exec(`INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes WHERE `+staleNodesWhere, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("insert inactive: %w", err)
 	}
-	result, err := tx.Exec(`DELETE FROM nodes WHERE last_seen < ?`, cutoff)
+	result, err := tx.Exec(`DELETE FROM nodes WHERE `+staleNodesWhere, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("delete stale: %w", err)
 	}
@@ -2110,6 +2328,13 @@ func (s *Store) UpdateNodeDefaultScopeConfirmed(pubkey, scope, reportedAt string
 	if reportedAt == "" {
 		return nil
 	}
+	// #337: same bound as UpdateNodeConfiguredScope. self.default_scope is a
+	// single region name, so this is enormously generous for legitimate
+	// input; it exists to keep one number for both scope fields rather than
+	// two thresholds an operator has to remember.
+	if reportScopeTooLong(scope) {
+		return nil
+	}
 	scope = normalizeSingleScope(scope)
 	if scope == "" {
 		return nil
@@ -2136,6 +2361,14 @@ func (s *Store) UpdateNodeDefaultScopeConfirmed(pubkey, scope, reportedAt string
 	return tx.Commit()
 }
 
+// reportTSNow is the package-level clock hook normalizeReportTS reads "now"
+// from when applying the #337 future bound, following the same
+// swap-in-test/restore-in-cleanup pattern as pruneNeighborMetricsNow later in
+// this file: production always leaves this as time.Now, and the #337 tests pin
+// it to a fixed instant so "far future" is deterministic rather than racing the
+// wall clock.
+var reportTSNow = time.Now
+
 // normalizeReportTS parses an observer report timestamp and returns it in
 // canonical UTC RFC3339 form ("2006-01-02T15:04:05Z"). It accepts both the
 // firmware's fractional/offset form (e.g. "2026-07-26T09:43:48.000000+00:00")
@@ -2143,16 +2376,60 @@ func (s *Store) UpdateNodeDefaultScopeConfirmed(pubkey, scope, reportedAt string
 // the caller writes an empty configured_scope_at and skips the ordering guard;
 // this keeps every stored timestamp either canonical or empty, never a mix of
 // offset/precision formats that would break lexicographic last-write-wins.
+//
+// #337: a timestamp more than maxReportFutureSkew ahead of now is also
+// rejected, returning "" exactly like an unparseable one. Every evidence and
+// freshness path in the report pipeline funnels through here —
+// UpdateNodeConfiguredScope, UpdateNodeDefaultScopeConfirmed,
+// TouchObserverNeighborsReport, ReplaceObserverNeighbors,
+// RecordObserverNeighborMetrics and handleNeighborsReport's log line — so the
+// bound applies to all of them from one place rather than being bolted onto
+// one helper.
+//
+// The bound matters because ordering here is lexicographic on the canonical
+// RFC3339 string. A publisher-chosen timestamp far in the future therefore
+// wins every subsequent comparison until real time catches up: a single
+// year-9999 report would pin configured_scope / default_scope for millennia,
+// and would be even worse on the freshness path, where
+// TouchObserverNeighborsReport stores MAX(stored, incoming) and
+// ReplaceObserverNeighbors then skips any report whose timestamp is not the
+// stored one — permanently freezing that observer's Direct Neighbors
+// snapshot. Rejecting rather than clamping to now() is the same contract the
+// invalid-timestamp case already has (#7/#8/#9): the ingestor never
+// substitutes its own receive time for a timestamp the publisher got wrong,
+// because that would launder a bad report into fresh-looking evidence.
+//
+// A valid, in-window timestamp is NOT an authentication signal — see the
+// trust model in neighbor_report_bounds.go.
 func normalizeReportTS(raw string) string {
-	if raw == "" {
+	t, ok := parseReportTS(raw)
+	if !ok || reportTSTooFarAhead(t) {
 		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// parseReportTS is normalizeReportTS's layout-matching half, split out so
+// handleNeighborsReport can tell the two rejection reasons apart for its
+// single per-report log line (an unparseable envelope and a far-future one are
+// different observer faults) without duplicating the accepted layout list.
+func parseReportTS(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
 	}
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
 		if t, err := time.Parse(layout, raw); err == nil {
-			return t.UTC().Format(time.RFC3339)
+			return t, true
 		}
 	}
-	return ""
+	return time.Time{}, false
+}
+
+// reportTSTooFarAhead is normalizeReportTS's #337 future bound (see
+// maxReportFutureSkew for why 15 minutes). A timestamp at exactly the
+// tolerance boundary is accepted; one byte past it is not.
+func reportTSTooFarAhead(t time.Time) bool {
+	return t.After(reportTSNow().UTC().Add(maxReportFutureSkew))
 }
 
 // UpdateNodeConfiguredScope records the region scopes a node has CONFIGURED,
@@ -2191,6 +2468,15 @@ func (s *Store) UpdateNodeConfiguredScope(pubkey, scope, reportedAt string) erro
 	// usable, so malformed/missing timestamps do the least possible work.
 	reportedAt = normalizeReportTS(reportedAt)
 	if reportedAt == "" {
+		return nil
+	}
+	// #337: an oversized scope string is malformed input, not evidence.
+	// Rejected before normalization — both so a hostile string is never
+	// expanded and stored, and so an over-limit report cannot clobber
+	// previously confirmed evidence the way an accepted-but-truncated one
+	// would. Checked here rather than only at the handler so the bound holds
+	// for every caller of this method.
+	if reportScopeTooLong(scope) {
 		return nil
 	}
 	scope = normalizeConfiguredScopeList(scope)
@@ -2245,9 +2531,9 @@ func (s *Store) TouchObserverNeighborsReport(observerID, reportedAt string) erro
 // carrying enough to populate the observer_neighbors and
 // observer_neighbor_metrics tables.
 type ObserverNeighborEntry struct {
-	Pubkey       string   // lowercase, already validated non-empty by the caller
-	Scopes       string   // normalized "#"-prefixed form; empty for timeout entries
-	Status       string   // "responded" | "timeout"
+	Pubkey       string   // full 64-char node key; re-validated by both writers below (#337)
+	Scopes       string   // normalized "#"-prefixed form; empty for timeout entries and for a scope string over the #337 bound
+	Status       string   // "responded" | "timeout"; empty if the reported status was over the #337 bound
 	SNR          *float64 // dBm signal-to-noise for this direct neighbor; present regardless of status
 	HeardSecsAgo *int     // seconds since the observer last heard this neighbor directly
 }
@@ -2292,10 +2578,26 @@ func (s *Store) ReplaceObserverNeighbors(observerID string, neighbors []Observer
 	}
 	defer stmt.Close()
 	for _, n := range neighbors {
-		if n.Pubkey == "" {
+		// #337: observer_neighbors rows are inserted verbatim with no
+		// foreign key back to nodes, so a malformed key becomes a permanent
+		// row that can never join to anything. Re-validate here, at the row-
+		// creating boundary, rather than trusting the caller: the full key is
+		// preserved (lowercased, never truncated) so node identity is
+		// unchanged for every key that passes.
+		pubkey, ok := normalizeNodePubkey(n.Pubkey)
+		if !ok {
 			continue
 		}
-		if _, err := stmt.Exec(observerID, n.Pubkey, n.Scopes, n.Status, reportedAt); err != nil {
+		// #337: the same boundary bounds the two free-form strings, with
+		// the handler's policy -- keep the neighbor, drop the unusable field.
+		scopes, status := n.Scopes, n.Status
+		if storedScopeTooLong(scopes) {
+			scopes = ""
+		}
+		if reportStatusTooLong(status) {
+			status = ""
+		}
+		if _, err := stmt.Exec(observerID, pubkey, scopes, status, reportedAt); err != nil {
 			return err
 		}
 	}
@@ -2325,14 +2627,19 @@ func (s *Store) RecordObserverNeighborMetrics(observerID string, neighbors []Obs
 	}
 	defer stmt.Close()
 	for _, n := range neighbors {
-		if n.Pubkey == "" || n.SNR == nil {
+		// #337: same row-creating boundary as ReplaceObserverNeighbors, and
+		// the more important of the two — this table is append-only
+		// time-series, so a malformed key would accrue one junk row per
+		// report until retention eventually ages them out.
+		pubkey, ok := normalizeNodePubkey(n.Pubkey)
+		if !ok || n.SNR == nil {
 			continue
 		}
 		var heardSecsAgo interface{}
 		if n.HeardSecsAgo != nil {
 			heardSecsAgo = *n.HeardSecsAgo
 		}
-		if _, err := stmt.Exec(observerID, n.Pubkey, reportedAt, *n.SNR, heardSecsAgo); err != nil {
+		if _, err := stmt.Exec(observerID, pubkey, reportedAt, *n.SNR, heardSecsAgo); err != nil {
 			return err
 		}
 	}

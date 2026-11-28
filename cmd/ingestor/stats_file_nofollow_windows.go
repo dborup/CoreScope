@@ -6,3 +6,6 @@ package main
 // package. The ingestor is only deployed on Linux where the flag is enforced;
 // on Windows the flag is a no-op so the binary compiles and tests run.
 const oNoFollow = 0
+
+// oNonBlock is 0 on Windows, which has no FIFOs that open(2) could block on.
+const oNonBlock = 0

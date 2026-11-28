@@ -30,7 +30,11 @@ cmd/server/server.exe
 cmd/ingestor/ingestor.exe
 # CI trigger
 !test-fixtures/e2e-fixture.db
+# WS client history journal written by local/E2E runs against the fixture DB
+test-fixtures/ws-client-history.jsonl*
+test-fixtures/.ws-client-history-*.tmp
 corescope-server
+corescope-ingestor
 cmd/server/server
 # Local-only planning and design files
 docs/superpowers/
@@ -41,3 +45,6 @@ deploy-staging.sh
 
 __pycache__/
 *.pyc
+
+# Playwright E2E screenshot output (written by test-issue-*-e2e.js)
+e2e-screenshots/

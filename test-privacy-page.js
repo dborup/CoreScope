@@ -736,10 +736,12 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
 
   await test('test-privacy-page.js is registered exactly once in test-all.sh', async () => {
     const sh = fs.readFileSync('test-all.sh', 'utf8');
-    const lines = sh.split('\n').filter((l) => l.trim() === 'node test-privacy-page.js');
+    const lines = sh.split('\n').filter((l) => l.trim() === 'run test-privacy-page.js');
     assert.strictEqual(lines.length, 1,
       'expected exactly one registration line in test-all.sh, got ' + lines.length);
-    assert(/^set -e$/m.test(sh), 'test-all.sh must keep its set -e semantics');
+    // A failing file must still fail the suite (test-test-all.js checks this end to end).
+    assert(/^if \[ "\$failed" -gt 0 \]; then$/m.test(sh) && /^  exit 1$/m.test(sh),
+      'test-all.sh must exit non-zero when a file fails');
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

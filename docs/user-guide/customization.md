@@ -24,6 +24,9 @@ Every color in the UI is customizable:
 - **Status** — green (healthy), yellow (degraded), red (silent)
 - **Text** — primary text, muted text, borders
 - **Tables** — row stripe, hover, and selected row colors
+- **Terrain profile chart** — the Path profile's chart colours, and the
+  **Owner Height Badge** on an antenna height a node's owner set (Path
+  profile and the node page's antenna section)
 
 Both light and dark themes are independently configurable.
 
@@ -49,6 +52,42 @@ Customize the onboarding experience:
 - **Display mode** — relative ("5 min ago") or absolute
 - **Timezone** — local or UTC
 - **Format preset** — ISO or other presets
+
+### Terrain Profile (Display tab)
+
+Shown only where the server offers the Map's Path profile tool:
+
+- **Antenna heights** per node role and for a map point, and the default
+  **elevation model**. These are defaults: a height in a link, a height you
+  type and one the operator set in server config all take precedence.
+- **Prefer owner heights** (on by default). On, an antenna height that a
+  node's owner proved and this site approved stands against your role
+  heights. Off, your role heights replace owner heights too, in your own
+  profiles only. See [Setting your node's antenna height](antenna-height-claims.md).
+- **Share previews**, when the server offers them. **Copy link shares a
+  preview** picks whether Copy link hands out a link that shows a preview
+  card in chats, or the plain map link. The card's theme and whether it
+  shows node names are set by the operator. The card is drawn on the server
+  with the operator's saved palette, not the colours you set here. See
+  [Share previews](../share-previews.md).
+
+### Share previews for node links
+
+When the server shares node cards (`share.nodes.enabled`), the same **Copy
+link shares a preview** switch also decides what **Copy URL** on a node's
+page and in the Nodes side pane hands out: a link that shows a card of the
+node in chats (repeaters, rooms and sensors), or the plain node link. On a
+server without the Path profile tool, the switch has a **Share previews**
+section of its own on the Display tab. See
+[Share previews for node links](../node-share-previews.md).
+
+### Share previews for packet links
+
+When the server shares packet cards (`share.packets.enabled`), the same
+switch also decides what **Copy link** on a packet's detail pane, on the
+`#/packet/<id>` page and in the **View Path** modal hands out: a link that
+shows a card of the packet's path in chats, or the plain packet link. See
+[Share previews for packet links](../share-previews.md#packet-links).
 
 ## Live preview
 

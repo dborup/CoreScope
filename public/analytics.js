@@ -2,9 +2,59 @@
 'use strict';
 
 (function () {
+  // These data-backed tables have grouped/collapsible rows; TableSort's DOM
+  // cell reader is not suitable. Share their scalar sort policy instead.
+  // Extract keys once (O(n)); stable sorting is O(n log n), with one cached collator.
+  var analyticsCollator = new Intl.Collator(typeof navigator !== 'undefined' ? navigator.languages : undefined, { sensitivity: 'base' });
+  function sortAnalyticsRows(rows, value, type, dir) {
+    var sign = dir === 'desc' ? -1 : 1;
+    return rows.map(function(r, i) {
+      var v = value(r);
+      var missing = v == null || v === '';
+      if (typeof v === 'number' && !Number.isFinite(v)) missing = true;
+      if (!missing && type !== 'text' && type !== 'hash') {
+        v = type === 'date' ? Date.parse(v) : Number(v);
+        missing = !Number.isFinite(v);
+      }
+      return { row: r, index: i, value: v, missing: missing };
+    }).sort(function(a, b) {
+      if (a.missing || b.missing) return a.missing === b.missing ? a.index - b.index : a.missing ? 1 : -1;
+      var text = type === 'text' || (type === 'hash' && (typeof a.value !== 'number' || typeof b.value !== 'number'));
+      var compared = text ? analyticsCollator.compare(String(a.value), String(b.value)) : a.value - b.value;
+      return compared ? compared * sign : a.index - b.index;
+    }).map(function(item) { return item.row; });
+  }
+  function nextAnalyticsSort(sort, col, type) {
+    return { col: col, dir: sort && sort.col === col ? (sort.dir === 'asc' ? 'desc' : 'asc') : (type === 'text' ? 'asc' : 'desc') };
+  }
+  function analyticsSortAttrs(col, activeCol, dir) {
+    return ' tabindex="0" aria-sort="' + (col === activeCol ? (dir === 'asc' ? 'ascending' : 'descending') : 'none') + '"';
+  }
+  function attachSortKeyboard(container, selector) {
+    container.addEventListener('keydown', function(e) {
+      var header = e.target.closest(selector);
+      if (!header || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      header.click();
+    });
+  }
+  function restoreSortFocus(container, selector, focused) {
+    if (!focused) return;
+    var header = container.querySelector(selector);
+    if (header) header.focus();
+  }
   let _analyticsData = {};
   const sf = (v, d) => (v != null ? v.toFixed(d) : '–'); // safe toFixed
   function esc(s) { return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') : ''; }
+
+  // #381: the badge shown next to a coordinate that came from the static
+  // IATA/region-code centroid fallback, not the observer's own real node
+  // position -- hoisted to a top-level pure function (no closure over any
+  // tab's local state) so it's independently testable.
+  function iataPositionBadgeHtml() {
+    return '<span class="badge" style="background:var(--border);color:var(--text)" title="Approximate — this observer has no real node position; shown at its configured IATA/region code\'s centroid instead">IATA</span>';
+  }
 
   // #1085 — Roles tab helpers (hoisted from renderRolesTab so they're not
   // re-allocated per render).
@@ -28,12 +78,63 @@
     if (_rolesRefreshTimer) { clearInterval(_rolesRefreshTimer); _rolesRefreshTimer = null; }
   }
   var _scopesRefreshTimer = null;
+  var _scopeAuditView = null;
+  function _stopScopeAudit() { if (_scopeAuditView) { _scopeAuditView.destroy(); _scopeAuditView = null; } }
   function _stopScopesRefresh() {
     if (_scopesRefreshTimer) { clearInterval(_scopesRefreshTimer); _scopesRefreshTimer = null; }
   }
   var _foreignTrafficRefreshTimer = null;
   function _stopForeignTrafficRefresh() {
     if (_foreignTrafficRefreshTimer) { clearInterval(_foreignTrafficRefreshTimer); _foreignTrafficRefreshTimer = null; }
+  }
+  // #120 — the distance tab's lazy index answers 202 {status:"building"}
+  // until it is built. The tab shows a building state and retries on the
+  // server's interval. Every render, tab switch away and destroy() bumps
+  // _distanceGen, so a response or retry from an older render can never
+  // write into a newer render, another tab or a left page, and at most one
+  // retry timer exists.
+  var _distanceRetryTimer = null;
+  var _distanceGen = 0;
+  function _leaveDistanceTab() {
+    _distanceGen++;
+    if (_distanceRetryTimer) { clearTimeout(_distanceRetryTimer); _distanceRetryTimer = null; }
+  }
+  function _distanceIsBuilding(data) {
+    return !!(data && data.status === 'building' && !data.summary);
+  }
+  // Retry-After header (passed on by api() on a 202 body or a 503 error),
+  // else the body's retry_after_seconds, else 5s; clamped to 1..30s.
+  function _retryAfterDelayMs(data) {
+    var s = Number(data && data.retryAfterSeconds);
+    if (!(isFinite(s) && s > 0)) s = Number(data && data.retry_after_seconds);
+    if (!(isFinite(s) && s > 0)) s = 5;
+    return Math.min(Math.max(s, 1), 30) * 1000;
+  }
+  // #172 — rf/topology/channels answer 503 + Retry-After while the server
+  // warms up after a restart (#1659), for up to its 60s force-open. The
+  // page shows a "still loading" state and retries on the server's
+  // interval until ANALYTICS_WARMUP_MAX_MS has passed since the load
+  // began, and only then shows the error. Like the distance tab (#120),
+  // every load and destroy() bump _loadGen, so a response or retry from an
+  // older load never renders, and at most one retry timer exists.
+  var ANALYTICS_WARMUP_MAX_MS = 120000;
+  var _loadRetryTimer = null;
+  var _loadGen = 0;
+  // #172: the tabs that render from that load's _analyticsData. Until it
+  // has data, they show the load's status instead (a click during the
+  // warm-up threw a TypeError), and the status is written only while one
+  // of them is shown, never over a tab that fetches its own data.
+  var LOAD_TABS = new Set(['overview', 'rf', 'topology', 'channels', 'hashsizes', 'collisions']);
+  var LOADING_HTML = '<div class="text-center text-muted" style="padding:40px">Loading analytics…</div>';
+  var _loadStatusHtml = LOADING_HTML;
+  function _showLoadStatus(html) {
+    _loadStatusHtml = html;
+    var el = LOAD_TABS.has(_currentTab) && document.getElementById('analyticsContent');
+    if (el) el.innerHTML = html;
+  }
+  function _cancelLoadRetry() {
+    _loadGen++;
+    if (_loadRetryTimer) { clearTimeout(_loadRetryTimer); _loadRetryTimer = null; }
   }
   var _wardrivingRefreshTimer = null;
   function _stopWardrivingRefresh() {
@@ -115,7 +216,7 @@
           <div class="analytics-filters">
             <div id="analyticsRegionFilter" class="region-filter-container"></div>
             <div id="analyticsAreaFilter" style="display:none"></div>
-            <select id="analyticsTimeWindow" class="analytics-time-window-select" data-testid="analytics-time-window" aria-label="Time window">
+            <select id="analyticsTimeWindow" class="time-window-select" data-testid="analytics-time-window" aria-label="Time window">
               <option value="">All data</option>
               <option value="1h">Last 1 hour</option>
               <option value="24h">Last 24 hours</option>
@@ -142,6 +243,7 @@
                  Placed after Clock Health (clock-skew posture is shown per-role
                  inside this tab) and before Prefix Tool (utility tabs trail). -->
             <button class="tab-btn" data-tab="roles">Roles</button>
+            <button class="tab-btn" data-tab="advert-intervals">Advert Intervals</button>
             <button class="tab-btn" data-tab="scopes">Scopes</button>
             <button class="tab-btn" data-tab="foreign-traffic">Foreign Traffic</button>
             <button class="tab-btn" data-tab="wardriving">Wardriving</button>
@@ -150,12 +252,12 @@
           </div>
         </div>
         <div id="analyticsContent" class="analytics-content" aria-live="polite">
-          <div class="text-center text-muted" style="padding:40px">Loading analytics…</div>
+          ${LOADING_HTML}
         </div>
       </div>`;
 
     // Tabs where the area filter is meaningful (transmitter GPS attribution)
-    const AREA_FILTER_TABS = new Set(['overview', 'rf', 'topology', 'hashsizes', 'collisions', 'nodes', 'my-repeaters', 'repeater-metrics', 'clock-health']);
+    const AREA_FILTER_TABS = new Set(['overview', 'rf', 'topology', 'hashsizes', 'collisions', 'nodes', 'my-repeaters', 'repeater-metrics', 'clock-health', 'advert-intervals']);
 
     function setAreaFilterVisibility(tab) {
       const el = document.getElementById('analyticsAreaFilter');
@@ -174,11 +276,11 @@
         window: twElNow && twElNow.value ? twElNow.value : ''
       };
       // Drop any subview-specific keys that don't belong to the active tab
-      // so switching tabs gives a clean URL. (rf-health uses 'range', 'observer', 'from', 'to')
-      if (_currentTab !== 'rf-health') {
-        var cleared = ['range', 'observer', 'from', 'to'];
-        for (var i = 0; i < cleared.length; i++) updates[cleared[i]] = '';
-      }
+      // so switching tabs gives a clean URL.
+      Object.keys(TAB_URL_PARAMS).forEach(function (t) {
+        if (t === _currentTab) return;
+        TAB_URL_PARAMS[t].forEach(function (k) { updates[k] = ''; });
+      });
       var newHash = URLState.updateHashParams(updates, location.hash);
       if (newHash !== location.hash) history.replaceState(null, '', newHash);
     }
@@ -192,10 +294,12 @@
       setAreaFilterVisibility(_currentTab);
       // #1085 — Roles tab owns its own 60s auto-refresh; stop it on switch.
       if (_currentTab !== 'roles') _stopRolesRefresh();
-      if (_currentTab !== 'scopes') _stopScopesRefresh();
+      if (_currentTab !== 'scopes') { _stopScopesRefresh(); _stopScopeAudit(); }
       if (_currentTab !== 'foreign-traffic') _stopForeignTrafficRefresh();
       if (_currentTab !== 'wardriving') _stopWardrivingRefresh();
       if (_currentTab !== 'areas') _stopAreasRefresh();
+      if (_currentTab !== 'distance') _leaveDistanceTab();
+      if (_currentTab !== 'advert-intervals') _aiLeave();
       _updateAnalyticsUrl();
       renderTab(_currentTab);
     });
@@ -203,15 +307,18 @@
     // Deep-link: #/analytics?tab=collisions&window=7d
     const hashParams = location.hash.split('?')[1] || '';
     const _ap = new URLSearchParams(hashParams);
+    // Every mount starts from the URL, falling back to Overview: the tab
+    // selected before leaving the page must not survive into this mount (#183).
+    // The button is found by comparing data-tab, never by building a selector
+    // from the URL: a quote in ?tab= threw here, and a crafted value matched a
+    // real button while _currentTab took the arbitrary string (#193).
     const urlTab = _ap.get('tab');
-    if (urlTab) {
-      const tabBtn = analyticsTabs.querySelector(`[data-tab="${urlTab}"]`);
-      if (tabBtn) {
-        analyticsTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        tabBtn.classList.add('active');
-        _currentTab = urlTab;
-      }
-    }
+    const tabBtns = Array.from(analyticsTabs.querySelectorAll('.tab-btn'));
+    const urlTabBtn = urlTab ? tabBtns.find(b => b.dataset.tab === urlTab) : null;
+    _currentTab = urlTabBtn ? urlTab : 'overview';
+    const activeBtn = urlTabBtn || tabBtns.find(b => b.dataset.tab === 'overview');
+    tabBtns.forEach(b => b.classList.remove('active'));
+    if (activeBtn) activeBtn.classList.add('active');
     // #749 — restore time window from URL.
     const urlWindow = _ap.get('window');
     if (urlWindow) {
@@ -222,20 +329,20 @@
     RegionFilter.init(document.getElementById('analyticsRegionFilter'));
     AreaFilter.init(document.getElementById('analyticsAreaFilter'));
     setAreaFilterVisibility(_currentTab);
-    RegionFilter.onChange(function () { loadAnalytics(); });
-    AreaFilter.onChange(function () { loadAnalytics(); });
+    _regionChangeHandler = RegionFilter.onChange(reloadForFilters);
+    _areaChangeHandler = AreaFilter.onChange(reloadForFilters);
 
     // Time-window picker (#842) — refresh analytics on change.
     const tw = document.getElementById('analyticsTimeWindow');
     if (tw) {
-      tw.addEventListener('change', function () { _updateAnalyticsUrl(); loadAnalytics(); });
+      tw.addEventListener('change', function () { _updateAnalyticsUrl(); reloadForFilters(); });
     }
 
     // Delegated click/keyboard handler for clickable table rows
     const analyticsContent = document.getElementById('analyticsContent');
     if (analyticsContent) {
       const handler = (e) => {
-        const row = e.target.closest('tr[data-action="navigate"]');
+        const row = e.target.closest('[data-action="navigate"]');
         if (!row) return;
         if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
         if (e.type === 'keydown') e.preventDefault();
@@ -243,19 +350,194 @@
       };
       analyticsContent.addEventListener('click', handler);
       analyticsContent.addEventListener('keydown', handler);
+      // #896 — Advert Intervals bucket rows and their node list.
+      analyticsContent.addEventListener('click', _aiOnClick);
+      analyticsContent.addEventListener('keydown', _aiOnKeydown);
     }
 
     // Re-render when distance unit or theme changes
-    _themeRefreshHandler = function () { renderTab(_currentTab); };
+    _themeRefreshHandler = function () {
+      // #1925: never full-rebuild the neighbor-graph tab on theme-refresh.
+      // Every page load fires one theme-refresh ~300ms after
+      // /api/config/theme resolves (app.js dispatches 'theme-changed', then
+      // debounces 300ms). renderTab() here replaced el.innerHTML, which reset
+      // the role checkboxes to their defaults and rebuilt _ngState from the
+      // full graph, discarding any filtering the user had applied in the
+      // meantime. Restarting the renderer keeps the current filter state and
+      // still picks up the new theme: node colors are read live per frame
+      // from window.ROLE_COLORS, role swatches use CSS tokens, and the one
+      // cached value (_labelColor) is re-read on restart. Measured: this also
+      // stops the old path leaking one rAF render loop and one canvas
+      // listener set per theme-refresh (a 10-event burst ran the force
+      // simulation at ~20x speed; it now stays flat).
+      //
+      // Not covered, pre-existing: _ngState is only assigned after the graph
+      // fetch resolves, while the checkboxes exist from the synchronous
+      // innerHTML before it. A theme-refresh landing inside that fetch window
+      // still falls through to renderTab() and still discards a filter
+      // applied during the load. Closing that needs a "load in flight"
+      // sentinel, which is deliberately left out of this port.
+      if (_currentTab === 'neighbor-graph' && _ngState) { startGraphRenderer(); return; }
+      renderTab(_currentTab);
+    };
     window.addEventListener('theme-refresh', _themeRefreshHandler);
 
+    // Independent tabs fetch their own data; the bulk load must not defer
+    // their first render or start them a second time when its answers land.
+    if (!LOAD_TABS.has(_currentTab)) renderTab(_currentTab);
     loadAnalytics();
   }
 
+  function reloadForFilters() {
+    loadAnalytics();
+    if (!LOAD_TABS.has(_currentTab)) renderTab(_currentTab);
+  }
+
   var _themeRefreshHandler = null;
+  var _regionChangeHandler = null;
+  var _areaChangeHandler = null;
   let _currentTab = 'overview';
 
-  async function loadAnalytics() {
+  // Append a query fragment to a path (#179, #193). The filter fragments
+  // ("&region=…", "&area=…", "&window=…") start with '&'; '?…' and a bare
+  // 'a=1' are taken too, and an empty fragment (or a lone '&' / '?') leaves
+  // the path as it is. The separator is '&' when the path already has a '?'.
+  function withQuery(path, frag) {
+    const q = frag ? String(frag).replace(/^[?&]/, '') : '';
+    return q ? path + (path.indexOf('?') < 0 ? '?' : '&') + q : path;
+  }
+
+  // #205 — a tab's inner view state (Scopes sub-tab and window, Wardriving
+  // window) lives in the hash next to ?tab=, with sessionStorage as the
+  // fallback for a plain visit of the tab. ?window= is the global time
+  // picker above the tab bar (other values, and it drives the shared
+  // loads), so each tab window gets a key of its own.
+  var SCOPES_SUBTAB = { param: 'sub', storageKey: 'scopes_subtab', allowed: ['overview', 'hopdepth', 'regions', 'hygiene', 'audit'], dflt: 'overview' };
+  var SCOPES_WINDOW = { param: 'swin', storageKey: 'scopes_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
+  var WARDRIVING_WINDOW = { param: 'wdwin', storageKey: 'wardriving_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
+  // #208 — Hash Stats' multi-byte adopters filter. URL only (no storageKey):
+  // it had no stored state before, so a plain visit still opens on All.
+  var HASHSTATS_MB_FILTER = { param: 'mbf', allowed: ['all', 'confirmed', 'suspected', 'unknown'], dflt: 'all' };
+  // #226 — the adopters table's sort column and direction, URL only like mbf=.
+  // 'none' keeps the server's order.
+  var HASHSTATS_MB_SORT = { param: 'mbsort', allowed: ['none', 'name', 'role', 'status', 'hashSize', 'packets', 'lastSeen'], dflt: 'none' };
+  var HASHSTATS_MB_DIR = { param: 'mbdir', allowed: ['asc', 'desc'], dflt: 'asc' };
+  // Repeater Metrics' Busiest Repeaters table: sort window, whether
+  // repeaters that are also observers are listed, and the row limit. URL
+  // only, like mbf=.
+  var BUSIEST_SORT = { param: 'bsort', allowed: ['24h', '1h', 'peak'], dflt: '24h' };
+  var BUSIEST_OBSERVERS = { param: 'bobs', allowed: ['hide', 'show'], dflt: 'hide' };
+  var BUSIEST_LIMIT = { param: 'blimit', allowed: ['50', 'all'], dflt: '50' };
+  // === BUSIEST SPECS END ===
+
+  // The hash keys each tab owns; _updateAnalyticsUrl drops them when
+  // another tab is selected. Hash Issues' bytes= is deliberately not listed:
+  // it has no stored fallback, so it stays in the URL across a tab switch
+  // and a return to Hash Issues keeps the chosen byte size (#1914, #208).
+  // Its section= is a one-shot scroll anchor and is dropped.
+  var TAB_URL_PARAMS = {
+    'rf-health': ['range', 'observer', 'from', 'to'],
+    collisions: ['section'],
+    hashsizes: [HASHSTATS_MB_FILTER.param, HASHSTATS_MB_SORT.param, HASHSTATS_MB_DIR.param],
+    scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param, 'saq', 'sap', 'sav', 'scope'],
+    wardriving: [WARDRIVING_WINDOW.param],
+    'repeater-metrics': [BUSIEST_SORT.param, BUSIEST_OBSERVERS.param, BUSIEST_LIMIT.param],
+    // #896 — the open distribution bucket (#896 M1 block below).
+    'advert-intervals': ['bucket'],
+  };
+
+  // A value from the URL wins; an unknown one falls back to the default,
+  // not to the stored value. Values are only compared with ===, never put
+  // in a selector or markup (#193/#194). Without a URL value, the stored
+  // value is used while it is still a known one.
+  function resolveViewParam(urlValue, storedValue, allowed, dflt) {
+    if (urlValue != null) return allowed.indexOf(urlValue) >= 0 ? urlValue : dflt;
+    return storedValue != null && allowed.indexOf(storedValue) >= 0 ? storedValue : dflt;
+  }
+
+  function _sessionGet(key) {
+    try { return typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(key) : null; } catch (e) { return null; }
+  }
+
+  // #208 — the view each history entry showed is recorded in its
+  // history.state, so Back/Forward to an entry whose view was a default (its
+  // key left out of the URL) restores that default, not the value a later
+  // entry stored. A new entry (a link, location.hash = …) has no record and
+  // still gets the stored value. Only specs with a storageKey are recorded:
+  // for the others a missing key already means the default. A tab switch
+  // writes a null state (_updateAnalyticsUrl), so a tab clicked back within
+  // the same entry also gets the stored value, as before.
+  var ENTRY_VIEW_KEY = 'analyticsView';
+
+  // The current entry's record, as { param: value } with string values only.
+  function _entryView() {
+    var out = {};
+    try {
+      var st = typeof history !== 'undefined' ? history.state : null;
+      var v = st && typeof st === 'object' ? st[ENTRY_VIEW_KEY] : null;
+      if (!v || typeof v !== 'object') return null;
+      Object.keys(v).forEach(function (k) { if (typeof v[k] === 'string') out[k] = v[k]; });
+    } catch (e) { return null; }
+    return out;
+  }
+
+  // history.state with the record replaced; other keys are kept.
+  function _stateWithEntryView(view) {
+    var out = {};
+    var st = typeof history !== 'undefined' ? history.state : null;
+    if (st && typeof st === 'object') Object.keys(st).forEach(function (k) { out[k] = st[k]; });
+    out[ENTRY_VIEW_KEY] = view;
+    return out;
+  }
+
+  // Stores the values and writes them to the hash in one go. A default is
+  // left out, so a tab in its default view keeps the URL it had before #205.
+  // A spec without a storageKey lives in the URL only.
+  function _writeViewParams(specs, values) {
+    var updates = {};
+    var view = _entryView() || {};
+    var viewChanged = false;
+    specs.forEach(function (spec, i) {
+      if (spec.storageKey) {
+        try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(spec.storageKey, values[i]); } catch (e) { /* storage blocked */ }
+        if (view[spec.param] !== values[i]) { view[spec.param] = values[i]; viewChanged = true; }
+      }
+      updates[spec.param] = values[i] === spec.dflt ? '' : values[i];
+    });
+    if (!window.URLState) return;
+    // replaceState can throw (Safari throttles it); the view has already
+    // changed by then, so a failed URL sync must not break the tab (#1914).
+    // It only runs when the URL or the entry's record changes.
+    try {
+      var newHash = URLState.updateHashParams(updates, location.hash);
+      if (newHash !== location.hash || viewChanged) history.replaceState(_stateWithEntryView(view), '', newHash);
+    } catch (e) { /* URL sync is best effort */ }
+  }
+
+  function setViewParam(spec, value) { _writeViewParams([spec], [value]); }
+
+  // Read on render: resolve every value of the tab from the same hash first,
+  // then store them and write them back. Writing one value rebuilds the
+  // hash, which drops an empty key ("?sub=") the next read would still see.
+  // Without a URL value, the entry's own record (#208) comes before the
+  // stored value.
+  function restoreViewParams(specs) {
+    var hash = typeof location !== 'undefined' ? String(location.hash || '') : '';
+    var params = new URLSearchParams(hash.split('?')[1] || '');
+    var entry = _entryView();
+    var values = specs.map(function (spec) {
+      var fallback = null;
+      if (spec.storageKey) fallback = entry && Object.prototype.hasOwnProperty.call(entry, spec.param) ? entry[spec.param] : _sessionGet(spec.storageKey);
+      return resolveViewParam(params.get(spec.param), fallback, spec.allowed, spec.dflt);
+    });
+    _writeViewParams(specs, values);
+    return values;
+  }
+
+  async function loadAnalytics(startedAt) {
+    _cancelLoadRetry();
+    const gen = _loadGen;
+    if (startedAt === undefined) { startedAt = Date.now(); _loadStatusHtml = LOADING_HTML; }
     try {
       _analyticsData = {};
       const rqs = RegionFilter.regionQueryString(); // "&region=..." or ""
@@ -268,33 +550,59 @@
       const twVal = twEl ? twEl.value : '';
       const tws = twVal ? '&window=' + encodeURIComponent(twVal) : '';
       // hash-sizes / hash-collisions: region + area, no window
-      const baseQS = (rqs + aqs).slice(1);
-      const sepBase = baseQS ? '?' + baseQS : '';
+      const baseQ = rqs + aqs;
       // rf / topology: region + area + window
-      const windowedQS = (rqs + aqs + tws).slice(1);
-      const sepWin = windowedQS ? '?' + windowedQS : '';
+      const windowedQ = rqs + aqs + tws;
       // channels: region + window (no area per original PR intent)
-      const chanQS = (rqs + tws).slice(1);
-      const sepChan = chanQS ? '?' + chanQS : '';
+      const chanQ = rqs + tws;
+      // This load retries 503s itself (retry503:false), see _loadGen.
+      const opts = { ttl: CLIENT_TTL.analyticsRF, retry503: false };
       const [hashData, rfData, topoData, chanData, collisionData, airtimeData] = await Promise.all([
-        api('/analytics/hash-sizes' + sepBase, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/rf' + sepWin, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/topology' + sepWin, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/channels' + sepChan, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/hash-collisions' + sepBase, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/relay-airtime-share' + sepWin, { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ rows: [] })),
+        api(withQuery('/analytics/hash-sizes', baseQ), opts),
+        api(withQuery('/analytics/rf', windowedQ), opts),
+        api(withQuery('/analytics/topology', windowedQ), opts),
+        api(withQuery('/analytics/channels', chanQ), opts),
+        api(withQuery('/analytics/hash-collisions', baseQ), opts),
+        api(withQuery('/analytics/relay-airtime-share', windowedQ), { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ rows: [] })),
       ]);
+      if (gen !== _loadGen) return;
       _analyticsData = { hashData, rfData, topoData, chanData, collisionData, airtimeData };
-      renderTab(_currentTab);
+      if (LOAD_TABS.has(_currentTab)) renderTab(_currentTab);
     } catch (e) {
-      document.getElementById('analyticsContent').innerHTML =
-        `<div class="text-muted" role="alert" aria-live="polite" style="padding:40px">Failed to load: ${e.message}</div>`;
+      if (gen !== _loadGen) return;
+      const ms = _retryAfterDelayMs(e);
+      if (e && e.status === 503 && Date.now() - startedAt + ms <= ANALYTICS_WARMUP_MAX_MS) {
+        _showLoadStatus('<div class="text-center text-muted" role="status" aria-live="polite" style="padding:40px">' +
+          'Analytics are still loading on the server after a restart.' +
+          '<div style="font-size:12px;margin-top:8px">Retrying in ' + Math.round(ms / 1000) + 's.</div></div>');
+        _loadRetryTimer = setTimeout(function () {
+          _loadRetryTimer = null;
+          if (gen === _loadGen) loadAnalytics(startedAt);
+        }, ms);
+        return;
+      }
+      _showLoadStatus(`<div class="text-muted" role="alert" aria-live="polite" style="padding:40px">Failed to load: ${esc(e && e.message)}</div>`);
     }
+  }
+
+  // This runs again after tabs insert tables asynchronously (and on theme
+  // refresh), so a table added ahead of an already-numbered one would reuse
+  // that table's positional index; skip ids that are already taken.
+  function assignAnalyticsTableIds(el, tab) {
+    el.querySelectorAll('.analytics-table').forEach((tbl, i) => {
+      if (!tbl.id) {
+        let n = i;
+        while (document.getElementById(`analytics-tbl-${tab}-${n}`)) n++;
+        tbl.id = `analytics-tbl-${tab}-${n}`;
+      }
+      if (typeof makeColumnsResizable === 'function') makeColumnsResizable('#' + tbl.id, `meshcore-analytics-${tab}-${i}-col-widths`);
+    });
   }
 
   async function renderTab(tab) {
     const el = document.getElementById('analyticsContent');
     const d = _analyticsData;
+    if (LOAD_TABS.has(tab) && !d.rfData) { el.innerHTML = _loadStatusHtml; return; }
     switch (tab) {
       case 'overview': renderOverview(el, d); break;
       case 'rf': renderRF(el, d.rfData); break;
@@ -311,6 +619,7 @@
       case 'rf-health': await renderRFHealthTab(el); break;
       case 'clock-health': await renderClockHealthTab(el); break;
       case 'roles': await renderRolesTab(el); break;
+      case 'advert-intervals': await renderAdvertIntervalsTab(el); break;
       case 'prefix-tool': await renderPrefixTool(el); break;
       case 'scopes': await renderScopesTab(el); break;
       case 'foreign-traffic': await renderForeignTrafficTab(el); break;
@@ -319,10 +628,7 @@
     }
     // Auto-apply column resizing to all analytics tables
     requestAnimationFrame(() => {
-      el.querySelectorAll('.analytics-table').forEach((tbl, i) => {
-        tbl.id = tbl.id || `analytics-tbl-${tab}-${i}`;
-        if (typeof makeColumnsResizable === 'function') makeColumnsResizable('#' + tbl.id, `meshcore-analytics-${tab}-${i}-col-widths`);
-      });
+      assignAnalyticsTableIds(el, tab);
       // #206 — Wrap analytics tables in scroll containers on mobile
       el.querySelectorAll('.analytics-table').forEach(tbl => {
         if (!tbl.parentElement.classList.contains('analytics-table-scroll')) {
@@ -532,7 +838,14 @@
       var cpct = Number(r.count_pct || 0);
       var apct = Number(r.airtime_pct || 0);
       var score = Number(r.score || 0);
-      var color = palette[i % palette.length];
+      // #89: a payload seen on both flood and zero-hop routes is one mixed
+      // row; it gets a fixed theme colour so it reads the same in any position.
+      var isMixed = r.route_class === 'mixed';
+      var color = isMixed ? 'var(--status-purple)' : palette[i % palette.length];
+      // Rows are rendered positionally; (type, route_class) is the stable row
+      // identity. The three ADVERT rows share type 4, so type alone is not.
+      var identityAttrs = ' data-payload-type="' + esc(String(Number(r.type))) + '"' +
+        (typeof r.route_class === 'string' ? ' data-route-class="' + esc(r.route_class) + '"' : '');
       var loPct = Math.min(cpct, apct);
       var hiPct = Math.max(cpct, apct);
       // Tooltip per row — payload_type, count %, count N, airtime %, raw score, caveat.
@@ -545,10 +858,11 @@
         : scoreMs.toFixed(2) + ' ms';
       var tip =
         name + '\n' +
+        (isMixed ? 'Same payload observed on both flood and zero-hop routes; counted once.\n' : '') +
         'Count: ' + cnt.toLocaleString() + ' (' + cpct.toFixed(2) + '%)\n' +
         'Airtime: ' + apct.toFixed(2) + '% (score ' + scoreStr + ' · airtime × repeaters)\n' +
         'Score = LoRa Time-on-Air × distinct repeaters. Within-mesh only.';
-      html += '<div class="dumbbell-row" title="' + esc(tip) + '" style="display:grid;grid-template-columns:80px 1fr 180px;align-items:center;gap:10px;font-size:12px">' +
+      html += '<div class="dumbbell-row" title="' + esc(tip) + '"' + identityAttrs + ' style="display:grid;grid-template-columns:80px 1fr 180px;align-items:center;gap:10px;font-size:12px">' +
         '<div class="dumbbell-label" style="font-weight:600;color:var(--text)">' + esc(name) + '</div>' +
         '<div class="dumbbell-track" style="position:relative;height:18px;background:var(--bg-elev,rgba(127,127,127,0.12));border-radius:9px">' +
           '<div class="dumbbell-connector" style="position:absolute;top:50%;left:' + loPct.toFixed(3) + '%;width:' + (hiPct - loPct).toFixed(3) + '%;height:2px;background:var(--text-muted,#888);transform:translateY(-50%);opacity:0.5"></div>' +
@@ -824,7 +1138,7 @@
     let html = '<div class="repeater-list">';
     repeaters.slice(0, 15).forEach(r => {
       const pct = (r.count / max * 100).toFixed(0);
-      html += `<div class="repeater-row ${r.pubkey ? 'clickable-row' : ''}" ${r.pubkey ? `onclick="location.hash='#/nodes/${encodeURIComponent(r.pubkey)}'"` : ''}>
+      html += `<div class="repeater-row ${r.pubkey ? 'clickable-row' : ''}" ${r.pubkey ? `data-action="navigate" data-value="#/nodes/${encodeURIComponent(r.pubkey)}" tabindex="0" role="link"` : ''}>
         <div class="repeater-name">${r.name ? '<strong>' + esc(r.name) + '</strong>' : '<span class="mono">' + r.hop + '</span>'}</div>
         <div class="repeater-bar"><div class="hash-bar-track"><div class="hash-bar-fill" style="width:${pct}%;background:var(--accent)"></div></div></div>
         <div class="repeater-count">${r.count.toLocaleString()}</div>
@@ -967,32 +1281,8 @@
   }
 
   function sortChannels(channels, col, dir) {
-    var sorted = channels.slice();
-    var mult = dir === 'asc' ? 1 : -1;
-    sorted.sort(function (a, b) {
-      var av, bv;
-      switch (col) {
-        case 'name':
-          av = (a.name || '').toLowerCase(); bv = (b.name || '').toLowerCase();
-          return av < bv ? -1 * mult : av > bv ? 1 * mult : 0;
-        case 'hash':
-          av = typeof a.hash === 'number' ? a.hash : String(a.hash);
-          bv = typeof b.hash === 'number' ? b.hash : String(b.hash);
-          if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * mult;
-          av = String(av).toLowerCase(); bv = String(bv).toLowerCase();
-          return av < bv ? -1 * mult : av > bv ? 1 * mult : 0;
-        case 'messages': return (a.messages - b.messages) * mult;
-        case 'senders': return (a.senders - b.senders) * mult;
-        case 'lastActivity':
-          av = a.lastActivity || ''; bv = b.lastActivity || '';
-          return av < bv ? -1 * mult : av > bv ? 1 * mult : 0;
-        case 'encrypted':
-          av = a.encrypted ? 1 : 0; bv = b.encrypted ? 1 : 0;
-          return (av - bv) * mult;
-        default: return 0;
-      }
-    });
-    return sorted;
+    var type = col === 'name' ? 'text' : col === 'hash' ? 'hash' : col === 'lastActivity' ? 'date' : 'number';
+    return sortAnalyticsRows(channels, function(c) { return c[col]; }, type, dir);
   }
 
   function channelRowHtml(c) {
@@ -1005,9 +1295,9 @@
     var nameHtml = c.displayNameHtml
       ? c.displayNameHtml
       : esc(c.displayName || c.name || 'Unknown');
-    return '<tr class="clickable-row" data-action="navigate" data-value="#/channels?ch=' + c.hash + '" tabindex="0" role="row">' +
+    return '<tr class="clickable-row" data-action="navigate" data-value="#/channels?ch=' + esc(String(c.hash)) + '" tabindex="0" role="row">' +
       '<td><strong>' + nameHtml + '</strong></td>' +
-      '<td class="mono">' + (typeof c.hash === 'number' ? '0x' + c.hash.toString(16).toUpperCase().padStart(2, '0') : c.hash) + '</td>' +
+      '<td class="mono">' + (typeof c.hash === 'number' ? '0x' + c.hash.toString(16).toUpperCase().padStart(2, '0') : esc(c.hash)) + '</td>' +
       '<td>' + c.messages + '</td>' +
       '<td>' + c.senders + '</td>' +
       '<td>' + timeAgo(c.lastActivity) + '</td>' +
@@ -1122,8 +1412,8 @@
   }
 
   function channelSortArrow(col, activeCol, dir) {
-    if (col !== activeCol) return '<span class="sort-arrow">⇅</span>';
-    return '<span class="sort-arrow">' + (dir === 'asc' ? '↑' : '↓') + '</span>';
+    if (col !== activeCol) return '<span class="sort-arrow" aria-hidden="true">⇅</span>';
+    return '<span class="sort-arrow" aria-hidden="true">' + (dir === 'asc' ? '↑' : '↓') + '</span>';
   }
 
   function channelTheadHtml(activeCol, dir) {
@@ -1138,7 +1428,7 @@
     var ths = '';
     for (var i = 0; i < cols.length; i++) {
       var c = cols[i];
-      ths += '<th scope="col" class="sortable' + (c.key === activeCol ? ' sort-active' : '') + '" data-sort-col="' + c.key + '">' +
+      ths += '<th scope="col" class="sortable' + (c.key === activeCol ? ' sort-active' : '') + '" data-sort-col="' + c.key + '"' + analyticsSortAttrs(c.key, activeCol, dir) + '>' +
         c.label + channelSortArrow(c.key, activeCol, dir) + '</th>';
     }
     return '<thead><tr>' + ths + '</tr></thead>';
@@ -1149,7 +1439,13 @@
     var thead = document.querySelector('#channelsTable thead');
     if (!tbody || !_channelData) return;
     tbody.innerHTML = channelTbodyHtml(_channelData, _channelSortState.col, _channelSortState.dir, { grouped: true });
-    if (thead) thead.outerHTML = channelTheadHtml(_channelSortState.col, _channelSortState.dir);
+    if (thead) thead.querySelectorAll('th[data-sort-col]').forEach(function(th) {
+      var active = th.dataset.sortCol === _channelSortState.col;
+      th.classList.toggle('sort-active', active);
+      th.setAttribute('aria-sort', active ? (_channelSortState.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+      var arrow = th.querySelector('.sort-arrow');
+      if (arrow) arrow.textContent = active ? (_channelSortState.dir === 'asc' ? '↑' : '↓') : '⇅';
+    });
   }
 
   function renderChannels(el, ch) {
@@ -1215,16 +1511,12 @@
     // Attach sort handler via delegation on the table
     var table = document.getElementById('channelsTable');
     if (table) {
+      attachSortKeyboard(table, 'th[data-sort-col]');
       table.addEventListener('click', function (e) {
         var th = e.target.closest('th[data-sort-col]');
         if (!th) return;
         var col = th.dataset.sortCol;
-        if (_channelSortState.col === col) {
-          _channelSortState.dir = _channelSortState.dir === 'asc' ? 'desc' : 'asc';
-        } else {
-          _channelSortState.col = col;
-          _channelSortState.dir = col === 'name' || col === 'hash' ? 'asc' : 'desc';
-        }
+        _channelSortState = nextAnalyticsSort(_channelSortState, col, col === 'name' || col === 'hash' ? 'text' : 'number');
         saveChannelSort(_channelSortState);
         updateChannelTable();
       });
@@ -1308,6 +1600,10 @@
 
   // ===================== HASH SIZES (original) =====================
   function renderHashSizes(el, data) {
+    // ?mbf= (#208), ?mbsort= and ?mbdir= (#226)
+    const [mbFilter, mbSortCol, mbSortDir] = restoreViewParams([HASHSTATS_MB_FILTER, HASHSTATS_MB_SORT, HASHSTATS_MB_DIR]);
+    const mbSort = { col: mbSortCol, dir: mbSortCol === HASHSTATS_MB_SORT.dflt ? HASHSTATS_MB_DIR.dflt : mbSortDir };
+    if (mbSort.dir !== mbSortDir) setViewParam(HASHSTATS_MB_DIR, mbSort.dir);   // no direction without a column
     const d = data.distribution;
     const total = data.total;
     const pct = (n) => total ? (n / total * 100).toFixed(1) : '0';
@@ -1357,7 +1653,7 @@
         </div>
       </div>
 
-      ${renderMultiByteAdopters(data.multiByteNodes, data.multiByteCapability || [])}
+      ${renderMultiByteAdopters(data.multiByteNodes, data.multiByteCapability || [], mbFilter, mbSort)}
 
       <div class="analytics-row">
         <div class="analytics-card flex-1">
@@ -1381,7 +1677,44 @@
     `;
   }
 
-  function renderMultiByteAdopters(nodes, caps) {
+  // #226 — the value an adopter row sorts by in a column: a lower-case string
+  // for Node and Role, a number otherwise. Last Seen is the timestamp (NaN when
+  // missing or unparseable), not the "5m ago" text the cell shows.
+  var MB_STATUS_WEIGHT = { confirmed: 0, suspected: 1, unknown: 2 };
+  function mbAdopterSortValue(r, col) {
+    switch (col) {
+      case 'name': return String(r.name || '').toLowerCase();
+      case 'role': return String(r.role || 'unknown').toLowerCase();
+      case 'status': return Object.prototype.hasOwnProperty.call(MB_STATUS_WEIGHT, r.status) ? MB_STATUS_WEIGHT[r.status] : MB_STATUS_WEIGHT.unknown;
+      case 'hashSize': return r.hashSize;
+      case 'packets': return r.packets;
+      case 'lastSeen': return r.lastSeen ? Date.parse(r.lastSeen) : NaN;
+    }
+    return 0;
+  }
+
+  // The rows in sort order; without a known column, as given. A missing value
+  // (NaN) is last in both directions, and ties keep the given order.
+  function sortMbAdopterRows(rows, sort) {
+    var col = sort && sort.col;
+    if (col === HASHSTATS_MB_SORT.dflt || HASHSTATS_MB_SORT.allowed.indexOf(col) < 0) return rows;
+    return sortAnalyticsRows(rows, function(r) { return mbAdopterSortValue(r, col); }, col === 'name' || col === 'role' ? 'text' : 'number', sort.dir);
+  }
+
+  // Clicking the sorted column flips its direction; another column starts
+  // text ascending and numeric/time descending.
+  function nextMbSort(sort, col) {
+    return nextAnalyticsSort(sort, col, col === 'name' || col === 'role' || col === 'status' ? 'text' : 'number');
+  }
+
+  // filter: the initially selected filter (All when missing or unknown).
+  // sort: the initial { col, dir } (the server's order when missing or unknown).
+  function renderMultiByteAdopters(nodes, caps, filter, sort) {
+    var initialFilter = HASHSTATS_MB_FILTER.allowed.indexOf(filter) >= 0 ? filter : HASHSTATS_MB_FILTER.dflt;
+    var initialSort = sort && HASHSTATS_MB_SORT.allowed.indexOf(sort.col) >= 0
+      ? { col: sort.col, dir: sort.dir === 'desc' ? 'desc' : 'asc' }
+      : { col: HASHSTATS_MB_SORT.dflt, dir: HASHSTATS_MB_DIR.dflt };
+    var mbBtnClass = function (f) { return f === initialFilter ? 'tab-btn active' : 'tab-btn'; };
     // Merge capability status into adopter nodes
     var capByPubkey = {};
     (caps || []).forEach(function(c) { capByPubkey[c.pubkey] = c; });
@@ -1404,17 +1737,24 @@
     var counts = { confirmed: 0, suspected: 0, unknown: 0 };
     rows.forEach(function(r) { counts[r.status] = (counts[r.status] || 0) + 1; });
 
-    function buildTableContent(rows, filter) {
-      var filtered = filter === 'all' ? rows : rows.filter(function(r) { return r.status === filter; });
+    var sortCols = [
+      { key: 'name', label: 'Node' }, { key: 'role', label: 'Role' }, { key: 'status', label: 'Status' },
+      { key: 'hashSize', label: 'Hash Size' }, { key: 'packets', label: 'Adverts' }, { key: 'lastSeen', label: 'Last Seen' },
+    ];
+    // The keys are the fixed ones above, never a value from the URL.
+    function theadHtml(sort) {
+      return '<thead><tr>' + sortCols.map(function (c) {
+        var active = c.key === sort.col;
+        return '<th scope="col" class="sortable' + (active ? ' sort-active' : '') + '" data-sort="' + c.key + '"' +
+          analyticsSortAttrs(c.key, sort.col, sort.dir) + '>' +
+          c.label + channelSortArrow(c.key, sort.col, sort.dir) + '</th>';
+      }).join('') + '</tr></thead>';
+    }
+
+    function buildTableContent(rows, filter, sort) {
+      var filtered = sortMbAdopterRows(filter === 'all' ? rows : rows.filter(function(r) { return r.status === filter; }), sort);
       return (filtered.length ? '<table class="analytics-table" id="mbAdoptersTable" style="margin-top:12px">' +
-          '<thead><tr>' +
-            '<th scope="col" data-sort="name">Node</th>' +
-            '<th scope="col" data-sort="role">Role</th>' +
-            '<th scope="col" data-sort="status">Status</th>' +
-            '<th scope="col" data-sort="hashSize">Hash Size</th>' +
-            '<th scope="col" data-sort="packets">Adverts</th>' +
-            '<th scope="col" data-sort="lastSeen">Last Seen</th>' +
-          '</tr></thead>' +
+          theadHtml(sort) +
           '<tbody>' +
             filtered.map(function(r) {
               var roleColor = (window.ROLE_COLORS || {})[r.role] || '#6b7280';
@@ -1446,20 +1786,22 @@
           '<strong>Unknown</strong> = no multi-byte evidence yet.</p>' +
         '</div>' +
         '<div style="display:flex;gap:4px;flex-wrap:wrap" id="mbCapFilters">' +
-          '<button class="tab-btn active" data-mb-filter="all">All (' + rows.length + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="confirmed" style="--filter-color:var(--success, #22c55e)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Confirmed (' + counts.confirmed + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="suspected" style="--filter-color:var(--warning, #eab308)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Suspected (' + counts.suspected + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="unknown" style="--filter-color:var(--text-muted, #888)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-question"/></svg> Unknown (' + counts.unknown + ')</button>' +
+          '<button class="' + mbBtnClass('all') + '" data-mb-filter="all">All (' + rows.length + ')</button>' +
+          '<button class="' + mbBtnClass('confirmed') + '" data-mb-filter="confirmed" style="--filter-color:var(--success, #22c55e)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Confirmed (' + counts.confirmed + ')</button>' +
+          '<button class="' + mbBtnClass('suspected') + '" data-mb-filter="suspected" style="--filter-color:var(--warning, #eab308)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Suspected (' + counts.suspected + ')</button>' +
+          '<button class="' + mbBtnClass('unknown') + '" data-mb-filter="unknown" style="--filter-color:var(--text-muted, #888)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-question"/></svg> Unknown (' + counts.unknown + ')</button>' +
         '</div>' +
       '</div>' +
-      '<div id="mbAdoptersTableWrap">' + buildTableContent(rows, 'all') + '</div>' +
+      '<div id="mbAdoptersTableWrap">' + buildTableContent(rows, initialFilter, initialSort) + '</div>' +
     '</div></div>';
 
     // Use setTimeout for event delegation on the stable section container
     setTimeout(function() {
       var section = document.getElementById('mbAdoptersSection');
       if (!section) return;
-      var currentFilter = 'all';
+      var currentFilter = initialFilter;
+      var currentSort = initialSort;
+      attachSortKeyboard(section, 'th[data-sort]');
 
       section.addEventListener('click', function handler(e) {
         var btn = e.target.closest('[data-mb-filter]');
@@ -1470,30 +1812,23 @@
           buttons.forEach(function(b) { b.classList.toggle('active', b.dataset.mbFilter === currentFilter); });
           // Replace only the table content, not the whole section
           var wrap = section.querySelector('#mbAdoptersTableWrap');
-          if (wrap) wrap.innerHTML = buildTableContent(rows, currentFilter);
+          if (wrap) wrap.innerHTML = buildTableContent(rows, currentFilter, currentSort);
+          setViewParam(HASHSTATS_MB_FILTER, currentFilter);
           return;
         }
+        // #226: a header click re-renders the table (the same path as a
+        // filter click) in the new order, so the sort survives the next
+        // filter click and the header shows it.
         var th = e.target.closest('[data-sort]');
         if (th) {
-          var tbody = section.querySelector('tbody');
-          if (!tbody) return;
-          var sortRows = Array.from(tbody.querySelectorAll('tr'));
           var col = th.dataset.sort;
-          var colIdx = { name: 0, status: 1, hashSize: 2, packets: 3, lastSeen: 4 };
-          var statusWeight = { 'confirmed': 0, 'suspected': 1, 'unknown': 2 };
-          sortRows.sort(function(a, b) {
-            var va = a.children[colIdx[col]] ? a.children[colIdx[col]].textContent.trim() : '';
-            var vb = b.children[colIdx[col]] ? b.children[colIdx[col]].textContent.trim() : '';
-            if (col === 'status') {
-              va = statusWeight[va.toLowerCase().split(' ').pop()] !== undefined ? statusWeight[va.toLowerCase().split(' ').pop()] : 2;
-              vb = statusWeight[vb.toLowerCase().split(' ').pop()] !== undefined ? statusWeight[vb.toLowerCase().split(' ').pop()] : 2;
-            }
-            if (col === 'hashSize' || col === 'packets') { va = parseInt(va) || 0; vb = parseInt(vb) || 0; }
-            if (va < vb) return -1;
-            if (va > vb) return 1;
-            return 0;
-          });
-          sortRows.forEach(function(r) { tbody.appendChild(r); });
+          if (col === HASHSTATS_MB_SORT.dflt || HASHSTATS_MB_SORT.allowed.indexOf(col) < 0) return;
+          currentSort = nextMbSort(currentSort, col);
+          var focused = document.activeElement === th;
+          var sortWrap = section.querySelector('#mbAdoptersTableWrap');
+          if (sortWrap) sortWrap.innerHTML = buildTableContent(rows, currentFilter, currentSort);
+          restoreSortFocus(section, 'th[data-sort="' + col + '"]', focused);
+          _writeViewParams([HASHSTATS_MB_SORT, HASHSTATS_MB_DIR], [currentSort.col, currentSort.dir]);
         }
       });
     }, 100);
@@ -1514,18 +1849,18 @@
   async function renderCollisionTab(el, data, collisionData) {
     el.innerHTML = `
       <nav id="hashIssuesToc" style="display:flex;gap:12px;margin-bottom:12px;font-size:13px;flex-wrap:wrap">
-        <a href="#/analytics?tab=collisions&section=inconsistentHashSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Inconsistent Sizes</a>
+        <a data-hash-section="inconsistentHashSection" href="#/analytics?tab=collisions&section=inconsistentHashSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Inconsistent Sizes</a>
         <span style="color:var(--border)">|</span>
-        <a href="#/analytics?tab=collisions&section=hashMatrixSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Hash Matrix</a>
+        <a data-hash-section="hashMatrixSection" href="#/analytics?tab=collisions&section=hashMatrixSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Hash Matrix</a>
         <span style="color:var(--border)">|</span>
-        <a href="#/analytics?tab=collisions&section=collisionRiskSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-bomb"/></svg> Collision Risk</a>
+        <a data-hash-section="collisionRiskSection" href="#/analytics?tab=collisions&section=collisionRiskSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-bomb"/></svg> Collision Risk</a>
         <span style="color:var(--border)">|</span>
         <a href="#/analytics?tab=prefix-tool" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Check a prefix →</a>
       </nav>
       <p class="text-muted" style="margin:0 0 12px;font-size:0.78em">Collisions <strong>actually observed in packet traffic</strong> — among <strong>repeaters</strong> grouped by their configured hash size. For <em>theoretical</em> address conflicts that <em>would</em> occur if all repeaters used a given hash size, see the <a href="#/analytics?tab=prefix-tool" style="color:var(--link-color)">Prefix Tool</a> tab.</p>
 
       <div class="analytics-card" id="inconsistentHashSection">
-        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Inconsistent Hash Sizes</h3><a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Inconsistent Hash Sizes</h3><a data-hash-section="" href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
         <p class="text-muted" style="margin:4px 0 8px;font-size:0.8em">Repeaters and room servers sending adverts with varying hash sizes in the last 7 days. Originally caused by a <a href="https://github.com/meshcore-dev/MeshCore/commit/fcfdc5f" target="_blank" style="color:var(--link-color)">firmware bug</a> where automatic adverts ignored the configured multibyte path setting, fixed in <a href="https://github.com/meshcore-dev/MeshCore/releases/tag/repeater-v1.14.1" target="_blank" style="color:var(--link-color)">repeater v1.14.1</a>. Companion nodes are excluded.</p>
         <div id="inconsistentHashList"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading…</div></div>
       </div>
@@ -1533,7 +1868,7 @@
       <div class="analytics-card" id="hashMatrixSection">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <h3 style="margin:0" id="hashMatrixTitle"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Hash Usage Matrix</h3>
-          <a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a>
+          <a data-hash-section="" href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a>
         </div>
         <div style="display:flex;align-items:center;gap:16px;margin:8px 0">
           <div class="hash-byte-selector" id="hashByteSelector" style="display:flex;gap:4px">
@@ -1547,7 +1882,7 @@
       </div>
 
       <div class="analytics-card" id="collisionRiskSection">
-        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0" id="collisionRiskTitle"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-bomb"/></svg> Collision Risk</h3><a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0" id="collisionRiskTitle"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-bomb"/></svg> Collision Risk</h3><a data-hash-section="" href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
         <div id="collisionList"><div class="text-muted" style="padding:8px">Loading…</div></div>
       </div>
     `;
@@ -1584,9 +1919,21 @@
 
     // Repeaters and routing nodes no longer needed — collision data is server-computed
 
-    let currentBytes = 1;
+    // #1914: keep both the bookmark and the section links on this byte size.
+    // Deliberately not part of the rendering path, and called last:
+    // history.replaceState can throw (Safari throttles it, and it is
+    // unavailable on an opaque origin), and a URL-sync failure must not take
+    // the whole tab down with it — the views have already rendered by then.
+    function syncHashUrl(bytes) {
+      if (!window.URLState) return;
+      const newHash = URLState.updateHashParams({ bytes }, location.hash);
+      if (newHash !== location.hash) history.replaceState(null, '', newHash);
+      el.querySelectorAll('[data-hash-section]').forEach(link => {
+        link.href = URLState.updateHashParams({ section: link.dataset.hashSection }, newHash);
+      });
+    }
+
     function refreshHashViews(bytes) {
-      currentBytes = bytes;
       hideMatrixTip();
       // Update selector button states
       document.querySelectorAll('.hash-byte-btn').forEach(b => {
@@ -1608,6 +1955,7 @@
       const riskCard = document.getElementById('collisionRiskSection');
       if (riskCard) riskCard.style.display = '';
       renderCollisionsFromServer(cData.by_size[String(bytes)], bytes);
+      syncHashUrl(bytes);
     }
 
     // Wire up selector
@@ -1615,7 +1963,9 @@
       btn.addEventListener('click', () => refreshHashViews(Number(btn.dataset.bytes)));
     });
 
-    refreshHashViews(1);
+    // Read on every render so tab, filter and theme refreshes retain the view.
+    const urlBytes = new URLSearchParams(location.hash.split('?')[1] || '').get('bytes');
+    refreshHashViews(['1', '2', '3'].includes(urlBytes) ? Number(urlBytes) : 1);
   }
 
   function renderHashTimeline(hourly) {
@@ -2220,7 +2570,17 @@
     // Render minimap
     if (hasMap && typeof L !== 'undefined') {
       const map = L.map('subpathMap', { zoomControl: false, attributionControl: false });
-      L.tileLayer(getTileUrl(), { maxZoom: 18 }).addTo(map);
+      // #332 — go through the one shared helper (nodes.js, also used by the
+      // node-detail inset, node-reach, packet-path, area-nodes and
+      // rx-coverage maps). It resolves the configured provider for the
+      // current theme AND applies that provider's invertFilter to THIS
+      // map's own tile pane. A bare L.tileLayer(getTileUrl()) skipped the
+      // filter, so the keyless-OSM dark default (the light OSM template
+      // plus an invert filter) rendered a light basemap in a dark page.
+      // #756 — nodes.js (which defines this) always loads before this file
+      // (index.html), so the uncredited OSM fallback this used to have on a
+      // missing helper was dead code.
+      window._applyTilesToNodeMap(map);
 
       const latlngs = [];
       nodesWithLoc.forEach((n, i) => {
@@ -2240,14 +2600,44 @@
     }
   }
 
+  // #560 — mirrors the role set and pluralized keys of GetAllRoleCounts
+  // (cmd/server/db.go), but tallies the rows the caller already loaded
+  // instead of querying the whole `nodes` table, so the breakdown describes
+  // the same region/area-filtered population as the Network Status counts
+  // rendered above it. Single bounded O(n) pass; no network call. Roles
+  // outside the known set (including "observer" and missing/unrecognized
+  // values) are not tallied, matching GetAllRoleCounts' existing omission of
+  // them from the breakdown today.
+  const NODE_ROLE_BREAKDOWN_KEYS = { repeater: 'repeaters', room: 'rooms', companion: 'companions', sensor: 'sensors' };
+  function nodeRoleBreakdownCounts(nodes) {
+    const counts = { repeaters: 0, rooms: 0, companions: 0, sensors: 0 };
+    (nodes || []).forEach(n => {
+      const key = NODE_ROLE_BREAKDOWN_KEYS[n && n.role];
+      if (key) counts[key]++;
+    });
+    return counts;
+  }
+
+  // Bumped on every call and checked after the await below so a late
+  // response from a superseded filter/tab change can never overwrite a
+  // newer render (mirrors the _channelRenderGen / _distanceGen pattern
+  // already used elsewhere in this file).
+  let _nodesTabGen = 0;
   async function renderNodesTab(el) {
+    const myGen = ++_nodesTabGen;
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading node analytics…</div>';
     try {
       const rq = RegionFilter.regionQueryString() + AreaFilter.areaQueryString();
-      const [nodesResp, bulkHealth] = await Promise.all([
+      // #902: ONE bulk /observers request (cached by CLIENT_TTL.observers)
+      // lets Network Status credit a node that is a reporting observer. A
+      // failed request just means no observer credit, never a failed tab.
+      const [nodesResp, bulkHealth, observersResp] = await Promise.all([
         fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList }),
-        api('/nodes/bulk-health?limit=50' + rq, { ttl: CLIENT_TTL.analyticsRF })
+        api('/nodes/bulk-health?limit=50' + rq, { ttl: CLIENT_TTL.analyticsRF }),
+        api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null)
       ]);
+      if (myGen !== _nodesTabGen) return; // superseded by a newer filter/tab change
+      const observerIdx = MyMeshObservers.index(observersResp);
       const nodes = nodesResp.nodes || nodesResp;
       const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
       const myKeys = new Set(myNodes.map(n => n.pubkey));
@@ -2255,30 +2645,36 @@
       // Map bulk health by pubkey
       const healthMap = {};
       bulkHealth.forEach(h => { healthMap[h.public_key] = h; });
-      const enriched = nodes.filter(n => healthMap[n.public_key]).map(n => ({ ...n, health: { stats: healthMap[n.public_key].stats, observers: healthMap[n.public_key].observers } }));
+      const enriched = nodes.filter(n => healthMap[n.public_key]).map(n => ({ ...n, health: { stats: healthMap[n.public_key].stats, heard: HeardBy.counts(healthMap[n.public_key]) } }));
 
       // Compute rankings
       const byPackets = [...enriched].sort((a, b) => (b.health.stats.totalTransmissions || b.health.stats.totalPackets || 0) - (a.health.stats.totalTransmissions || a.health.stats.totalPackets || 0));
       const bySnr = [...enriched].filter(n => n.health.stats.avgSnr != null).sort((a, b) => b.health.stats.avgSnr - a.health.stats.avgSnr);
-      const byObservers = [...enriched].sort((a, b) => (b.health.observers?.length || 0) - (a.health.observers?.length || 0));
+      // #76: rank by observers that heard the node itself, then by relay ones.
+      const byObservers = [...enriched].sort((a, b) => (b.health.heard.direct - a.health.heard.direct) || (b.health.heard.relay - a.health.heard.relay));
       const byRecent = [...enriched].filter(n => n.health.stats.lastHeard).sort((a, b) => new Date(b.health.stats.lastHeard) - new Date(a.health.stats.lastHeard));
 
-      // Compute network status client-side from loaded nodes using shared getHealthThresholds()
+      // Compute network status client-side from loaded nodes using the shared getNodeHealth() (#902: observer credit).
       const now = Date.now();
       let active = 0, degraded = 0, silent = 0;
       nodes.forEach(function(n) {
-        const role = n.role || 'unknown';
-        const th = getHealthThresholds(role);
-        const lastMs = n.last_heard ? new Date(n.last_heard).getTime()
-                     : n.last_seen ? new Date(n.last_seen).getTime()
-                     : 0;
-        const age = lastMs ? (now - lastMs) : Infinity;
-        if (age < th.degradedMs) active++;
-        else if (age < th.silentMs) degraded++;
+        const status = getNodeHealth(n.role, getHealthLastHeard(n), MyMeshObservers.reportedAt(observerIdx, n.public_key), now).status;
+        if (status === 'healthy') active++;
+        else if (status === 'degraded') degraded++;
         else silent++;
       });
       const totalNodes = nodesResp.total || nodes.length;
-      const roleCounts = nodesResp.counts || {};
+      const roleCounts = nodeRoleBreakdownCounts(nodes);
+      // #560 follow-up: fetchAllNodes silently slices to its safetyCap
+      // (10000 nodes by default, public/app.js). Total Nodes and the Role
+      // Breakdown below both come from this same `nodes` array, so they stay
+      // mutually consistent even above the cap — but presenting a truncated
+      // population as complete would still be misleading. Surface it rather
+      // than guess whether any given deployment can reach it.
+      const nodesTruncatedNotice = nodesResp.truncated ? `
+        <div role="alert" style="margin-bottom:10px;padding:10px 14px;border:1px solid var(--status-yellow);border-radius:6px;background:var(--bg-secondary,var(--bg))">
+          <strong style="color:var(--status-yellow)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Node list truncated at ${nodes.length.toLocaleString()} rows</strong> — Total Nodes and Role Breakdown below may not reflect the complete filtered population.
+        </div>` : '';
 
       function nodeLink(n) {
         return `<a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">${esc(n.name || n.public_key.slice(0, 12))}</a>`;
@@ -2290,6 +2686,7 @@
       // ROLE_COLORS from shared roles.js
 
       el.innerHTML = `
+        ${nodesTruncatedNotice}
         <div class="analytics-section">
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Network Status</h3>
           <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px">
@@ -2299,7 +2696,7 @@
             </div>
             <div class="analytics-stat-card" style="flex:1;min-width:120px;text-align:center;padding:16px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px">
               <div style="font-size:28px;font-weight:700;color:var(--status-yellow)">${degraded}</div>
-              <div style="font-size:11px;text-transform:uppercase;color:var(--text-muted)"><span style="color:var(--status-yellow)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> Degraded</div>
+              <div style="font-size:11px;text-transform:uppercase;color:var(--text-muted)"><span style="color:var(--status-yellow)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> Degraded / quiet</div>
             </div>
             <div class="analytics-stat-card" style="flex:1;min-width:120px;text-align:center;padding:16px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px">
               <div style="font-size:28px;font-weight:700;color:var(--status-red)">${silent}</div>
@@ -2321,7 +2718,7 @@
 
           ${myKeys.size ? `<h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-star-fill"/></svg> My Claimed Nodes</h3>
           <table class="analytics-table" style="margin-bottom:24px">
-            <thead><tr><th scope="col">Node</th><th scope="col">Role</th><th scope="col">Packets</th><th scope="col">Avg SNR</th><th scope="col">Observers</th><th scope="col">Last Heard</th></tr></thead>
+            <thead><tr><th scope="col">Node</th><th scope="col">Role</th><th scope="col">Packets</th><th scope="col" title="${esc(HeardBy.SNR_TIP)}">Direct SNR</th><th scope="col" title="${esc(HeardBy.DIRECT_TIP)}">Direct observers</th><th scope="col" title="${esc(HeardBy.RELAY_TIP)}">Via relay</th><th scope="col">Last Heard</th></tr></thead>
             <tbody>
               ${enriched.filter(n => myKeys.has(n.public_key)).map(n => {
                 const s = n.health.stats;
@@ -2330,10 +2727,11 @@
                   <td><span class="badge" style="${(window.aaBadgeStyle && window.aaBadgeStyle(ROLE_COLORS[n.role]||'#6b7280')) || ('background:'+(ROLE_COLORS[n.role]||'#6b7280')+';color:#fff')}">${n.role}</span></td>
                   <td>${s.totalTransmissions || s.totalPackets || 0}</td>
                   <td>${s.avgSnr != null ? s.avgSnr.toFixed(1) + ' dB' : '—'}</td>
-                  <td>${n.health.observers?.length || 0}</td>
+                  <td>${n.health.heard.direct}</td>
+                  <td>${n.health.heard.relay}</td>
                   <td>${s.lastHeard ? timeAgo(s.lastHeard) : '—'}</td>
                 </tr>`;
-              }).join('') || '<tr><td colspan="6" class="text-muted">No claimed nodes have health data</td></tr>'}
+              }).join('') || '<tr><td colspan="7" class="text-muted">No claimed nodes have health data</td></tr>'}
             </tbody>
           </table>` : ''}
 
@@ -2354,14 +2752,14 @@
 
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-cell-signal-high"/></svg> Best Signal Quality</h3>
           <table class="analytics-table" style="margin-bottom:24px">
-            <thead><tr><th scope="col">#</th><th scope="col">Node</th><th scope="col">Role</th><th scope="col">Avg SNR</th><th scope="col">Observers</th><th scope="col">Analytics</th></tr></thead>
+            <thead><tr><th scope="col">#</th><th scope="col">Node</th><th scope="col">Role</th><th scope="col" title="${esc(HeardBy.SNR_TIP)}">Direct SNR</th><th scope="col" title="${esc(HeardBy.DIRECT_TIP)}">Direct observers</th><th scope="col">Analytics</th></tr></thead>
             <tbody>
               ${bySnr.slice(0, 15).map((n, i) => `<tr>
                 <td>${i + 1}</td>
                 <td>${nodeLink(n)}${claimedBadge(n)}</td>
                 <td><span class="badge" style="${(window.aaBadgeStyle && window.aaBadgeStyle(ROLE_COLORS[n.role]||'#6b7280')) || ('background:'+(ROLE_COLORS[n.role]||'#6b7280')+';color:#fff')}">${n.role}</span></td>
                 <td>${n.health.stats.avgSnr.toFixed(1)} dB</td>
-                <td>${n.health.observers?.length || 0}</td>
+                <td>${n.health.heard.direct}</td>
                 <td><a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link" aria-label="Per-node analytics"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-bar"/></svg></a></td>
               </tr>`).join('')}
             </tbody>
@@ -2369,13 +2767,14 @@
 
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-eye"/></svg> Most Observed Nodes</h3>
           <table class="analytics-table" style="margin-bottom:24px">
-            <thead><tr><th scope="col">#</th><th scope="col">Node</th><th scope="col">Role</th><th scope="col">Observers</th><th scope="col">Avg SNR</th><th scope="col">Analytics</th></tr></thead>
+            <thead><tr><th scope="col">#</th><th scope="col">Node</th><th scope="col">Role</th><th scope="col" title="${esc(HeardBy.DIRECT_TIP)}">Direct observers</th><th scope="col" title="${esc(HeardBy.RELAY_TIP)}">Via relay</th><th scope="col" title="${esc(HeardBy.SNR_TIP)}">Direct SNR</th><th scope="col">Analytics</th></tr></thead>
             <tbody>
               ${byObservers.slice(0, 15).map((n, i) => `<tr>
                 <td>${i + 1}</td>
                 <td>${nodeLink(n)}${claimedBadge(n)}</td>
                 <td><span class="badge" style="${(window.aaBadgeStyle && window.aaBadgeStyle(ROLE_COLORS[n.role]||'#6b7280')) || ('background:'+(ROLE_COLORS[n.role]||'#6b7280')+';color:#fff')}">${n.role}</span></td>
-                <td>${n.health.observers?.length || 0}</td>
+                <td>${n.health.heard.direct}</td>
+                <td>${n.health.heard.relay}</td>
                 <td>${n.health.stats.avgSnr != null ? n.health.stats.avgSnr.toFixed(1) + ' dB' : '—'}</td>
                 <td><a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link" aria-label="Per-node analytics"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-bar"/></svg></a></td>
               </tr>`).join('')}
@@ -2397,6 +2796,7 @@
           </table>
         </div>`;
     } catch (e) {
+      if (myGen !== _nodesTabGen) return;
       el.innerHTML = `<div style="padding:40px;text-align:center;color:#ff6b6b">Failed to load node analytics: ${esc(e.message)}</div>`;
     }
   }
@@ -2455,24 +2855,27 @@
       // fine for a handful of favorites and amortized by CLIENT_TTL.nodeList
       // across tabs. If favorite counts ever grow large, switch to per-node
       // Promise.all(favs.map(pk => api('/nodes/' + pk))).
-      const [nodesResp, clockData, graphData] = await Promise.all([
+      const [nodesResp, clockData, graphData, observersResp] = await Promise.all([
         fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList }),
         api('/nodes/clock-skew', { ttl: CLIENT_TTL.analyticsRF }).catch(() => []),
         api('/analytics/neighbor-graph?min_count=1&min_score=0', { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ nodes: [], edges: [] })),
+        // #902: one cached bulk roster, for observer credit in statusOf().
+        api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null),
       ]);
+      const observerIdx = MyMeshObservers.index(observersResp);
       const allNodes = nodesResp.nodes || nodesResp;
       const clockByPk = {};
       (Array.isArray(clockData) ? clockData : []).forEach(c => { if (c && c.pubkey) clockByPk[c.pubkey] = c; });
 
       const now = Date.now();
       function ageOf(n) {
-        const ms = n.last_heard ? new Date(n.last_heard).getTime() : n.last_seen ? new Date(n.last_seen).getTime() : 0;
+        const heardAt = getHealthLastHeard(n);
+        const ms = heardAt ? new Date(heardAt).getTime() : 0;
         return ms ? now - ms : Infinity;
       }
       function statusOf(n) {
-        const th = (typeof getHealthThresholds === 'function') ? getHealthThresholds(n.role) : { degradedMs: 3600000, silentMs: 86400000 };
-        const age = ageOf(n);
-        return age < th.degradedMs ? 'active' : age < th.silentMs ? 'degraded' : 'silent';
+        const status = getNodeHealth(n.role, getHealthLastHeard(n), MyMeshObservers.reportedAt(observerIdx, n.public_key), now).status;
+        return status === 'healthy' ? 'active' : status || 'silent';
       }
       const pct = v => (v != null ? (v * 100).toFixed(1) + '%' : '—');
       // #1456: prefer traffic_share_score, fall back to usefulness_score.
@@ -2823,11 +3226,107 @@
     return svg;
   }
 
+  // === Busiest Repeaters — repeaters ranked by packets relayed ===
+  // relay_count_1h/24h come with every repeater/room row of /api/nodes
+  // (cmd/server/repeater_liveness.go): distinct non-advert packets in which
+  // the node was resolved as a path hop. A repeater that is also an observer
+  // reports its real TX airtime (RF Health), so it is left out by default;
+  // the list is for the repeaters we only see through paths.
+  const BUSIEST_DEFAULT_ROWS = 50;
+
+  // Sort key → [primary, secondary] row fields; the name breaks the last tie.
+  const BUSIEST_ORDER = { '24h': ['relay24h', 'relay1h'], '1h': ['relay1h', 'relay24h'], peak: ['estPeak', 'relay24h'] };
+
+  // observerIds: lower-case observer ids, which are node public keys.
+  // est_airtime_* (#697 M2) are absent on an older server; such a row sorts
+  // last by airtime and shows a dash.
+  function _busiestRepeaterRows(nodes, observerIds, sortKey, includeObservers) {
+    const [primary, secondary] = BUSIEST_ORDER[sortKey] || BUSIEST_ORDER['24h'];
+    const pct = v => (v == null || isNaN(Number(v)) ? null : Number(v));
+    const rank = v => (v == null ? -1 : v);
+    return nodes
+      .filter(n => (n.role === 'repeater' || n.role === 'room') && Number(n.relay_count_24h) > 0)
+      .map(n => ({
+        pk: n.public_key,
+        name: n.name || (n.public_key ? n.public_key.slice(0, 12) : '?'),
+        role: n.role,
+        relay1h: Number(n.relay_count_1h) || 0,
+        relay24h: Number(n.relay_count_24h) || 0,
+        estAvg: pct(n.est_airtime_pct_24h),
+        estPeak: pct(n.est_airtime_peak_pct),
+        observer: !!n.public_key && observerIds.has(String(n.public_key).toLowerCase()),
+      }))
+      .filter(r => includeObservers || !r.observer)
+      .sort((a, b) => (rank(b[primary]) - rank(a[primary])) || (rank(b[secondary]) - rank(a[secondary])) || a.name.localeCompare(b.name));
+  }
+
+  // A seen-airtime cell: a lower bound, so it reads "≥". Formatted and
+  // flagged like the observers' real TX airtime (ObserverAirtime, default
+  // 10% limit); the flag holds because a lower bound at the limit means the
+  // repeater is over it.
+  const BUSIEST_AIRTIME_TITLE = 'Seen airtime: LoRa time-on-air of the relayed packets the observers saw. A lower bound: on staging data the real airtime was about 1.5 to 2 times higher for well-observed repeaters and up to 50 times for others. Flagged when even the seen part is at or above the 10% duty-cycle limit.';
+
+  // #716: the "Relayed" columns and the Home/My Mesh "All traffic" metric
+  // (MyMeshActivity.traffic24h) both describe a repeater's 24h/1h traffic but
+  // count different things, so each names what IT counts rather than
+  // assuming the reader will compare the two. BUSIEST_RELAYED_TITLE is this
+  // table's half of that; TRAFFIC_LABEL is read from MyMeshActivity (DRY)
+  // so a rename of the Home label can't silently go stale here.
+  const BUSIEST_RELAYED_TITLE = 'Relayed: distinct packets this repeater forwarded (it appears as a relay hop in the observed path). Adverts are not counted. Refreshed periodically, so it can lag a few minutes behind live traffic.';
+  function _busiestAirtimeCell(pct) {
+    const oa = window.ObserverAirtime;
+    if (pct == null || !oa) return '<span class="text-muted">—</span>';
+    const shown = oa.format(pct);
+    const text = pct > 0 && shown.charAt(0) !== '<' ? '≥' + shown : shown.replace('<', '&lt;');
+    return `<span class="airtime-pct${oa.isOver(pct) ? ' airtime-over' : ''}" title="${BUSIEST_AIRTIME_TITLE}">${text}</span>`;
+  }
+
+  function renderBusiestRepeatersTable(rows, sortKey, limit) {
+    if (!rows.length) {
+      return '<div class="text-muted" style="padding:16px">No repeater in this view relayed a packet in the last 24 hours.</div>';
+    }
+    const shown = limit === 'all' ? rows : rows.slice(0, BUSIEST_DEFAULT_ROWS);
+    const countTh = (key, label) => `<th scope="col" style="text-align:right"${key === sortKey ? ' aria-sort="descending"' : ''}>${label}</th>`;
+    // In the #206 scroll wrapper already, so a redraw keeps it. Long names
+    // wrap anywhere, and busiest-repeaters-table lifts the wrapper's 480px
+    // minimum: the four columns fit a phone.
+    // Two header rows: the group name ("Relayed"/"Seen airtime") sits over
+    // the per-window column name, which keeps the six columns inside a
+    // phone screen while each column still names what it counts (#716).
+    let html = '<div class="analytics-table-scroll"><table class="analytics-table busiest-repeaters-table" data-testid="busiest-repeaters-table"><thead><tr>'
+      + '<th scope="col" rowspan="2" style="text-align:right;width:3em">#</th><th scope="col" rowspan="2">Repeater</th>'
+      + `<th scope="colgroup" colspan="2" style="text-align:center" title="${BUSIEST_RELAYED_TITLE}">Relayed</th>`
+      + `<th scope="colgroup" colspan="2" style="text-align:center" title="${BUSIEST_AIRTIME_TITLE}">Seen airtime</th></tr><tr>`
+      + countTh('24h', 'Relayed 24h') + countTh('1h', 'Relayed 1h')
+      + '<th scope="col" style="text-align:right">24h</th>' + countTh('peak', 'Busiest hour') + '</tr></thead><tbody>';
+    shown.forEach((r, i) => {
+      const tags = (r.role === 'room' ? ' <span class="text-muted">room</span>' : '')
+        + (r.observer ? ' <span class="text-muted">observer</span>' : '');
+      html += `<tr><td style="text-align:right">${i + 1}</td>`
+        + `<td style="overflow-wrap:anywhere"><a href="#/nodes/${encodeURIComponent(r.pk)}/analytics" class="analytics-link">${esc(r.name)}</a>${tags}</td>`
+        + `<td style="text-align:right">${r.relay24h.toLocaleString()}</td>`
+        + `<td style="text-align:right">${r.relay1h.toLocaleString()}</td>`
+        + `<td style="text-align:right">${_busiestAirtimeCell(r.estAvg)}</td>`
+        + `<td style="text-align:right">${_busiestAirtimeCell(r.estPeak)}</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    if (rows.length > BUSIEST_DEFAULT_ROWS) {
+      const label = limit === 'all' ? 'Show top ' + BUSIEST_DEFAULT_ROWS : 'Show all ' + rows.length.toLocaleString();
+      html += `<div style="margin-top:6px;text-align:right"><button type="button" id="busiestLimitToggle" class="btn-link" style="font-size:12px">${label}</button></div>`;
+    }
+    return html;
+  }
+
   async function renderRepeaterMetricsTab(el) {
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading repeater metrics…</div>';
     try {
       const rq = RegionFilter.regionQueryString() + AreaFilter.areaQueryString();
-      const resp = await fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList });
+      // The observer list only marks rows in Busiest Repeaters; without it
+      // every repeater is listed as a non-observer.
+      const [resp, obsResp] = await Promise.all([
+        fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList }),
+        api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null),
+      ]);
       const nodes = resp.nodes || resp;
       const favs = new Set(typeof getFavorites === 'function' ? getFavorites() : []);
       const points = _toScatterPoints(nodes, favs);
@@ -2847,6 +3346,11 @@
       let yKey = localStorage.getItem('meshcore-repeater-scatter-y') || 'usefulness';
       const opts = sel => REPEATER_METRIC_AXES.map(a => `<option value="${a.key}"${a.key === sel ? ' selected' : ''}>${esc(a.label)}</option>`).join('');
 
+      const observerIds = new Set(((obsResp && obsResp.observers) || [])
+        .map(o => String(o.id || '').toLowerCase()).filter(Boolean));
+      let [bSort, bObs, bLimit] = restoreViewParams([BUSIEST_SORT, BUSIEST_OBSERVERS, BUSIEST_LIMIT]);
+      const observerRepeaters = _busiestRepeaterRows(nodes, observerIds, bSort, true).filter(r => r.observer).length;
+
       el.innerHTML = `
         <div class="analytics-section">
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-target"/></svg> Repeater Metric Scatter</h3>
@@ -2854,16 +3358,62 @@
           <p class="text-muted" style="font-size:12px;margin-top:4px">Units — <strong>Usefulness</strong>: the #672 composite (0.30 bridge + 0.25 coverage + 0.25 redundancy + 0.20 traffic). <strong>Traffic share</strong>: % of non-advert traffic relayed. <strong>Bridge/Coverage/Redundancy</strong>: 0–100% (network-normalized). <strong>Relays (1h/24h)</strong> and <strong>Adverts</strong>: packet counts. Axes auto-scale to the data.</p>
           <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
             <label style="display:flex;gap:6px;align-items:center">X axis
-              <select id="metricScatterX" class="analytics-time-window-select" aria-label="X axis metric">${opts(xKey)}</select>
+              <select id="metricScatterX" class="time-window-select" aria-label="X axis metric">${opts(xKey)}</select>
             </label>
             <label style="display:flex;gap:6px;align-items:center">Y axis
-              <select id="metricScatterY" class="analytics-time-window-select" aria-label="Y axis metric">${opts(yKey)}</select>
+              <select id="metricScatterY" class="time-window-select" aria-label="Y axis metric">${opts(yKey)}</select>
             </label>
             <span class="text-muted">${points.length} repeater${points.length === 1 ? '' : 's'}</span>
           </div>
           <div id="metricScatterPlot"></div>
           <div id="metricScatterLegend" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px"></div>
+        </div>
+        <div class="analytics-section" id="busiestRepeaters">
+          <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Busiest Repeaters</h3>
+          <p class="text-muted">Repeaters ranked by packets relayed: distinct non-advert packets in which the observers saw the repeater as a hop. It is a lower bound, since a packet no observer heard is not counted, and a hop sent as a short (1-byte) prefix can be credited to the wrong repeater. A repeater that is also an observer reports its real airtime under RF Health, so it is hidden here unless included.</p>
+          <p class="text-muted" style="font-size:12px;margin-top:4px">This is not the same number as a repeater's "${window.MyMeshActivity.TRAFFIC_LABEL}" on Home → My Mesh: that figure also counts its own adverts and traffic addressed to or merely naming it, so it is usually larger.</p>
+          <p class="text-muted" style="font-size:12px;margin-top:4px"><strong>Seen airtime</strong>: LoRa time-on-air of the relayed packets the observers saw (other nodes' adverts included), as a share of the last 24 hours and of the busiest hour in them. It is a lower bound, shown as "≥": the repeater's own adverts, direct-routed traffic and packets no observer heard are missing. Compared with repeaters that report their own airtime, the real figure was about 1.5 to 2 times higher for well-observed repeaters and up to 50 times for others. So a low value does not mean a repeater is safely under the 10% duty-cycle limit (which applies per hour); a value flagged at the limit does mean it is over.</p>
+          <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+            <label style="display:flex;gap:6px;align-items:center">Sort by
+              <select id="busiestSort" class="time-window-select" aria-label="Sort busiest repeaters by">
+                <option value="24h"${bSort === '24h' ? ' selected' : ''}>Relayed 24h</option>
+                <option value="1h"${bSort === '1h' ? ' selected' : ''}>Relayed 1h</option>
+                <option value="peak"${bSort === 'peak' ? ' selected' : ''}>Busiest hour (seen airtime)</option>
+              </select>
+            </label>
+            <label style="display:flex;gap:6px;align-items:center">
+              <input type="checkbox" id="busiestObservers"${bObs === 'show' ? ' checked' : ''}> Include observer repeaters (${observerRepeaters})
+            </label>
+          </div>
+          <div id="busiestRepeatersTable"></div>
         </div>`;
+
+      const busiestEl = el.querySelector('#busiestRepeatersTable');
+      const busiestSort = el.querySelector('#busiestSort');
+      const busiestObservers = el.querySelector('#busiestObservers');
+      // Redraws only the table; the limit button is recreated each time, so
+      // it is wired again here.
+      function drawBusiest() {
+        const rows = _busiestRepeaterRows(nodes, observerIds, bSort, bObs === 'show');
+        busiestEl.innerHTML = renderBusiestRepeatersTable(rows, bSort, bLimit);
+        const toggle = busiestEl.querySelector('#busiestLimitToggle');
+        if (toggle) toggle.addEventListener('click', () => {
+          bLimit = bLimit === 'all' ? BUSIEST_LIMIT.dflt : 'all';
+          setViewParam(BUSIEST_LIMIT, bLimit);
+          drawBusiest();
+        });
+      }
+      busiestSort.addEventListener('change', () => {
+        bSort = BUSIEST_SORT.allowed.indexOf(busiestSort.value) >= 0 ? busiestSort.value : BUSIEST_SORT.dflt;
+        setViewParam(BUSIEST_SORT, bSort);
+        drawBusiest();
+      });
+      busiestObservers.addEventListener('change', () => {
+        bObs = busiestObservers.checked ? 'show' : 'hide';
+        setViewParam(BUSIEST_OBSERVERS, bObs);
+        drawBusiest();
+      });
+      drawBusiest();
 
       const plotEl = el.querySelector('#metricScatterPlot');
       const legendEl = el.querySelector('#metricScatterLegend');
@@ -2920,10 +3470,24 @@
   // === REPEATER METRICS BLOCK END (test harness slices the renderer block to here) ===
 
   async function renderDistanceTab(el) {
+    // A new render supersedes any earlier one and its pending retry (#120).
+    _leaveDistanceTab();
+    const gen = _distanceGen;
     try {
       const rqs = RegionFilter.regionQueryString();
-      const sep = rqs ? '?' + rqs.slice(1) : '';
-      const data = await api('/analytics/distance' + sep, { ttl: CLIENT_TTL.analyticsRF });
+      const data = await api(withQuery('/analytics/distance', rqs), { ttl: CLIENT_TTL.analyticsRF });
+      if (gen !== _distanceGen) return;   // re-rendered, switched tab or left meanwhile
+      if (_distanceIsBuilding(data)) {
+        const ms = _retryAfterDelayMs(data);
+        el.innerHTML = '<div class="text-center text-muted" id="distanceBuilding" role="status" style="padding:40px">' +
+          'Building the distance index…' +
+          '<div style="font-size:12px;margin-top:8px">This runs once after the server starts. Retrying in ' + Math.round(ms / 1000) + 's.</div></div>';
+        _distanceRetryTimer = setTimeout(function () {
+          _distanceRetryTimer = null;
+          if (gen === _distanceGen) renderDistanceTab(el);
+        }, ms);
+        return;
+      }
       const s = data.summary;
       let html = `<div class="analytics-grid">
         <div class="stat-card"><div class="stat-value">${s.totalHops.toLocaleString()}</div><div class="stat-label">Total Hops Analyzed</div></div>
@@ -3000,21 +3564,29 @@
         });
       });
     } catch (e) {
+      if (gen !== _distanceGen) return;
       el.innerHTML = `<div style="padding:40px;text-align:center;color:#ff6b6b">Failed to load distance analytics: ${esc(e.message)}</div>`;
     }
   }
 
-function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; } if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; } _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {
+    window._analyticsAssignTableIds = assignAnalyticsTableIds;
+    window._analyticsRenderScopesTab = renderScopesTab;
+    window._analyticsWithQuery = withQuery;
+    window._analyticsResolveViewParam = resolveViewParam;
     window._analyticsDecorateChannels = decorateAnalyticsChannels;
     window._analyticsSortChannels = sortChannels;
+    window._analyticsSortRows = sortAnalyticsRows;
+    window._analyticsNextSort = nextAnalyticsSort;
     window._analyticsLoadChannelSort = loadChannelSort;
     window._analyticsSaveChannelSort = saveChannelSort;
     window._analyticsChannelTbodyHtml = channelTbodyHtml;
     window._analyticsChannelTheadHtml = channelTheadHtml;
     window._analyticsRfNFColumnChart = rfNFColumnChart;
+    window._analyticsRenderRelayAirtimeDumbbell = renderRelayAirtimeDumbbell;
     window._analyticsRenderMultiByteCapability = renderMultiByteCapability;
     window._analyticsRenderMultiByteAdopters = renderMultiByteAdopters;
     window._analyticsHashStatCardsHtml = hashStatCardsHtml;
@@ -3023,7 +3595,10 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsStopForeignTrafficRefresh = _stopForeignTrafficRefresh;
     window._analyticsRenderWardrivingTab = renderWardrivingTab;
     window._analyticsStopWardrivingRefresh = _stopWardrivingRefresh;
+    window._analyticsIataPositionBadgeHtml = iataPositionBadgeHtml;
     window._analyticsRenderAreasTab = renderAreasTab;
+    window._analyticsRenderDistanceTab = renderDistanceTab;
+    window._analyticsLeaveDistanceTab = _leaveDistanceTab;
     window._analyticsStopAreasRefresh = _stopAreasRefresh;
     window._analyticsComputeNodesWithoutScope = computeNodesWithoutScope;
     window._analyticsComputeRepeatersNeverRelayingScope = computeRepeatersNeverRelayingScope;
@@ -3033,6 +3608,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsHopDepthTimeSeriesChartHtml = hopDepthTimeSeriesChartHtml;
     window._analyticsHopDepthLookupByPubkey = hopDepthLookupByPubkey;
     window._analyticsBridgeRepeaterPubkeySet = bridgeRepeaterPubkeySet;
+    window._analyticsNodeRoleBreakdownCounts = nodeRoleBreakdownCounts;
+    window._analyticsRenderNodesTab = renderNodesTab;
   }
 
   // ─── Neighbor Graph Tab ─────────────────────────────────────────────────────
@@ -3087,10 +3664,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
     // Load data
     const rqs = RegionFilter.regionQueryString();
-    const sep = rqs ? '?' + rqs.slice(1) : '';
     let graphData;
     try {
-      graphData = await api('/analytics/neighbor-graph' + sep + (sep ? '&' : '?') + 'min_count=1&min_score=0', { ttl: CLIENT_TTL.analyticsRF });
+      graphData = await api(withQuery('/analytics/neighbor-graph', rqs + '&min_count=1&min_score=0'), { ttl: CLIENT_TTL.analyticsRF });
     } catch (e) {
       el.innerHTML = `<div class="analytics-card"><p class="text-muted">Failed to load neighbor graph: ${esc(e.message)}</p></div>`;
       return;
@@ -3569,7 +4145,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         // #1270: fetch CONFIGURED-hash-size counts so the Network Overview
         // tells the operational story (matching Hash Stats "By Repeaters"),
         // not just a math-only count of unique pubkey slices.
-        api('/analytics/hash-sizes' + rq, { ttl: CLIENT_TTL.analyticsRF }).catch(() => null),
+        api(withQuery('/analytics/hash-sizes', rq), { ttl: CLIENT_TTL.analyticsRF }).catch(() => null),
       ]);
     } catch (e) {
       el.innerHTML = `<div class="text-muted" role="alert" style="padding:40px">Failed to load: ${esc(e.message)}</div>`;
@@ -4168,17 +4744,19 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           else if (obs.current_noise_floor >= -100) nfClass = 'rf-nf-warning';
         }
 
-        return `<div class="rf-cell${isSelected ? ' rf-cell-selected' : ''}" data-observer="${obs.observer_id}" tabindex="0" role="button" aria-label="Observer ${esc(name)}, noise floor ${nf} dBm">
+        return `<div class="rf-cell${isSelected ? ' rf-cell-selected' : ''}" data-observer="${esc(obs.observer_id)}" tabindex="0" role="button" aria-label="Observer ${esc(name)}, noise floor ${nf} dBm">
           <div class="rf-cell-header">
             <span class="rf-cell-name">${esc(name)}</span>
             <span class="rf-cell-nf ${nfClass}">${nf} dBm</span>
             ${batt ? `<span class="rf-cell-batt">${batt}</span>` : ''}
           </div>
-          <div class="rf-cell-sparkline" id="rf-spark-${obs.observer_id}"></div>
+          <div class="rf-cell-sparkline" id="rf-spark-${esc(obs.observer_id)}"></div>
           <div class="rf-cell-stats">
             <span>avg: ${avgNf}</span>
             <span>max: ${maxNf}</span>
             <span>${obs.sample_count} samples</span>
+            <span data-testid="rf-cell-airtime" title="${ObserverAirtime.TX_TITLE}">TX 1h: ${ObserverAirtime.badge(obs.tx_airtime_pct_1h, summaryData.duty_cycle_warn_pct)}</span>
+            <span data-testid="rf-cell-rx-airtime" title="${ObserverAirtime.RX_TITLE}">RX 1h: ${ObserverAirtime.rxBadge(obs.rx_airtime_pct_1h)}</span>
           </div>
         </div>`;
       }).join('');
@@ -4316,7 +4894,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           ${hasBattery ? '<div class="rf-detail-chart" id="rfDetailBatteryChart"></div>' : ''}
         </div>
         <div class="rf-detail-summary">
-          NF: ${curNf} dBm | avg: ${avgNf} | min: ${minNf} | max: ${maxNf} | TX: ${curTx} | RX: ${curRx} | Err: ${curErr} | Batt: ${curBatt}${reboots.length ? ' | ' + reboots.length + ' reboots' : ''}
+          NF: ${curNf} dBm | avg: ${avgNf} | min: ${minNf} | max: ${maxNf} | TX/sample: ${curTx} | RX/sample: ${curRx} | Err: ${curErr} | Batt: ${curBatt}${reboots.length ? ' | ' + reboots.length + ' reboots' : ''}
         </div>`;
 
       // Close button
@@ -4802,8 +5380,12 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
   // ===================== SCOPES =====================
   async function renderScopesTab(el) {
-    var winKey = 'scopes_window';
-    var selectedWindow = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(winKey)) || '24h';
+    // Both views are deep-linked: ?sub= and ?swin= (#205).
+    var scopesView = restoreViewParams([SCOPES_SUBTAB, SCOPES_WINDOW]);
+    if (el._refreshScopes && el.querySelector('#scopes-cards')) { el._refreshScopes(scopesView); return; }
+    var selectedSubtab = scopesView[0];
+    var selectedWindow = scopesView[1];
+    var statsLoadedWindow = null;
 
     // #1852: the tab grew to stacked sections (windowed adoption stats,
     // all-time region breakdowns, all-time node/repeater hygiene lists) —
@@ -4817,8 +5399,6 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     // windowed panel gets its own copy of the picker buttons rather than
     // one shared control above the sub-tab bar — every button still
     // drives the same selectedWindow/load(), see the click listener below.
-    var subtabKey = 'scopes_subtab';
-    var selectedSubtab = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(subtabKey)) || 'overview';
 
     // Role/text/geo filter for the "Nodes Without a Default Scope" section
     // below. Lives at this scope (not inside updateData) so it survives
@@ -4853,6 +5433,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             { key: 'hopdepth', label: 'Hop Depth' },
             { key: 'regions', label: 'Regions' },
             { key: 'hygiene', label: 'Hygiene' },
+            { key: 'audit', label: 'Scope Audit' },
           ].map(function(t) {
             return '<button class="tab-btn' + (selectedSubtab === t.key ? ' active' : '') + '" data-subtab="' + t.key + '">' + t.label + '</button>';
           }).join('') +
@@ -4893,32 +5474,56 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           '<div id="scopes-origin-nodes" style="margin-top:16px"></div>' +
           '<div id="scopes-bridges" style="margin-top:16px"></div>' +
         '</div>' +
+        '<div id="scopes-panel-audit" style="display:' + (selectedSubtab === 'audit' ? '' : 'none') + '"></div>' +
         '<div id="scopes-panel-hygiene" style="display:' + (selectedSubtab === 'hygiene' ? '' : 'none') + '">' +
           '<div id="scopes-no-scope"></div>' +
           '<div id="scopes-never-relay-scope" style="margin-top:16px"></div>' +
         '</div>';
 
-      // Sub-tab click listener (once) — pure visibility toggle, no re-fetch.
+      // Audit is lazy: it fetches only its own bulk endpoint while active.
+      _stopScopeAudit();
+      var auditPanel = el.querySelector('#scopes-panel-audit');
+      var auditView = window.ScopeAudit ? window.ScopeAudit.mount(auditPanel, {
+        api: api, hash: function() { return location.hash; },
+        onWindow: function(w) {
+          selectedWindow = w; setViewParam(SCOPES_WINDOW, w);
+          el.querySelectorAll('[data-win]').forEach(function(b) { b.classList.toggle('active', b.dataset.win === w); });
+          load(w);
+        },
+        // #414 — the transport view counts only observers in the global region selection.
+        region: function() { return window.RegionFilter && RegionFilter.getRegionParam ? RegionFilter.getRegionParam() : ''; },
+        onState: function(query, page, view, scope) {
+          var region = view === 'transport' && window.RegionFilter && RegionFilter.getRegionParam ? RegionFilter.getRegionParam() : '';
+          history.replaceState(history.state, '', window.ScopeAudit.hashWithState(location.hash, query, page, view, scope, region));
+        }
+      }) : null;
+      _scopeAuditView = auditView;
+      if (auditView) auditView.setActive(selectedSubtab === 'audit');
+
+      // Sub-tab click listener (once).
       var subtabsEl = el.querySelector('#scopesSubtabs');
       if (subtabsEl) {
         subtabsEl.addEventListener('click', function(e) {
           var btn = e.target.closest('[data-subtab]');
           if (!btn) return;
           selectedSubtab = btn.dataset.subtab;
-          if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(subtabKey, selectedSubtab);
+          setViewParam(SCOPES_SUBTAB, selectedSubtab);
           subtabsEl.querySelectorAll('[data-subtab]').forEach(function(b) { b.classList.toggle('active', b.dataset.subtab === selectedSubtab); });
-          ['overview', 'hopdepth', 'regions', 'hygiene'].forEach(function(key) {
+          SCOPES_SUBTAB.allowed.forEach(function(key) {
             var panel = document.getElementById('scopes-panel-' + key);
             if (panel) panel.style.display = key === selectedSubtab ? '' : 'none';
           });
+          if (auditView) auditView.setActive(selectedSubtab === 'audit');
+          if (selectedSubtab === 'audit' || statsLoadedWindow !== selectedWindow) load(selectedWindow);
         });
       }
 
       // Attach window-button click listeners (once)
       el.querySelectorAll('[data-win]').forEach(function(btn) {
+        if (btn.dataset.auditWindow) return;
         btn.addEventListener('click', function() {
           selectedWindow = btn.dataset.win;
-          if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(winKey, selectedWindow);
+          setViewParam(SCOPES_WINDOW, selectedWindow);
           el.querySelectorAll('[data-win]').forEach(function(b) { b.classList.toggle('active', b.dataset.win === selectedWindow); });
           load(selectedWindow);
         });
@@ -5133,6 +5738,12 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     }
 
     async function load(w) {
+      if (selectedSubtab === 'audit') {
+        if (auditView) return auditView.load(w);
+        el.querySelector('#scopes-panel-audit').textContent = 'Scope Audit could not initialize. Reload to retry.';
+        return;
+      }
+
       var loadingEl = document.getElementById('scopes-loading');
       if (loadingEl) loadingEl.style.display = '';
       try {
@@ -5145,6 +5756,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           return;
         }
         await updateData(data, w);
+        statsLoadedWindow = w;
       } catch (err) {
         if (loadingEl) loadingEl.style.display = 'none';
         var cardsEl3 = document.getElementById('scopes-cards');
@@ -5691,6 +6303,17 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     }
 
 
+    el._refreshScopes = function(view) {
+      selectedSubtab = view[0]; selectedWindow = view[1];
+      el.querySelectorAll('[data-subtab]').forEach(function(b) { b.classList.toggle('active', b.dataset.subtab === selectedSubtab); });
+      el.querySelectorAll('[data-win]').forEach(function(b) { b.classList.toggle('active', b.dataset.win === selectedWindow); });
+      SCOPES_SUBTAB.allowed.forEach(function(key) {
+        var panel = el.querySelector('#scopes-panel-' + key);
+        if (panel) panel.style.display = key === selectedSubtab ? '' : 'none';
+      });
+      if (auditView) { auditView.setActive(selectedSubtab === 'audit'); auditView.syncState(location.hash); }
+      load(selectedWindow);
+    };
     load(selectedWindow);
 
     // Fix 6: auto-refresh every 60s
@@ -6223,8 +6846,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   // and which observer stations — fixed, known locations — actually
   // heard the traffic (Coverage).
   async function renderWardrivingTab(el) {
-    var winKey = 'wardriving_window';
-    var selectedWindow = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(winKey)) || '24h';
+    var selectedWindow = restoreViewParams([WARDRIVING_WINDOW])[0];   // ?wdwin= (#205)
 
     function pct(n, total) {
       if (!total) return '—';
@@ -6459,7 +7081,16 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       var totalObsCount = observers.reduce(function(sum, o) { return sum + o.observationCount; }, 0);
       var shown = expanded ? observers : observers.slice(0, TOP_N_LIMIT);
       var rows = shown.map(function(o) {
-        var loc = (o.lat != null && o.lon != null) ? (o.lat.toFixed(2) + ', ' + o.lon.toFixed(2)) : '—';
+        var loc = '—';
+        if (o.lat != null && o.lon != null) {
+          loc = o.lat.toFixed(2) + ', ' + o.lon.toFixed(2);
+          // #381: positionSource distinguishes a real node fix from the
+          // IATA/region-code centroid used only as a fallback when no real
+          // position is known -- don't let the two look the same on the map.
+          if (o.positionSource === 'iata') {
+            loc += ' ' + iataPositionBadgeHtml();
+          }
+        }
         return '<tr><td>' + esc(o.observerName) + '</td>' +
           '<td>' + esc(o.iata || '—') + '</td>' +
           '<td>' + loc + '</td>' +
@@ -6506,7 +7137,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       el.querySelectorAll('[data-wdwin]').forEach(function(btn) {
         btn.addEventListener('click', function() {
           selectedWindow = btn.dataset.wdwin;
-          if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(winKey, selectedWindow);
+          setViewParam(WARDRIVING_WINDOW, selectedWindow);
           load(selectedWindow);
         });
       });
@@ -6837,13 +7468,16 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   async function _renderAreasTabBody(el) {
     try {
       var d = await api('/analytics/areas', { ttl: 30000 });
+      if (window.MeshConfigReady) await window.MeshConfigReady;
+      var estimatesEnabled = window.EstimatedPositions?.enabled(d) !== false;
       var density = (d && d.density) || [];
       var bridgeNodes = (d && d.bridgeNodes) || [];
-      var positionGaps = (d && d.positionGaps) || [];
-      var estimatedNodes = (d && d.estimatedNodes) || [];
+      var positionGaps = estimatesEnabled ? ((d && d.positionGaps) || []) : [];
+      var estimatedNodes = estimatesEnabled ? ((d && d.estimatedNodes) || []) : [];
 
       if (!density.length && !bridgeNodes.length && !positionGaps.length) {
-        el.innerHTML = '<div class="text-center text-muted" style="padding:40px">No Areas are configured — this tab needs at least one drawn-polygon Area (meshguide.dk sync) to report on.</div>';
+        el.innerHTML = '<div class="text-center text-muted" style="padding:40px">No Areas are configured — this tab needs at least one drawn-polygon Area (meshguide.dk sync) to report on.</div>' +
+          (estimatesEnabled ? '' : window.EstimatedPositions.disabledNoticeHTML);
         return;
       }
 
@@ -6866,8 +7500,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       // Which Areas, where there's no single meaningful sort value) render
       // as a plain header.
       function areasSortArrow(colKey, activeCol, dir) {
-        if (colKey !== activeCol) return '<span class="sort-arrow">⇅</span>';
-        return '<span class="sort-arrow">' + (dir === 'asc' ? '↑' : '↓') + '</span>';
+        return channelSortArrow(colKey, activeCol, dir);
       }
       function areasTheadHtml(cols, activeCol, dir) {
         return cols.map(function (c) {
@@ -6877,6 +7510,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             classes.push('sortable');
             if (c.key === activeCol) classes.push('sort-active');
             attrs += ' data-sort-col="' + c.key + '"';
+            attrs += analyticsSortAttrs(c.key, activeCol, dir);
           }
           if (classes.length) attrs += ' class="' + classes.join(' ') + '"';
           if (c.align === 'right') attrs += ' style="text-align:right"';
@@ -6898,15 +7532,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       function makeAreasSection(opts) {
         var state = { expanded: false, col: opts.initialSort.col, dir: opts.initialSort.dir };
         function sortedItems() {
-          var mult = state.dir === 'asc' ? 1 : -1;
-          return opts.items.slice().sort(function (a, b) {
-            var av = opts.getValue(a, state.col), bv = opts.getValue(b, state.col);
-            if (typeof av === 'string' || typeof bv === 'string') {
-              av = String(av).toLowerCase(); bv = String(bv).toLowerCase();
-              return av < bv ? -1 * mult : av > bv ? 1 * mult : 0;
-            }
-            return (av - bv) * mult;
-          });
+          return sortAnalyticsRows(opts.items, function(a) { return opts.getValue(a, state.col); }, opts.ascByDefault && opts.ascByDefault.indexOf(state.col) !== -1 ? 'text' : 'number', state.dir);
         }
         function tableHtml() {
           var items = sortedItems();
@@ -6922,6 +7548,10 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         function attach() {
           var container = document.getElementById(opts.containerId);
           if (!container) return;
+          if (!container._analyticsSortKeyboard) {
+            attachSortKeyboard(container, 'th[data-sort-col]');
+            container._analyticsSortKeyboard = true;
+          }
           var toggleBtn = container.querySelector('[' + opts.toggleAttr + ']');
           if (toggleBtn) {
             toggleBtn.addEventListener('click', function () {
@@ -6933,14 +7563,13 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           container.querySelectorAll('th[data-sort-col]').forEach(function (th) {
             th.addEventListener('click', function () {
               var col = th.dataset.sortCol;
-              if (state.col === col) {
-                state.dir = state.dir === 'asc' ? 'desc' : 'asc';
-              } else {
-                state.col = col;
-                state.dir = opts.ascByDefault && opts.ascByDefault.indexOf(col) !== -1 ? 'asc' : 'desc';
-              }
+              var next = nextAnalyticsSort(state, col, opts.ascByDefault && opts.ascByDefault.indexOf(col) !== -1 ? 'text' : 'number');
+              state.col = next.col;
+              state.dir = next.dir;
+              var focused = document.activeElement === th;
               container.innerHTML = tableHtml();
               attach();
+              restoreSortFocus(container, 'th[data-sort-col="' + col + '"]', focused);
             });
           });
         }
@@ -6968,7 +7597,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           { key: 'area', label: 'Area', sortable: true },
           { key: 'total', label: 'Total', sortable: true, align: 'right' },
           { key: 'active', label: 'Active', sortable: true, align: 'right' },
-          { key: 'degraded', label: 'Degraded', sortable: true, align: 'right' },
+          { key: 'degraded', label: 'Degraded / quiet', sortable: true, align: 'right' },
           { key: 'silent', label: 'Silent', sortable: true, align: 'right' },
           { key: 'roleMix', label: 'Role Mix', sortable: false },
         ],
@@ -7065,7 +7694,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
       var unpositionedNote = '<p class="text-muted" style="margin:8px 0 0;font-size:0.85em">' +
         (d.unpositionedTotal || 0).toLocaleString() + ' node' + (d.unpositionedTotal === 1 ? '' : 's') + ' network-wide have no real GPS fix' +
-        (d.unpositionedNoNeighborFix ? ', of which ' + d.unpositionedNoNeighborFix.toLocaleString() + ' also have no positioned neighbor to estimate from — those can\'t be placed anywhere, not even approximately, so they\'re absent from the table above entirely.' : '.') +
+        (estimatesEnabled && d.unpositionedNoNeighborFix ? ', of which ' + d.unpositionedNoNeighborFix.toLocaleString() + ' also have no positioned neighbor to estimate from — those can\'t be placed anywhere, not even approximately, so they\'re absent from the table above entirely.' : '.') +
         '</p>';
 
       el.innerHTML =
@@ -7084,14 +7713,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             '<span>Position-Fix Coverage Gaps by Area</span>' +
             (estimatedNodes.length ? '<a href="#/map?estimatedNodes=1" id="areasViewEstimatedNodes" class="btn-link" style="font-size:12px;font-weight:400;text-decoration:none;background:none;border:1px solid var(--border);border-radius:4px;padding:4px 10px;color:var(--link-color)">View Estimated Nodes on Map (' + estimatedNodes.length.toLocaleString() + ')</a>' : '') +
           '</h3>' +
-          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">How many of each area\'s nodes have an actual reported GPS position vs. how many were only placeable via a neighbor-based estimate (same technique used for View Path\'s approximate markers). Click a column header to sort by it.</p>' +
-          '<div id="areasPositionGaps">' + gapsSection.tableHtml() + '</div>' +
+          (estimatesEnabled ? '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">How many of each area\'s nodes have an actual reported GPS position vs. how many were only placeable via a neighbor-based estimate (same technique used for View Path\'s approximate markers). Click a column header to sort by it.</p>' : '') +
+          '<div id="areasPositionGaps">' + (estimatesEnabled ? gapsSection.tableHtml() : window.EstimatedPositions.disabledNoticeHTML) + '</div>' +
           unpositionedNote +
         '</div>';
 
       densitySection.attach();
       bridgeSection.attach();
-      gapsSection.attach();
+      if (estimatesEnabled) gapsSection.attach();
     } catch (e) {
       el.innerHTML = '<div class="text-center" style="color:var(--status-red);padding:20px">Failed to load area analytics: ' + esc(String(e)) + '</div>';
     }
@@ -7101,6 +7730,233 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   // Renders distribution of node roles + per-role clock-skew posture.
   // Auto-refreshes every 60s while the Roles tab is active (matches the
   // behavior of the former standalone roles-page.js).
+  // #245 M2 — Advert Intervals: mesh-wide estimated flood / zero-hop advert
+  // intervals (advert-interval-analytics.js renders, the server computes
+  // once per analytics cycle). Region and area filters apply; only the
+  // newest request renders, so a slow answer for an old filter cannot
+  // replace a newer one.
+  let _advertIntervalsGen = 0;
+  async function renderAdvertIntervalsTab(el) {
+    const myGen = ++_advertIntervalsGen;
+    const bust = _aiBust;
+    _aiBust = false;
+    // A re-render (filter change, theme refresh, Refresh chart) keeps focus
+    // on the panel or row it was on.
+    const active = document.activeElement;
+    const focusPanel = bust || !!(active && active.closest && active.closest('.ai-bucket-panel'));
+    const focusRow = active && active.dataset && el.contains(active) ? active.dataset.aiBucket : null;
+    const prev = _aiBucket;
+    _aiLeave();
+    el.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading advert intervals…</div>';
+    try {
+      const data = await api(withQuery('/analytics/advert-intervals', RegionFilter.regionQueryString() + AreaFilter.areaQueryString()), { ttl: CLIENT_TTL.analyticsRF, bust: bust });
+      if (myGen !== _advertIntervalsGen || _currentTab !== 'advert-intervals') return;
+      el.innerHTML = window.AdvertIntervalAnalytics.render(data);
+      _aiChart = data;
+      if (focusRow) _aiReturnFocus = focusRow;
+      _aiRestore(focusPanel, bust ? null : prev);
+    } catch (err) {
+      if (myGen !== _advertIntervalsGen) return;
+      el.innerHTML = '<div class="text-center" style="color:var(--status-red);padding:40px">Failed to load advert intervals: ' + esc(String(err.message || err)) + '</div>';
+    }
+  }
+
+  // #896 M1 — the nodes of one Flood / Zero-hop distribution bucket, listed
+  // in the card's panel from GET /api/analytics/advert-intervals/bucket:
+  // one request per open, "Show more" or retry, never one per node. The open
+  // bucket is ?bucket=<class>.<interval_s>.<s|u> in the hash (TAB_URL_PARAMS
+  // drops it on a tab switch). Opening from closed pushes a history entry, so
+  // Back closes the panel (the router remounts the page from the URL);
+  // switching buckets replaces it; Close goes back when this page pushed the
+  // entry, else drops bucket= in place. Further pages name the first page's
+  // snapshot; a 409 (a newer snapshot) restarts from page 1, where the panel
+  // explains the changed count. A re-render of the tab (the theme refresh
+  // after every page load, a theme change) keeps the loaded list of the same
+  // bucket and filter instead of fetching it again.
+  const AI_BUCKET_PUSHED = 'aiBucketPushed';
+  let _aiChart = null;        // the histogram response the panel belongs to
+  let _aiBucket = null;       // { b, key, filter, resp, members, shown, focus } of the open panel
+  let _aiBucketGen = 0;
+  let _aiBust = false;        // "Refresh chart": the next tab render refetches
+  let _aiReturnFocus = null;  // bucket key whose row gets focus after Close went Back
+
+  function _aiHashBucket() {
+    return window.AdvertIntervalAnalytics.parseBucketParam(new URLSearchParams(location.hash.split('?')[1] || '').get('bucket'));
+  }
+
+  // Rows are found by comparing data-ai-bucket, never by a selector built
+  // from the URL.
+  function _aiRow(key) {
+    return Array.from(document.querySelectorAll('#analyticsContent [data-ai-bucket]')).find(r => r.dataset.aiBucket === key) || null;
+  }
+
+  function _aiPanel(cls) { return document.getElementById('ai-bucket-panel-' + cls); }
+
+  function _aiSetExpanded(key) {
+    document.querySelectorAll('#analyticsContent [data-ai-bucket]').forEach(r => r.setAttribute('aria-expanded', r.dataset.aiBucket === key ? 'true' : 'false'));
+  }
+
+  function _aiClosePanels() {
+    document.querySelectorAll('#analyticsContent .ai-bucket-panel').forEach(p => { p.hidden = true; p.innerHTML = ''; });
+    _aiSetExpanded(null);
+  }
+
+  // Forget the open bucket; a request still in flight is ignored.
+  function _aiLeave() { _aiBucket = null; _aiBucketGen++; }
+
+  function _aiView(status, extra) {
+    const b = _aiBucket.b;
+    const s = _aiChart && _aiChart[b.cls];
+    const hit = s && Array.isArray(s.buckets) ? s.buckets.find(x => Number(x.interval_s) === b.intervalS && !!x.snapped === b.snapped) : null;
+    return Object.assign({
+      bucket: b, status: status,
+      chart: { generated_at: _aiChart && _aiChart.scan ? _aiChart.scan.generated_at : '', nodes: hit ? Number(hit.nodes) || 0 : 0 },
+      scope: { region: RegionFilter.getRegionParam(), area: AreaFilter.getSelectedLabel ? AreaFilter.getSelectedLabel() : '' },
+    }, extra);
+  }
+
+  function _aiPaint(view) {
+    const panel = _aiPanel(_aiBucket.b.cls);
+    if (!panel) return;
+    panel.innerHTML = window.AdvertIntervalAnalytics.renderBucketPanel(view);
+    panel.hidden = false;
+  }
+
+  function _aiFilter() { return RegionFilter.regionQueryString() + AreaFilter.areaQueryString(); }
+
+  // prev: the state of a panel open before a re-render; its loaded list is
+  // shown again when it is the same bucket under the same filter.
+  function _aiOpen(b, focus, prev) {
+    _aiClosePanels();
+    const key = window.AdvertIntervalAnalytics.formatBucketParam(b);
+    const filter = _aiFilter();
+    const reuse = prev && prev.key === key && prev.filter === filter && prev.resp;
+    _aiBucket = reuse ? prev : { b: b, key: key, filter: filter, resp: null, members: [], shown: 0 };
+    _aiBucket.focus = !!focus;
+    _aiSetExpanded(key);
+    if (!reuse) { _aiLoad(0); return; }
+    _aiPaint(_aiView('ready', { resp: Object.assign({}, prev.resp, { members: prev.members }), shown: prev.shown }));
+    _aiFocusPanel(_aiBucket);
+  }
+
+  function _aiFocusPanel(st) {
+    if (!st.focus) return;
+    st.focus = false;
+    const h = document.getElementById('ai-bucket-heading-' + st.b.cls);
+    if (h) h.focus({ preventScroll: true });
+    // The panel's scroll-margin keeps it clear of the sticky top nav and the
+    // phone bottom nav, which a plain focus scroll ignores.
+    const panel = _aiPanel(st.b.cls);
+    if (panel) panel.scrollIntoView({ block: 'nearest' });
+  }
+
+  async function _aiLoad(offset) {
+    const st = _aiBucket;
+    if (!st) return;
+    const myGen = ++_aiBucketGen;
+    const b = st.b;
+    const panel = _aiPanel(b.cls);
+    if (offset === 0) {
+      st.resp = null;
+      _aiPaint(_aiView('loading'));
+    } else if (panel) {
+      const more = panel.querySelector('[data-ai-bucket-more]');
+      if (more) more.disabled = true;
+      const body = panel.querySelector('.ai-bucket-body');
+      if (body) body.setAttribute('aria-busy', 'true');
+    }
+    let q = 'class=' + b.cls + '&interval_s=' + b.intervalS + '&snapped=' + b.snapped + '&offset=' + offset;
+    if (offset > 0 && st.resp) q += '&snapshot=' + encodeURIComponent(st.resp.generated_at);
+    try {
+      const resp = await api(withQuery('/analytics/advert-intervals/bucket?' + q, st.filter), { retry503: false });
+      if (myGen !== _aiBucketGen || st !== _aiBucket) return;
+      const members = Array.isArray(resp.members) ? resp.members : [];
+      if (offset === 0) {
+        st.resp = resp;
+        st.members = members.slice();
+        st.shown = members.length;
+        _aiPaint(_aiView('ready', { resp: resp, shown: st.shown }));
+        _aiFocusPanel(st);
+        return;
+      }
+      // "Show more": append one page, never rebuild the list.
+      const list = panel && panel.querySelector('.ai-bucket-list');
+      const foot = panel && panel.querySelector('.ai-bucket-foot');
+      const body = panel && panel.querySelector('.ai-bucket-body');
+      if (!list || !foot) return;
+      const first = list.children.length;
+      list.insertAdjacentHTML('beforeend', window.AdvertIntervalAnalytics.bucketMembersHtml(members, b.cls));
+      st.members = st.members.concat(members);
+      st.shown += members.length;
+      foot.innerHTML = window.AdvertIntervalAnalytics.bucketFooterHtml(st.shown, resp.visible, resp.limit);
+      if (body) body.setAttribute('aria-busy', 'false');
+      const link = list.children[first] && list.children[first].querySelector('a');
+      if (link) link.focus();
+    } catch (e) {
+      if (myGen !== _aiBucketGen || st !== _aiBucket) return;
+      if (e && e.status === 409) { _aiLoad(0); return; }
+      _aiPaint(_aiView('error', { error: { status: e && e.status } }));
+    }
+  }
+
+  // After the chart renders: reopen the bucket the URL names, or give the
+  // closed bucket's row focus back after a Close that went Back.
+  function _aiRestore(focusPanel, prev) {
+    const b = _aiHashBucket();
+    const back = _aiReturnFocus;
+    _aiReturnFocus = null;
+    if (b) _aiOpen(b, focusPanel, prev);
+    // After the router's own focus move (app.js, one frame after a mount).
+    if (back && !focusPanel) requestAnimationFrame(() => { const row = _aiRow(back); if (row) row.focus(); });
+  }
+
+  function _aiToggle(key) {
+    const b = window.AdvertIntervalAnalytics.parseBucketParam(key);
+    if (!b) return;
+    if (_aiBucket && _aiBucket.key === key) { _aiClose(); return; }
+    try {
+      const hash = URLState.updateHashParams({ bucket: key }, location.hash);
+      if (_aiHashBucket()) history.replaceState(history.state, '', hash);
+      else history.pushState(Object.assign({}, history.state, { [AI_BUCKET_PUSHED]: true }), '', hash);
+    } catch (e) { /* URL sync is best effort */ }
+    _aiOpen(b, true);
+  }
+
+  function _aiClose() {
+    const key = _aiBucket ? _aiBucket.key : null;
+    const st = history.state;
+    if (st && st[AI_BUCKET_PUSHED] && _aiHashBucket()) {
+      _aiReturnFocus = key;
+      history.back();
+      return;
+    }
+    try { history.replaceState(st, '', URLState.updateHashParams({ bucket: '' }, location.hash)); } catch (e) { /* best effort */ }
+    _aiLeave();
+    _aiClosePanels();
+    const row = key && _aiRow(key);
+    if (row) row.focus();
+  }
+
+  function _aiOnClick(e) {
+    if (_currentTab !== 'advert-intervals' || !e.target.closest) return;
+    const t = e.target;
+    const row = t.closest('[data-ai-bucket]');
+    if (row) { _aiToggle(row.dataset.aiBucket); return; }
+    if (t.closest('[data-ai-bucket-close]')) { _aiClose(); return; }
+    if (!_aiBucket) return;
+    if (t.closest('[data-ai-bucket-more]')) { _aiLoad(_aiBucket.shown); return; }
+    if (t.closest('[data-ai-bucket-retry]')) { _aiLoad(0); return; }
+    if (t.closest('[data-ai-bucket-refresh]')) { _aiBust = true; renderTab('advert-intervals'); }
+  }
+
+  // Escape inside the panel closes it.
+  function _aiOnKeydown(e) {
+    if (e.key !== 'Escape' || !_aiBucket || !e.target.closest || !e.target.closest('.ai-bucket-panel')) return;
+    e.preventDefault();
+    _aiClose();
+  }
+  // end #896 M1
+
   async function renderRolesTab(el) {
     el.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading roles…</div>';
     await _renderRolesTabBody(el);

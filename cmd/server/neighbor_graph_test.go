@@ -24,7 +24,7 @@ func ngTestStore(nodes []nodeInfo, packets []*StoreTx) *PacketStore {
 		byObsID:        make(map[int]*StoreObs),
 		byObserver:     make(map[string][]*StoreObs),
 		byNode:         make(map[string][]*StoreTx),
-		nodeHashes:     make(map[string]map[string]bool),
+		nodeTxIDs:     newNodeTxIndex(),
 		byPayloadType:  make(map[int][]*StoreTx),
 		rfCache:        make(map[string]*cachedResult),
 		topoCache:      make(map[string]*cachedResult),
@@ -33,7 +33,6 @@ func ngTestStore(nodes []nodeInfo, packets []*StoreTx) *PacketStore {
 		chanCache:      make(map[string]*cachedResult),
 		distCache:      make(map[string]*cachedResult),
 		subpathCache:   make(map[string]*cachedResult),
-		spIndex:        make(map[string]int),
 	}
 	ps.nodeCache = nodes
 	ps.nodePM = buildPrefixMap(nodes)
@@ -44,10 +43,13 @@ func ngTestStore(nodes []nodeInfo, packets []*StoreTx) *PacketStore {
 func ngIntPtr(v int) *int         { return &v }
 func ngFloatPtr(v float64) *float64 { return &v }
 
+// ngMakeTx makes a FLOOD-routed transmission: the observer ↔ last hop edge
+// is built only from flood observations (#952).
 func ngMakeTx(id int, payloadType int, decodedJSON string, obs []*StoreObs) *StoreTx {
 	tx := &StoreTx{
 		ID:           id,
 		PayloadType:  ngIntPtr(payloadType),
+		RouteType:    ngIntPtr(RouteFlood),
 		DecodedJSON:  decodedJSON,
 		Observations: obs,
 	}
@@ -821,6 +823,7 @@ func BenchmarkBuildFromStore(b *testing.B) {
 		packets = append(packets, &StoreTx{
 			ID:          i,
 			PayloadType: &pt,
+			RouteType:   ngIntPtr(RouteFlood),
 			DecodedJSON: `{"pubKey":"aaaa1111"}`,
 			Observations: []*StoreObs{
 				{ObserverID: "bbbb2222", PathJSON: `["cccc"]`, Timestamp: nowStr, SNR: ngFloatPtr(-5.0)},

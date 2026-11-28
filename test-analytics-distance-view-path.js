@@ -72,7 +72,13 @@ test('neither leaderboard needs the analytics-table-scroll wrapper anymore', () 
   // A single 48x48 action column plus 9-10 compact text columns fits
   // without a forced horizontal scroll container -- confirms the row
   // template really did drop back to one action, not just hide a second.
-  const wrapCount = (src.match(/<div class="analytics-table-scroll">/g) || []).length;
+  // Only renderDistanceTab's own body: other tabs (Busiest Repeaters) use
+  // the wrapper on purpose.
+  const start = src.indexOf('async function renderDistanceTab(');
+  assert.ok(start > -1, 'renderDistanceTab not found');
+  const next = src.indexOf('\n  async function ', start + 1);
+  const body = src.slice(start, next > -1 ? next : undefined);
+  const wrapCount = (body.match(/<div class="analytics-table-scroll">/g) || []).length;
   assert.strictEqual(wrapCount, 0, 'renderDistanceTab should not need analytics-table-scroll, got ' + wrapCount + ' wrapper(s)');
 });
 

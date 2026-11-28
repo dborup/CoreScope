@@ -3,9 +3,9 @@
 #
 # AUDIENCE: third-party operators running a self-hosted CoreScope on
 # ONE host. Ships with the built-in Mosquitto broker DISABLED by
-# default (DISABLE_MOSQUITTO defaults to `false` here, meaning
-# mosquitto RUNS in-container — the historical shape); flip to `true`
-# if you already have an external MQTT broker to point CoreScope at.
+# default (#441: DISABLE_MOSQUITTO defaults to `true`), so point
+# mqttSources in config.json (or MQTT_BROKER) at your MQTT broker, or
+# set DISABLE_MOSQUITTO=false to run the bundled one in-container.
 #
 # For the CoreScope maintainers' internal staging deployment (with a
 # standalone `mqtt-broker` container on external network
@@ -23,7 +23,32 @@ services:
       - ${DATA_DIR:-./data}:/app/data
     environment:
       - DISABLE_CADDY=${DISABLE_CADDY:-true}
-      - DISABLE_MOSQUITTO=${DISABLE_MOSQUITTO:-false}
+      - DISABLE_MOSQUITTO=${DISABLE_MOSQUITTO:-true}
+      # In-process settings — read by the server and the ingestor, not by
+      # docker compose. Without these lines a value in .env reaches docker
+      # compose and stops there, so the documented "one line in .env" would
+      # change nothing in the container (#372). Every one defaults to EMPTY,
+      # which every reader ignores: pprofbind skips a blank host or port,
+      # LoadConfig skips a blank MQTT_BROKER, and MQTT_SOURCE_STRICT is
+      # false unless truthy. An install that never set them is unaffected.
+      - MQTT_BROKER=${MQTT_BROKER:-}
+      - MQTT_TOPIC=${MQTT_TOPIC:-}
+      - MQTT_SOURCE_STRICT=${MQTT_SOURCE_STRICT:-}
+      - ENABLE_PPROF=${ENABLE_PPROF:-}
+      - PPROF_HOST=${PPROF_HOST:-}
+      - PPROF_HOST_SERVER=${PPROF_HOST_SERVER:-}
+      - PPROF_HOST_INGESTOR=${PPROF_HOST_INGESTOR:-}
+      - PPROF_PORT=${PPROF_PORT:-}
+      - PPROF_PORT_SERVER=${PPROF_PORT_SERVER:-}
+      - PPROF_PORT_INGESTOR=${PPROF_PORT_INGESTOR:-}
+      # Opt-in: run corescope-server and corescope-ingestor without root.
+      # Off unless set. Use a dedicated ID that owns nothing on the host, not
+      # the owner of DATA_DIR. Back up and record owners first, and read
+      # docs/deployment.md, "Running the Go services without root (opt-in)",
+      # for what changes on the host and how to roll back.
+      # - CORESCOPE_RUN_AS_NONROOT=1
+      # - CORESCOPE_UID=10001
+      # - CORESCOPE_GID=10001
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/stats"]

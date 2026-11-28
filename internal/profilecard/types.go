@@ -1,0 +1,125 @@
+package profilecard
+
+// The renderer's input is the body of GET /api/terrain/profile. These
+// types mirror cmd/server's TerrainProfileResponse field for field and tag
+// for tag, under the same names, so the server can alias them once it
+// imports this package (#727 M3) instead of converting. cmd/server is
+// package main and cannot be imported from here, so the mirror is pinned
+// from both sides by testdata/response_shape.txt: shape_test.go here and
+// cmd/server/profilecard_shape_test.go there both compare their own
+// reflection of the types against that one file.
+
+// TerrainProfileResponse is one terrain profile, as the API serves it.
+type TerrainProfileResponse struct {
+	A           TerrainEndpoint `json:"a"`
+	B           TerrainEndpoint `json:"b"`
+	DistanceM   float64         `json:"distanceM"`
+	StepM       float64         `json:"stepM"`
+	SampleCount int             `json:"sampleCount"` // computed; samples holds at most 1024 of them
+	Model       string          `json:"model"`       // "dtm" or "both"
+	Coverage    TerrainCoverage `json:"coverage"`
+	Samples     []TerrainSample `json:"samples"`
+	Physics     TerrainPhysics  `json:"physics"`
+	Verdict     TerrainVerdict  `json:"verdict"`
+	Attribution string          `json:"attribution"`
+	// AttributionFill is the Copernicus DEM credit, present exactly when
+	// Coverage.Mixed (#738).
+	AttributionFill string `json:"attributionFill,omitempty"`
+	// Classification is the building classification of the surface
+	// (#730 M2); nil without it.
+	Classification *TerrainClassification `json:"classification,omitempty"`
+}
+
+// TerrainClassification is the state of the building classification:
+// full, partial or unavailable, and whether a segment was truncated.
+type TerrainClassification struct {
+	State     string `json:"state"`
+	Truncated bool   `json:"truncated"`
+}
+
+// TerrainEndpoint is one end of the path, snapped to 5 decimals.
+type TerrainEndpoint struct {
+	Lat      float64  `json:"lat"`
+	Lon      float64  `json:"lon"`
+	Kind     string   `json:"kind"` // "node" or "point"
+	Role     string   `json:"role,omitempty"`
+	GroundM  *float64 `json:"groundM"` // DTM; null outside coverage
+	AntennaM float64  `json:"antennaM"`
+	// AntennaSource is where AntennaM came from, in precedence order:
+	// request, operator-node, owner (#789 M2a: a height the node's owner
+	// proved with a code in a signed advert and that was approved; not
+	// Assumed), dsm-estimate (#789: the role default raised to the surface
+	// model around the node plus a roof offset, still Assumed),
+	// operator-role, role-default, point-default.
+	AntennaSource string `json:"antennaSource"`
+	Assumed       bool   `json:"assumed"` // the height is a default, not a known value
+}
+
+// TerrainCoverage is how much of the path the deciding model covers.
+type TerrainCoverage struct {
+	State     string   `json:"state"` // full, partial, none
+	Pct       float64  `json:"pct"`
+	FirstGapM *float64 `json:"firstGapM"`
+	// Mixed: samples DHM does not cover were filled from Copernicus DEM
+	// GLO-30, along the stretches in Fill (#738). Absent when false.
+	Mixed bool               `json:"mixed,omitempty"`
+	Fill  []TerrainFillRange `json:"fill,omitempty"`
+}
+
+// TerrainFillRange is a stretch of the path whose DTM came from the
+// foreign fill (#738).
+type TerrainFillRange struct {
+	FromM       float64 `json:"fromM"`
+	ToM         float64 `json:"toM"`
+	Source      string  `json:"source"`
+	ResolutionM int     `json:"resolutionM"` // nominal: 30, or 60 on the ½ overview
+}
+
+// TerrainSample is one point along the path; nil where there is no data.
+type TerrainSample struct {
+	D   float64  `json:"d"`
+	DTM *float64 `json:"dtm"`
+	DSM *float64 `json:"dsm,omitempty"`
+	Cls string   `json:"cls,omitempty"` // "b" building, "v" trees/other (#730 M2)
+}
+
+// TerrainPhysics are the radio parameters the verdict was computed with.
+type TerrainPhysics struct {
+	FreqMHz    float64 `json:"freqMHz"`
+	FreqSource string  `json:"freqSource"`
+	LambdaM    float64 `json:"lambdaM"`
+	K          float64 `json:"k"`
+	KSource    string  `json:"kSource"`
+	F1MaxM     float64 `json:"f1MaxM"`
+}
+
+// TerrainVerdict is the terrain (DTM) verdict, plus the surface (DSM) one
+// for information with model=both.
+type TerrainVerdict struct {
+	State     string  `json:"state"` // clear, fresnel100, fresnel60, blocked, unknown
+	Model     string  `json:"model"`
+	Criterion float64 `json:"criterion"`
+	TerrainClearance
+	Surface *TerrainSurfaceInfo `json:"surface,omitempty"`
+}
+
+// TerrainClearance is the worst point of an assessment; nil without one.
+// WorstF1Fraction is also nil when the worst point is a surface above an
+// antenna (#745).
+type TerrainClearance struct {
+	WorstClearanceM *float64 `json:"worstClearanceM"`
+	WorstAtM        *float64 `json:"worstAtM"`
+	WorstF1Fraction *float64 `json:"worstF1Fraction"`
+}
+
+// TerrainSurfaceInfo is the surface model's assessment. Reason is
+// "antennaBelowSurface" when the surface is above the antenna at an
+// endpoint (#745); Endpoint is then "A", "B" or "both". Cause is what
+// stands where it is decided, with the building classification (#730 M2).
+type TerrainSurfaceInfo struct {
+	State string `json:"state"`
+	TerrainClearance
+	Reason   string `json:"reason,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Cause    string `json:"cause,omitempty"`
+}

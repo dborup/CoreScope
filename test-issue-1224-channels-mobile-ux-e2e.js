@@ -2,14 +2,20 @@
  * E2E (#1224): Channels page mobile UX overhaul.
  *
  * At 375x800 viewport the channels page must:
- *  - Render a header strip above the channel list ≤60px tall (page title +
- *    Add chip + region filter chip + analytics overflow) in ONE row.
+ *  - Render a compact header strip above the channel list: at most two rows
+ *    (title + Add chip, then the region filter; ≤120px since #235 made the
+ *    controls 48px), with every control inside the strip and the list
+ *    starting below it. The strip used to be capped at 56px, which kept it
+ *    under the old ≤60px bound while the list was drawn over the pills.
  *  - Render "+ Add Channel" as a compact chip — NOT a full-width hero (the
  *    add control must be narrower than 65% of the sidebar width).
  *  - Render channel rows where the channel name has computed-width > 150px
  *    (the row must not be clipped by oversized inline action buttons).
  *  - Render the "Select a channel" empty state container occupying < 40% of
  *    the viewport height (no desktop-thinking empty state on mobile).
+ *  - With more than 4 regions (mocked; the fixture has 4), open the region
+ *    dropdown's menu inside the viewport at 320-640px touch, every option
+ *    hit at its centre (#239).
  *
  * Run: BASE_URL=http://localhost:13581 node test-issue-1224-channels-mobile-ux-e2e.js
  */
@@ -24,6 +30,27 @@ async function step(name, fn) {
   catch (e) { failed++; console.error('  \u2717 ' + name + ': ' + e.message); }
 }
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
+
+// The sidebar header strip: at most two rows (title + Add, then the region
+// filter), every control inside it, and the channel list starting below it.
+async function assertHeaderStrip(page) {
+  const r = await page.evaluate(() => {
+    const sidebar = document.querySelector('.ch-sidebar');
+    const header = sidebar && sidebar.querySelector('.ch-sidebar-header');
+    if (!header) return null;
+    const h = header.getBoundingClientRect();
+    const listTop = document.getElementById('chList').getBoundingClientRect().top;
+    const outside = [...header.querySelectorAll('.ch-sidebar-title, button')]
+      .map((e) => ({ name: e.id || String(e.className).split(' ')[0] || e.tagName, b: e.getBoundingClientRect() }))
+      .filter((c) => c.b.width > 0 && (c.b.top < h.top - 0.5 || c.b.bottom > h.bottom + 0.5 || c.b.left < h.left - 0.5 || c.b.right > h.right + 0.5))
+      .map((c) => c.name + ' ' + Math.round(c.b.top) + '-' + Math.round(c.b.bottom));
+    return { height: Math.round(h.height), top: Math.round(h.top), bottom: Math.round(h.bottom), listTop: Math.round(listTop), outside };
+  });
+  assert(r !== null, 'sidebar header not found');
+  assert(r.height <= 120, 'sidebar header must be \u2264120px on mobile, got ' + r.height + 'px');
+  assert(r.outside.length === 0, 'controls stick out of the header (' + r.top + '-' + r.bottom + '): ' + r.outside.join(', '));
+  assert(r.listTop >= r.bottom - 0.5, 'channel list starts at ' + r.listTop + 'px, above the header bottom ' + r.bottom + 'px');
+}
 
 async function run() {
   const launchOpts = { args: ['--no-sandbox'] };
@@ -44,16 +71,7 @@ async function run() {
   }, { timeout: 15000 });
   await page.waitForTimeout(300);
 
-  await step('header strip above channel list is \u226460px tall on mobile', async () => {
-    const headerH = await page.evaluate(() => {
-      const sidebar = document.querySelector('.ch-sidebar');
-      const header = sidebar && sidebar.querySelector('.ch-sidebar-header');
-      if (!header) return null;
-      return Math.round(header.getBoundingClientRect().height);
-    });
-    assert(headerH !== null, 'sidebar header not found');
-    assert(headerH <= 60, 'sidebar header must be \u226460px on mobile, got ' + headerH + 'px');
-  });
+  await step('header strip is \u2264120px, holds all its controls, and the list starts below it', () => assertHeaderStrip(page));
 
   await step('"+ Add Channel" is a compact chip, not full-width hero', async () => {
     const ratio = await page.evaluate(() => {
@@ -97,6 +115,56 @@ async function run() {
       'empty-state height ' + data.h + 'px is ' + Math.round(pct * 100) +
       '% of viewport (' + data.vh + 'px) \u2014 must be <40%');
   });
+
+  // #235: on a touch phone the region pills and + Add are 48px tall, so the
+  // strip is two 48px rows; it must still hold them without the list
+  // covering any.
+  const touchCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const tp = await touchCtx.newPage();
+  await tp.goto(BASE + '/#/channels', { waitUntil: 'domcontentloaded' });
+  await tp.waitForSelector('#chList .ch-row', { timeout: 15000 });
+  await tp.waitForSelector('#chRegionFilter .region-pill, #chRegionFilter .region-dropdown-trigger', { timeout: 15000 });
+  await step('touch 390x844: header strip is \u2264120px, holds all its controls, and the list starts below it', () => assertHeaderStrip(tp));
+  await touchCtx.close();
+
+  // #239 F1: with more than 4 regions RegionFilter renders a dropdown, whose
+  // trigger order: 1 puts at the right edge of the strip. Its menu must open
+  // inside the viewport, with every option hit at its centre. The fixture
+  // has 4 regions (pills), so the regions are mocked.
+  const SIX_REGIONS = {
+    SJC: 'San Jose', SFO: 'San Francisco', OAK: 'Oakland',
+    MRY: 'Monterey', SMF: 'Sacramento', LAX: 'Los Angeles',
+  };
+  for (const width of [320, 360, 390, 430, 640]) {
+    const dctx = await browser.newContext({ viewport: { width, height: 844 }, hasTouch: true, isMobile: true });
+    const dp = await dctx.newPage();
+    await dp.route('**/api/config/regions', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(SIX_REGIONS) }));
+    await dp.goto(BASE + '/#/channels', { waitUntil: 'domcontentloaded' });
+    await dp.waitForSelector('#chList .ch-row', { timeout: 15000 });
+    await dp.waitForSelector('#chRegionFilter .region-dropdown-trigger', { timeout: 15000 });
+    await step('touch ' + width + 'x844, 6 regions: header strip holds its controls', () => assertHeaderStrip(dp));
+    await step('touch ' + width + 'x844, 6 regions: the region menu opens on-screen, every option hit at its centre', async () => {
+      await dp.tap('#chRegionFilter .region-dropdown-trigger');
+      await dp.waitForSelector('#chRegionFilter .region-dropdown-menu:not([hidden])', { timeout: 5000 });
+      const r = await dp.evaluate(() => {
+        const vw = document.documentElement.clientWidth;
+        const menu = document.querySelector('#chRegionFilter .region-dropdown-menu');
+        const m = menu.getBoundingClientRect();
+        const items = [...menu.querySelectorAll('.region-dropdown-item')].map((el) => {
+          const b = el.getBoundingClientRect();
+          const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+          return { text: el.textContent.trim(), left: Math.round(b.left), right: Math.round(b.right), hit: !!hit && el.contains(hit) };
+        });
+        return { vw, left: Math.round(m.left), right: Math.round(m.right), items, overflow: document.documentElement.scrollWidth - vw };
+      });
+      assert(r.items.length === 7, 'expected All + 6 options, got ' + r.items.length);
+      assert(r.left >= 0 && r.right <= r.vw, 'menu ' + r.left + '-' + r.right + 'px is outside the ' + r.vw + 'px viewport');
+      const missed = r.items.filter((i) => !i.hit).map((i) => i.text + ' (' + i.left + '-' + i.right + ')');
+      assert(missed.length === 0, missed.length + ' of ' + r.items.length + ' options not hit at their centre: ' + missed.join(', '));
+      assert(r.overflow <= 0, 'horizontal page overflow ' + r.overflow + 'px with the menu open');
+    });
+    await dctx.close();
+  }
 
   // Desktop guard: at 1024x800 the sidebar must remain side-by-side with main
   // (layout flex-direction stays row), not stacked. This protects the desktop

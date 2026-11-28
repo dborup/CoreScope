@@ -1,0 +1,15 @@
+badge         24px bold    x=1064 y= 58 w=  94 Blocked
+title         40px bold    x=  44 y= 70 w= 500 West Tower → East Tower
+subtitle      22px regular x=  44 y=104 w= 445 Path profile · 9.20 km · 869.525 MHz · k = 4/3
+axis-y        16px regular x=  52 y=150 w=  36 82 m
+axis-y        16px regular x=  52 y=238 w=  36 57 m
+axis-y        16px regular x=  52 y=326 w=  36 33 m
+axis-y        16px regular x=  61 y=414 w=  27 8 m
+axis-y        16px regular x=  43 y=502 w=  45 -16 m
+pin           18px bold    x= 106 y=357 w=  13 A
+pin           18px bold    x=1152 y=368 w=  13 B
+axis-x        16px regular x=  96 y=524 w=   9 0
+axis-x        16px regular x= 607 y=524 w=  58 4.60 km
+axis-x        16px regular x=1118 y=524 w=  58 9.20 km
+summary       20px regular x=  24 y=574 w= 771 Tightest Fresnel point: clearance -56.9 m at 5.26 km · heights 12 m / 8 m · terrain only
+attribution   18px regular x=  24 y=604 w= 760 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0 — data bearbejdet

@@ -33,8 +33,16 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		s.store.mu.RLock()
 		loadedTx = len(s.store.packets)
-		for _, p := range s.store.packets {
-			loadedObs += len(p.Observations)
+		select {
+		case <-s.store.StartupLoadDone():
+			// Startup finished: totalObs is the retained observation count.
+			loadedObs = s.store.totalObs
+		default:
+			// Background fill publishes indexes before the packet slice, so
+			// totalObs can run ahead of s.packets. Keep counting until then.
+			for _, p := range s.store.packets {
+				loadedObs += len(p.Observations)
+			}
 		}
 		s.store.mu.RUnlock()
 	}
@@ -74,5 +82,28 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// here. Defaults to {"initializing","",""} until a later, separate
 	// wiring phase ever calls s.setPingScoreHistoryStatus.
 	resp["ping_scores_history"] = s.pingScoreHistoryStatusView()
+	// #89: route_mask backfill status, computed read-only from the database
+	// and the in-memory store (never "complete" while a transmission still
+	// has no mask, or while this server has not read a backfilled one yet).
+	if s.store != nil && s.store.db != nil {
+		resp["route_mask_backfill"] = s.store.routeMaskBackfillStatus()
+	} else if s.db != nil {
+		resp["route_mask_backfill"] = s.db.routeMaskBackfillStatus()
+	}
+	// #380: the ingestor's historical decode backfill, read-only from its
+	// one-row state table ("absent" on a database no #380 ingestor has
+	// touched). Progress, abstentions and undecodable rows are visible here.
+	if db := s.healthDB(); db != nil {
+		resp["decode_backfill"] = db.decodeBackfillStatus()
+	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// healthDB returns the read-only handle /api/healthz should query: the
+// store's, or the server's when no store is attached (tests, early boot).
+func (s *Server) healthDB() *DB {
+	if s.store != nil && s.store.db != nil {
+		return s.store.db
+	}
+	return s.db
 }

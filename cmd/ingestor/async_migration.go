@@ -32,6 +32,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 )
@@ -108,6 +109,12 @@ func (s *Store) RunAsyncMigration(ctx context.Context, name string, fn func(cont
 					SET status = 'failed', ended_at = datetime('now'), error = ?
 					WHERE name = ?`, runErr.Error(), name); err != nil {
 					log.Printf("[async-migration] failed to record failure for %q: %v", name, err)
+				}
+				if errors.Is(runErr, context.Canceled) {
+					// A stop at shutdown: recorded as unfinished like a failure so
+					// the next start re-runs it, but not a failure.
+					log.Printf("[async-migration] %q cancelled (will resume): %v", name, runErr)
+					return
 				}
 				log.Printf("[async-migration] %q FAILED: %v", name, runErr)
 				return

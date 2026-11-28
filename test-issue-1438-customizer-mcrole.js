@@ -40,6 +40,24 @@ function assert(cond, msg) {
 const cv2Src     = fs.readFileSync(path.join(__dirname, 'public', 'customize-v2.js'), 'utf8');
 const rolesSrc   = fs.readFileSync(path.join(__dirname, 'public', 'roles.js'), 'utf8');
 const presetsSrc = fs.readFileSync(path.join(__dirname, 'public', 'cb-presets.js'), 'utf8');
+const styleSrc   = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
+
+// Effective --mc-role-{role} for a descendant of <body>, modelled on the
+// browser cascade: body inline (user override) > body[data-cb-preset="X"]
+// rule in style.css > documentElement inline. Since #1449, applyCSS removes the
+// documentElement write when a preset is active and the role has no user
+// override, so the preset colour is only visible through the stylesheet rule.
+function effectiveRoleVar(env, css, role) {
+  const bodyInline = env.body.style.getPropertyValue('--mc-role-' + role);
+  if (bodyInline) return bodyInline.toLowerCase();
+  const preset = env.body.getAttribute('data-cb-preset');
+  if (preset && preset !== 'none') {
+    const block = css.match(new RegExp('body\\[data-cb-preset="' + preset + '"\\]\\s*\\{([^}]*)\\}'));
+    const m = block && block[1].match(new RegExp('--mc-role-' + role + ':\\s*(#[0-9a-fA-F]{3,8})'));
+    if (m) return m[1].toLowerCase();
+  }
+  return env.root.style.getPropertyValue('--mc-role-' + role).toLowerCase();
+}
 
 // ─── Extract the nodeColors-processing block from customize-v2.js. ───
 function extractBlock(src, anchor) {
@@ -164,11 +182,13 @@ console.log('\n=== #1438 FINAL C: server-only key does NOT clobber --mc-role-* (
   vm.runInContext(setup, env.sandbox);
 
   // --mc-role-companion must remain the preset's value (no clobber from server).
-  const got = env.root.style.getPropertyValue('--mc-role-companion').toLowerCase();
+  const got = effectiveRoleVar(env, styleSrc, 'companion');
+  assert(env.root.style.getPropertyValue('--mc-role-companion').toLowerCase() !== '#2563eb',
+    'documentElement --mc-role-companion is NOT the server-config legacy #2563eb');
   assert(got !== '#2563eb',
-    '--mc-role-companion is NOT the server-config legacy #2563eb (got ' + got + ')');
+    'effective --mc-role-companion is NOT the server-config legacy #2563eb (got ' + got + ')');
   assert(got === '#648fff',
-    '--mc-role-companion still reflects the active preset #648FFF (got ' + got + ')');
+    'effective --mc-role-companion still reflects the active preset #648FFF (got ' + got + ')');
 
   // --node-companion CAN take the server value (legacy compat is fine here).
   assert(env.root.style.getPropertyValue('--node-companion').toLowerCase() === '#2563eb',

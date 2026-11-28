@@ -153,12 +153,15 @@ function addLiveGlobals(ctx) {
   ctx.RegionFilter = { init() {}, getSelected: () => null, onRegionChange: () => {} };
 }
 
-function makeLiveSandbox({ withAppJs = false } = {}) {
+function makeLiveSandbox({ withAppJs = false, withHopFilter = false } = {}) {
   const ctx = makeSandbox();
   addLiveGlobals(ctx);
 
+  // index.html load order: hop-filter.js, then app.js, then live.js.
+  if (withHopFilter) loadInCtx(ctx, 'public/hop-filter.js');
   loadInCtx(ctx, 'public/payload-labels.js');
   loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/live-heard-filter.js');
   loadInCtx(ctx, 'public/packet-helpers.js');
   if (withAppJs) loadInCtx(ctx, 'public/app.js');
   try { loadInCtx(ctx, 'public/live.js'); } catch (e) {
@@ -195,6 +198,18 @@ console.log('\n=== live.js: dbPacketToLive ===');
     assert.strictEqual(result.decoded.payload.text, 'hello');
     assert.deepStrictEqual(result.decoded.path.hops, ['hop1', 'hop2']);
     assert.strictEqual(result._ts, new Date('2024-06-15T12:00:00Z').getTime());
+  });
+
+  // #882: VCR replay needs route_type/scope_name for the scope colour and
+  // the "Scoped only" filter (/api/packets carries both).
+  test('#882 carries route_type and scope_name (including null) for replay', () => {
+    const base = { id: 3, hash: 'z', decoded_json: '{}', path_json: '[]', timestamp: '2024-01-01T00:00:00Z' };
+    const named = dbPacketToLive(Object.assign({}, base, { route_type: 0, scope_name: '#dk' }));
+    assert.strictEqual(named.route_type, 0);
+    assert.strictEqual(named.scope_name, '#dk');
+    const flood = dbPacketToLive(Object.assign({}, base, { route_type: 1, scope_name: null }));
+    assert.strictEqual(flood.route_type, 1);
+    assert.strictEqual(flood.scope_name, null);
   });
 
   test('handles null decoded_json', () => {
@@ -291,6 +306,7 @@ console.log('\n=== live.js: expandToBufferEntriesAsync ===');
   addLiveGlobals(ctx);
   loadInCtx(ctx, 'public/payload-labels.js');
   loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/live-heard-filter.js');
   loadInCtx(ctx, 'public/packet-helpers.js');
   try { loadInCtx(ctx, 'public/live.js'); } catch (e) {
     for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
@@ -752,6 +768,59 @@ console.log('\n=== live.js: resolveHopPositions ===');
   });
 }
 
+// ===== resolveHopPositions: canonical answers are positional (#391) =====
+// #367 made the packets page read `resolved_path` per hop POSITION. The live
+// map still went through HopResolver.resolveFromServer(), whose return value
+// is keyed by hop prefix, so a path that repeats a prefix collapsed both
+// positions onto the last answer. These checks pin the positional contract
+// against the real public/hop-resolver.js, not a stand-in.
+console.log('\n=== live.js: resolveHopPositions canonical positions (#391) ===');
+{
+  const ctx = makeLiveSandbox();
+  const resolve = ctx.window._liveResolveHopPositions;
+  const nodeData = ctx.window._liveNodeData();
+  loadInCtx(ctx, 'public/hop-resolver.js');
+  ctx.window.HopResolver = ctx.HopResolver;
+
+  // Two repeaters share the 1-byte prefix "ef". FAR is listed first, so with
+  // no GPS anchor the heuristic deterministically picks it.
+  const FAR = { public_key: 'ef' + 'a'.repeat(62), name: 'FAR-AWAY', role: 'repeater', lat: 50.87, lon: 5.52 };
+  const NEAR = { public_key: 'ef' + 'b'.repeat(62), name: 'NEAR-ONE', role: 'repeater', lat: 51.08, lon: 3.78 };
+  ctx.HopResolver.init([FAR, NEAR]);
+  for (const n of [FAR, NEAR]) nodeData[n.public_key] = { public_key: n.public_key, name: n.name, lat: n.lat, lon: n.lon };
+
+  test('a repeated prefix keeps the canonical node of each position', () => {
+    const out = resolve(['ef', 'ef'], {}, [FAR.public_key, NEAR.public_key]);
+    assert.strictEqual(out.length, 2, `expected both positions, got ${JSON.stringify(out)}`);
+    assert.strictEqual(out[0].key, FAR.public_key, 'position 0 must keep its own canonical node');
+    assert.strictEqual(out[1].key, NEAR.public_key, 'position 1 must keep its own canonical node');
+  });
+
+  test('a null canonical entry does not borrow the answer of a repeated prefix', () => {
+    const out = resolve(['ef', 'ef'], {}, [null, NEAR.public_key]);
+    assert.strictEqual(out.length, 2, `expected both positions, got ${JSON.stringify(out)}`);
+    assert.strictEqual(out[0].key, FAR.public_key, 'the server left position 0 open: it stays heuristic');
+    assert.strictEqual(out[1].key, NEAR.public_key, 'position 1 keeps the canonical node');
+  });
+
+  test('distinct prefixes still read their own canonical answers', () => {
+    const C1 = { public_key: 'c1' + '1'.repeat(62), name: 'C1-ALPHA', role: 'repeater', lat: 51.1, lon: 3.7 };
+    ctx.HopResolver.init([FAR, NEAR, C1]);
+    nodeData[C1.public_key] = { public_key: C1.public_key, name: C1.name, lat: C1.lat, lon: C1.lon };
+    const out = resolve(['ef', 'c1'], {}, [NEAR.public_key, C1.public_key]);
+    assert.strictEqual(out[0].key, NEAR.public_key, 'canonical answer for "ef"');
+    assert.strictEqual(out[1].key, C1.public_key, 'canonical answer for "c1"');
+    ctx.HopResolver.init([FAR, NEAR]);
+    delete nodeData[C1.public_key];
+  });
+
+  test('a resolved_path of the wrong length is ignored, as on the packets page', () => {
+    const out = resolve(['ef', 'ef'], {}, [NEAR.public_key]);
+    assert.strictEqual(out[0].key, FAR.public_key, 'mismatched length must fall back to the heuristic');
+    assert.strictEqual(out[1].key, FAR.public_key, 'mismatched length must fall back to the heuristic');
+  });
+}
+
 // ===== bufferPacket and VCR buffer management =====
 console.log('\n=== live.js: bufferPacket / VCR buffer ===');
 {
@@ -907,8 +976,11 @@ console.log('\n=== live.js: source-level safety checks ===');
     // Moving the subscription took Live's private reconnect loop with it, and
     // that loop was the only place WS_RECONNECT_MS was honoured.
     const appSrc = fs.readFileSync('public/app.js', 'utf8');
-    assert.ok(appSrc.includes('setTimeout(connectWS, window.WS_RECONNECT_MS || 3000)'),
-      'app.js should reconnect on the configured interval, defaulting to 3s');
+    // The delay itself (base, backoff, jitter) is tested in
+    // test-issue-937-ws-backoff.js.
+    assert.ok(appSrc.includes('Number(window.WS_RECONNECT_MS) || 3000') &&
+      appSrc.includes('setTimeout(connectWS, delay)'),
+      'app.js should reconnect from the configured interval, defaulting to 3s');
     assert.ok(!src.includes('WS_RECONNECT_MS'),
       'live.js must not run a reconnect loop of its own');
   });
@@ -1070,24 +1142,30 @@ console.log('\n=== live.js: clickable paths ===');
   function loadPaths(entries) {
     clickablePaths.splice(0, clickablePaths.length, ...entries);
   }
+  // The L.layerGroup a path was added to (#972): eviction must take the
+  // polyline out of the group, not just off the map.
+  function mockGroup() {
+    const g = { held: new Set(), removeLayer(p) { g.held.delete(p); return g; } };
+    return g;
+  }
+  function pathEntry(group, addedAt) {
+    const poly = { remove() {} };
+    group.held.add(poly);
+    return { addedAt, poly, layer: group };
+  }
 
   test('pruneClickablePaths removes entries older than TTL', () => {
     const now = Date.now();
-    loadPaths([
-      { addedAt: now - 35000, poly: { remove() {} } },
-      { addedAt: now - 5000,  poly: { remove() {} } },
-      { addedAt: now - 1000,  poly: { remove() {} } },
-    ]);
+    const g = mockGroup();
+    loadPaths([pathEntry(g, now - 35000), pathEntry(g, now - 5000), pathEntry(g, now - 1000)]);
     pruneClickablePaths(now);
     assert.strictEqual(clickablePaths.length, 2, 'should remove paths older than 30s');
   });
 
   test('pruneClickablePaths keeps all entries within TTL', () => {
     const now = Date.now();
-    loadPaths([
-      { addedAt: now - 5000,  poly: { remove() {} } },
-      { addedAt: now - 1000,  poly: { remove() {} } },
-    ]);
+    const g = mockGroup();
+    loadPaths([pathEntry(g, now - 5000), pathEntry(g, now - 1000)]);
     pruneClickablePaths(now);
     assert.strictEqual(clickablePaths.length, 2);
   });
@@ -1096,13 +1174,38 @@ console.log('\n=== live.js: clickable paths ===');
     const now = Date.now();
     // Match production insertion order: oldest at front (index 0), newest at back
     // entries[0].addedAt = now-5100 (oldest), entries[51].addedAt = now (newest)
+    const g = mockGroup();
     const entries = [];
-    for (let i = 51; i >= 0; i--) entries.push({ addedAt: now - i * 100, poly: { remove() {} } });
+    for (let i = 51; i >= 0; i--) entries.push(pathEntry(g, now - i * 100));
     loadPaths(entries);
     pruneClickablePaths(now);
     assert.strictEqual(clickablePaths.length, 50, 'should evict oldest beyond 50');
     // FIFO: the 2 oldest (addedAt now-5100 and now-5000) were shifted off; now-4900 is oldest remaining
     assert.strictEqual(clickablePaths[0].addedAt, now - 49 * 100, 'oldest remaining should have addedAt = now-4900');
+  });
+
+  // #972: poly.remove() only takes a polyline off the map; the layer group
+  // kept it (and its LatLng/Point arrays) forever. Both eviction branches
+  // must leave the group holding exactly the paths that are left.
+  test('pruneClickablePaths removes TTL-expired paths from their layer group (#972)', () => {
+    const now = Date.now();
+    const g = mockGroup();
+    loadPaths([pathEntry(g, now - 35000), pathEntry(g, now - 31000), pathEntry(g, now - 1000)]);
+    pruneClickablePaths(now);
+    assert.strictEqual(clickablePaths.length, 1);
+    assert.strictEqual(g.held.size, 1, 'group still holds ' + g.held.size + ' polylines, 1 path is left');
+    assert.ok(g.held.has(clickablePaths[0].poly), 'the group holds the path that is left');
+  });
+
+  test('pruneClickablePaths removes cap-evicted paths from their layer group (#972)', () => {
+    const now = Date.now();
+    const g = mockGroup();
+    const entries = [];
+    for (let i = 199; i >= 0; i--) entries.push(pathEntry(g, now - i * 10));
+    loadPaths(entries);
+    pruneClickablePaths(now);
+    assert.strictEqual(clickablePaths.length, 50);
+    assert.strictEqual(g.held.size, 50, 'group still holds ' + g.held.size + ' polylines, the cap is 50');
   });
 }
 
@@ -1150,6 +1253,18 @@ console.log('\n=== live.js: foreignPathColor ===');
       'origin lookup must read the first hop position (the sender anchor resolveHopPositions unshifts)');
   });
 
+  // #882 precedence: foreign red > scope > hash (per segment) > packet type.
+  // A scope colour forces the path colour so drawAnimatedLine's per-segment
+  // hash colour cannot replace it.
+  test('#882 a scope colour forces the path colour over colorByHash, foreign red still first', () => {
+    assert.ok(src.includes('var pathColor = originForeign ? foreignPathColor(allPaths[ai].hopPositions.length) : (scopeColor || color);'),
+      'path colour precedence must be foreign > scope > type');
+    assert.ok(src.includes('var forcePathColor = originForeign || !!scopeColor;'),
+      'a scope colour must set forceColor so colorByHash does not override it');
+    assert.strictEqual((src.match(/pktMeta, forcePathColor\)/g) || []).length, 2,
+      'both animatePath calls (TRACE split and normal) must pass forcePathColor');
+  });
+
   test('animatePath suppresses colorByHash when forceColor is set', () => {
     assert.ok(src.includes('const segHash = forceColor ? null : pktMeta?.hash;'),
       'a forced path color must not be overridden by colorByHash downstream in drawAnimatedLine');
@@ -1166,7 +1281,7 @@ console.log('\n=== live.js: foreignPathColor ===');
 // socket. These drive the REAL live.js closure through a counting channel.
 console.log('\n=== live.js: shared WebSocket channel ===');
 {
-  function makeWSSandbox() {
+  function makeWSSandbox(opts) {
     const ctx = makeSandbox();
     addLiveGlobals(ctx);
     let constructed = 0;
@@ -1185,6 +1300,7 @@ console.log('\n=== live.js: shared WebSocket channel ===');
     ctx.document.body.classList = { add() {}, remove() {}, contains() { return false; } };
     loadInCtx(ctx, 'public/payload-labels.js');
     loadInCtx(ctx, 'public/roles.js');
+    if (!(opts && opts.noHeardFilter)) loadInCtx(ctx, 'public/live-heard-filter.js');
     loadInCtx(ctx, 'public/packet-helpers.js');
     // Deliberately unguarded: a live.js load failure must fail these tests.
     loadInCtx(ctx, 'public/live.js');
@@ -1200,6 +1316,16 @@ console.log('\n=== live.js: shared WebSocket channel ===');
     };
   }
   const pkt = (hash) => ({ type: 'packet', data: { hash, timestamp: new Date().toISOString(), payload_type: 4 } });
+
+  test('#660: a missing live-heard-filter.js degrades to no filter instead of throwing', () => {
+    const t = makeWSSandbox({ noHeardFilter: true });
+    assert.strictEqual(t.ctx.window.LiveHeardFilter, undefined);
+    t.connect();
+    const before = t.buffer().length;
+    t.fanOut({ type: 'packet', data: { hash: 'noheard-1', timestamp: new Date().toISOString(), payload_type: 5,
+      route_type: 1, resolved_path: ['aa'.repeat(32)] } });
+    assert.strictEqual(t.buffer().length, before + 1, 'packet must still be buffered');
+  });
 
   test('Live constructs no WebSocket and registers exactly one shared listener', () => {
     const t = makeWSSandbox();
@@ -1277,6 +1403,484 @@ console.log('\n=== live.js: shared WebSocket channel ===');
     t.registered.push(() => { laterListenerRan = true; });
     assert.doesNotThrow(() => t.fanOut({ type: 'packet', data: null }));
     assert.ok(laterListenerRan, 'a listener registered after Live must still receive the message');
+  });
+}
+
+// ===== groupIsMultibyte (#608) =====
+// #608 follow-up (review of #600, finding N2): the group's hash-size
+// classifier used to pass each observation's route_type straight through to
+// MC_packetHashSize, trusting it as a per-observation field. In practice
+// route_type never comes from the observation (bufferPacket's WS/DB shapes
+// carry it only at the transmission level), so a GROUP whose observations
+// were actually heard on different routes could have its hash size read at
+// the wrong raw_hex offset for every observation but the first. Now
+// MC_packetHashSize derives the route from each raw_hex's own header byte.
+console.log('\n=== live.js: groupIsMultibyte (#608 per-observation route) ===');
+{
+  const ctx = makeLiveSandbox({ withHopFilter: true });
+  const groupIsMultibyte = ctx.window._liveGroupIsMultibyte;
+  assert.ok(groupIsMultibyte, '_liveGroupIsMultibyte must be exposed');
+
+  // route 1 (FLOOD, offset 1), path-len byte 0x00 -> hashSize 1
+  const singleByteFlood = { raw_hex: '0100', route_type: 1 };
+  // route 0 (TRANSPORT_FLOOD, offset 5), path-len byte 0x40 -> hashSize 2
+  const multiByteTransport = { raw_hex: '00aabbccdd40', route_type: 0 };
+
+  test('a single-byte observation alone is not multibyte', () => {
+    assert.strictEqual(groupIsMultibyte([singleByteFlood]), false);
+  });
+
+  test('a multibyte transport observation alone is multibyte', () => {
+    assert.strictEqual(groupIsMultibyte([multiByteTransport]), true);
+  });
+
+  test('mixed-route group: an unresolvable first observation is skipped, then a different-route observation decides via its OWN header', () => {
+    // Real content hash heard on two different routes (StoreTx.routeMask).
+    // groupIsMultibyte uses the first RESOLVABLE observation (documented
+    // behavior, unchanged by #608); the fix is that whichever one that is,
+    // its own raw_hex header picks the offset -- not a shared/assumed route.
+    const unresolvable = { raw_hex: null, route_type: 1 };
+    // route 3 (TRANSPORT_DIRECT, offset 5), path-len byte 0x80 -> hashSize 3
+    const transportDirectMultibyte = { raw_hex: '03aabbccdd80', route_type: 3 };
+    assert.strictEqual(groupIsMultibyte([unresolvable, transportDirectMultibyte]), true,
+      'the second observation\'s own 3-byte hash size (route 3, offset 5) must be found');
+  });
+
+  test('mixed-route group: an observation carrying a FOREIGN route_type field is read by its own raw_hex, not that field', () => {
+    // header byte 0x00 says TRANSPORT_FLOOD/offset 5 -> real path byte at
+    // offset 5 is 0x40 -> size 2 (multibyte). route_type on the object lies
+    // and claims 1 (non-transport/offset 1); offset 1 here is a deliberately
+    // 0x00 transport-code byte -> size 1 (NOT multibyte). The two offsets
+    // must give different, distinguishable verdicts, or this test cannot
+    // tell a correct per-frame read from a buggy field-trusting one.
+    const foreignRouteType = { raw_hex: '0000BBCCDD40', route_type: 1 };
+    assert.strictEqual(groupIsMultibyte([foreignRouteType]), true,
+      'must classify by the frame\'s own header route (offset 5 -> size 2), not the attached route_type field (which would misread offset 1 -> size 1)');
+  });
+}
+
+// #984: the neighbor-graph (hop affinity) poller. A stalled connection used to
+// collect one request per 60 s tick. Driven on a fake clock, a fake fetch and a
+// fake document; the factory is live.js's own (window._liveCreateAffinityPoller).
+console.log('\n=== live.js: #984 neighbor-graph poller ===');
+{
+  const flush = () => new Promise((r) => setImmediate(r));
+  function makeClock() {
+    let now = 0, nextId = 1;
+    const timers = new Map(); // id -> { fn, at, every }
+    return {
+      now: () => now,
+      setTimeout: (fn, ms) => { const id = nextId++; timers.set(id, { fn, at: now + ms, every: 0 }); return id; },
+      clearTimeout: (id) => { timers.delete(id); },
+      setInterval: (fn, ms) => { const id = nextId++; timers.set(id, { fn, at: now + ms, every: ms }); return id; },
+      clearInterval: (id) => { timers.delete(id); },
+      pending: () => timers.size,
+      intervals: () => [...timers.values()].filter((t) => t.every).map((t) => t.every),
+      // Fires every timer due by now + ms, in time order, flushing promises in between.
+      async advance(ms) {
+        const end = now + ms;
+        for (;;) {
+          let id = null, due = null;
+          for (const [k, t] of timers) if (t.at <= end && (!due || t.at < due.at)) { id = k; due = t; }
+          if (!due) break;
+          now = due.at;
+          if (due.every) due.at += due.every; else timers.delete(id);
+          due.fn();
+          await flush();
+        }
+        now = end;
+        await flush();
+      },
+    };
+  }
+  // A fetch whose requests settle only when the test says so. honourAbort:false
+  // is a connection that ignores the abort too (the slot must still free up).
+  function makeFetch({ honourAbort = true } = {}) {
+    const reqs = [];
+    let open = 0, maxOpen = 0;
+    const fn = (url, init) => new Promise((resolve, reject) => {
+      const req = { url, signal: init && init.signal, settled: false };
+      open++; maxOpen = Math.max(maxOpen, open);
+      const done = (f) => (v) => { if (req.settled) return; req.settled = true; open--; f(v); };
+      req.resolve = done(resolve); req.reject = done(reject);
+      req.ok = (graph) => req.resolve({ ok: true, status: 200, json: () => Promise.resolve(graph) });
+      req.status = (status, body) => req.resolve({ ok: false, status, json: () => Promise.resolve(body) });
+      req.truncated = () => req.resolve({ ok: true, status: 200,
+        json: () => Promise.reject(new SyntaxError('Unterminated string in JSON')) });
+      if (honourAbort && req.signal) {
+        req.signal.addEventListener('abort', () => {
+          const e = new Error('The operation was aborted.'); e.name = 'AbortError'; req.reject(e);
+        });
+      }
+      reqs.push(req);
+    });
+    return { fn, reqs, open: () => open, maxOpen: () => maxOpen };
+  }
+  function makeDoc() {
+    const listeners = new Map();
+    return {
+      hidden: false,
+      addEventListener(type, fn) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(fn); },
+      removeEventListener(type, fn) { if (listeners.has(type)) listeners.get(type).delete(fn); },
+      count(type) { return listeners.has(type) ? listeners.get(type).size : 0; },
+      fire(type) { [...(listeners.get(type) || [])].forEach((fn) => fn({ type })); },
+    };
+  }
+  let liveCtx = null;
+  function createPoller() {
+    if (!liveCtx) liveCtx = makeLiveSandbox();
+    return liveCtx.window._liveCreateAffinityPoller;
+  }
+  function makePoller(opts) {
+    const clock = makeClock();
+    const net = makeFetch(opts);
+    const doc = makeDoc();
+    const data = [];
+    const warnings = [];
+    const create = createPoller();
+    assert.strictEqual(typeof create, 'function', 'live.js must expose window._liveCreateAffinityPoller');
+    const poller = create({
+      onData: (g) => data.push(g),
+      fetch: net.fn, document: doc, now: clock.now,
+      setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+      setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+      createController: () => new AbortController(),
+      warn: (...a) => warnings.push(a),
+    });
+    return { poller, clock, net, doc, data, warnings };
+  }
+  const G1 = { edges: [{ source: 'aa', target: 'bb', score: 3 }] };
+  const G2 = { edges: [{ source: 'aa', target: 'cc', score: 5 }] };
+
+  test('#984: interval, endpoint and timeout: 60 s, /api/analytics/neighbor-graph, a timeout well under the interval', async () => {
+    const t = makePoller();
+    t.poller.start();
+    assert.deepStrictEqual(t.clock.intervals(), [60000], 'one 60 s interval');
+    assert.strictEqual(t.net.reqs.length, 1, 'start() polls at once');
+    assert.strictEqual(t.net.reqs[0].url, '/api/analytics/neighbor-graph');
+    assert.ok(t.net.reqs[0].signal, 'the request carries an abort signal');
+    const timeout = t.poller.timeoutMs;
+    assert.ok(timeout > 0 && timeout <= 30000, `timeout ${timeout} ms must be well under 60 s`);
+    t.net.reqs[0].ok(G1);
+    await flush();
+    assert.deepStrictEqual(t.data, [G1], 'the graph reaches onData unchanged');
+    t.poller.stop();
+  });
+
+  test('#984: a request that never resolves blocks further ticks (one in flight per tab)', async () => {
+    const t = makePoller();
+    t.poller.start();
+    assert.strictEqual(t.net.reqs.length, 1);
+    t.poller.tick(); t.poller.tick();
+    t.poller.start(); // loadNodes() runs again (area/region change, VCR scrub)
+    t.doc.fire('visibilitychange');
+    await t.clock.advance(1000);
+    assert.strictEqual(t.net.reqs.length, 1, 'no second request while the first is open');
+    assert.strictEqual(t.poller.inFlight(), true);
+    assert.deepStrictEqual(t.clock.intervals(), [60000], 'start() again keeps one interval');
+    assert.strictEqual(t.doc.count('visibilitychange'), 1, 'start() again keeps one visibility listener');
+    t.poller.stop();
+  });
+
+  test('#984: the timeout aborts the stalled request and the next tick starts a fresh one', async () => {
+    const t = makePoller();
+    t.poller.start();
+    const first = t.net.reqs[0];
+    await t.clock.advance(t.poller.timeoutMs - 1);
+    assert.strictEqual(first.signal.aborted, false, 'not aborted before the timeout');
+    await t.clock.advance(1);
+    assert.strictEqual(first.signal.aborted, true, 'aborted at the timeout');
+    assert.strictEqual(t.poller.inFlight(), false, 'the slot is free after the abort');
+    assert.strictEqual(t.warnings.length, 1, 'the timeout is a failure and warns');
+    await t.clock.advance(60000 - t.poller.timeoutMs);
+    assert.strictEqual(t.net.reqs.length, 2, 'the next tick starts a fresh request');
+    assert.strictEqual(t.net.reqs[1].signal.aborted, false, 'with its own, live signal');
+    t.net.reqs[1].ok(G1);
+    await flush();
+    assert.deepStrictEqual(t.data, [G1]);
+    t.poller.stop();
+  });
+
+  test('#984: a 20-minute stall makes at most one request at a time, not 20 that land at once', async () => {
+    const t = makePoller();
+    t.poller.start();
+    await t.clock.advance(20 * 60000);
+    assert.strictEqual(t.net.maxOpen(), 1, 'never more than one open request');
+    assert.strictEqual(t.net.reqs.length, 21, 'one fresh request per tick');
+    assert.ok(t.net.reqs.slice(0, -1).every((r) => r.signal.aborted), 'each earlier one aborted');
+    assert.strictEqual(t.warnings.length, 1, 'one warning for the whole failure streak');
+    t.poller.stop();
+  });
+
+  test('#984: a connection that ignores the abort still frees the slot, and its late answer is dropped', async () => {
+    const t = makePoller({ honourAbort: false });
+    t.poller.start();
+    await t.clock.advance(60000);
+    assert.strictEqual(t.net.reqs.length, 2, 'the next tick starts a fresh request');
+    t.net.reqs[0].ok(G2); // the stalled answer arrives late
+    await flush();
+    assert.deepStrictEqual(t.data, [], 'a timed-out request never reaches onData');
+    t.net.reqs[1].ok(G1);
+    await flush();
+    assert.deepStrictEqual(t.data, [G1]);
+    t.poller.stop();
+  });
+
+  test('#984: a stopped or superseded request that fails later does not warn', async () => {
+    // stop() aborts the request; the abort rejects it, and that is not a failure.
+    const a = makePoller();
+    a.poller.start();
+    a.poller.stop();
+    await flush();
+    assert.strictEqual(a.net.reqs[0].signal.aborted, true, 'precondition: the abort reached the fetch');
+    assert.strictEqual(a.warnings.length, 0, 'a stopped request does not warn');
+    // A timed-out request (warned already) is superseded; once a success ends
+    // the streak, its late error must not open a new one.
+    const b = makePoller({ honourAbort: false });
+    b.poller.start();
+    await b.clock.advance(60000);
+    assert.strictEqual(b.warnings.length, 1, 'precondition: the timeout warned');
+    assert.strictEqual(b.net.reqs.length, 2);
+    b.net.reqs[1].ok(G1);
+    await flush();
+    b.net.reqs[0].reject(new TypeError('Failed to fetch'));
+    await flush();
+    assert.strictEqual(b.warnings.length, 1, 'a superseded request does not warn');
+    b.poller.stop();
+  });
+
+  test('#984: the late answer of a timed-out request does not mark the data fresh', async () => {
+    const t = makePoller({ honourAbort: false });
+    t.poller.start();
+    await t.clock.advance(t.poller.timeoutMs); // req 0 times out, slot freed
+    t.doc.hidden = true; t.doc.fire('visibilitychange');
+    await t.clock.advance(35000);
+    t.net.reqs[0].ok(G2); // 50 s: its answer arrives late
+    await flush();
+    assert.deepStrictEqual(t.data, [], 'precondition: the late answer is dropped');
+    await t.clock.advance(20000); // 70 s; the 60 s tick fell while hidden
+    assert.strictEqual(t.net.reqs.length, 1, 'precondition: nothing polled while hidden');
+    t.doc.hidden = false; t.doc.fire('visibilitychange');
+    assert.strictEqual(t.net.reqs.length, 2, 'no good data yet: the visibility refresh still happens');
+    t.poller.stop();
+  });
+
+  test('#984: a hidden document skips the tick', async () => {
+    const t = makePoller();
+    t.doc.hidden = true;
+    t.poller.start();
+    await t.clock.advance(5 * 60000);
+    assert.strictEqual(t.net.reqs.length, 0, 'no request while hidden');
+    t.poller.stop();
+  });
+
+  test('#984: becoming visible refreshes once, and only when the data is older than the interval', async () => {
+    const t = makePoller();
+    t.poller.start();
+    t.net.reqs[0].ok(G1);
+    await flush();
+    t.doc.hidden = true; t.doc.fire('visibilitychange');
+    await t.clock.advance(30000);
+    t.doc.hidden = false; t.doc.fire('visibilitychange');
+    assert.strictEqual(t.net.reqs.length, 1, 'fresh data (30 s old): no refresh');
+    t.doc.hidden = true; t.doc.fire('visibilitychange');
+    await t.clock.advance(60000); // the 60 s tick falls while hidden
+    assert.strictEqual(t.net.reqs.length, 1, 'the hidden tick is skipped');
+    t.doc.hidden = false; t.doc.fire('visibilitychange');
+    t.doc.fire('visibilitychange');
+    assert.strictEqual(t.net.reqs.length, 2, 'stale data (90 s old): exactly one refresh');
+    t.net.reqs[1].ok(G2);
+    await flush();
+    assert.deepStrictEqual(t.data, [G1, G2]);
+    t.doc.fire('visibilitychange');
+    assert.strictEqual(t.net.reqs.length, 2, 'fresh again: no refresh');
+    t.poller.stop();
+  });
+
+  test('#984: visible with no good data yet (hidden from the start) refreshes once', async () => {
+    const t = makePoller();
+    t.doc.hidden = true;
+    t.poller.start();
+    t.doc.hidden = false; t.doc.fire('visibilitychange');
+    assert.strictEqual(t.net.reqs.length, 1);
+    t.poller.stop();
+  });
+
+  test('#984: a failed or truncated response keeps the last good data and warns once per streak', async () => {
+    const t = makePoller();
+    t.poller.start();
+    t.net.reqs[0].ok(G1);
+    await flush();
+    await t.clock.advance(60000);
+    t.net.reqs[1].truncated();
+    await flush();
+    await t.clock.advance(60000);
+    t.net.reqs[2].status(503, { error: 'warming up' });
+    await flush();
+    await t.clock.advance(60000);
+    t.net.reqs[3].reject(new TypeError('Failed to fetch'));
+    await flush();
+    assert.deepStrictEqual(t.data, [G1], 'no failure replaces the last good graph');
+    assert.strictEqual(t.warnings.length, 1, 'one warning for the three failures in a row');
+    assert.ok(String(t.warnings[0][0]).includes('affinity'), 'the warning names the affinity data');
+    await t.clock.advance(60000);
+    t.net.reqs[4].ok(G2);
+    await flush();
+    assert.deepStrictEqual(t.data, [G1, G2], 'a success ends the streak');
+    await t.clock.advance(60000);
+    t.net.reqs[5].truncated();
+    await flush();
+    assert.strictEqual(t.warnings.length, 2, 'a new streak warns again');
+    t.poller.stop();
+  });
+
+  test('#984: stop() clears the interval, the timeout and the listener, aborts the request and drops its answer', async () => {
+    const t = makePoller({ honourAbort: false });
+    t.poller.start();
+    const req = t.net.reqs[0];
+    assert.strictEqual(t.clock.pending(), 2, 'precondition: the interval and the timeout');
+    assert.strictEqual(t.doc.count('visibilitychange'), 1);
+    t.poller.stop();
+    assert.strictEqual(t.clock.pending(), 0, 'no timer left');
+    assert.strictEqual(t.doc.count('visibilitychange'), 0, 'no listener left');
+    assert.strictEqual(req.signal.aborted, true, 'the open request is aborted');
+    req.ok(G1);
+    await t.clock.advance(10 * 60000);
+    t.doc.fire('visibilitychange');
+    assert.deepStrictEqual(t.data, [], 'its late answer is dropped');
+    assert.strictEqual(t.net.reqs.length, 1, 'no request after stop()');
+    assert.strictEqual(t.warnings.length, 0, 'teardown is not a failure');
+  });
+
+  // Through the path master already has: loadNodes() via the VCR "resume live"
+  // seam, which re-arms the poller each time it runs.
+  function makeLoadNodesSandbox() {
+    const ctx = makeSandbox();
+    addLiveGlobals(ctx);
+    const pages = {};
+    ctx.registerPage = (name, mod) => { pages[name] = mod; };
+    ctx.document.body.classList = { add() {}, remove() {}, contains() { return false; } };
+    ctx.fetchAllNodes = () => Promise.resolve({ nodes: [] });
+    const warnings = [];
+    ctx.console = Object.assign({}, console, { warn: (...args) => warnings.push(args) });
+    loadInCtx(ctx, 'public/payload-labels.js');
+    loadInCtx(ctx, 'public/roles.js');
+    loadInCtx(ctx, 'public/live-heard-filter.js');
+    loadInCtx(ctx, 'public/packet-helpers.js');
+    loadInCtx(ctx, 'public/live.js');
+    const clock = makeClock();
+    const net = makeFetch();
+    const doc = makeDoc();
+    ctx.setTimeout = clock.setTimeout; ctx.clearTimeout = clock.clearTimeout;
+    ctx.setInterval = clock.setInterval; ctx.clearInterval = clock.clearInterval;
+    ctx.fetch = net.fn;
+    ctx.AbortController = AbortController;
+    ctx.document.addEventListener = doc.addEventListener;
+    ctx.document.removeEventListener = doc.removeEventListener;
+    const graphReqs = () => net.reqs.filter((r) => r.url === '/api/analytics/neighbor-graph');
+    return { ctx, pages, clock, net, doc, graphReqs, warnings, reload: () => ctx.window._liveVcrResumeLive() };
+  }
+
+  test('#984: loadNodes() run again while the graph request stalls adds no request, and the hidden tab polls nothing', async () => {
+    const t = makeLoadNodesSandbox();
+    t.reload();
+    await flush();
+    t.reload();
+    await flush();
+    assert.strictEqual(t.graphReqs().length, 1, 'a second loadNodes() must not start a second graph request');
+    await t.clock.advance(20 * 60000);
+    assert.ok(t.graphReqs().every((r, i, a) => i === a.length - 1 || r.signal && r.signal.aborted),
+      'every stalled request before the last is aborted');
+    assert.deepStrictEqual(t.clock.intervals(), [60000], 'one 60 s interval');
+    assert.strictEqual(t.warnings.filter((w) => String(w[0]).includes('affinity')).length, 1,
+      'one affinity warning for the 20-minute failure streak');
+    const before = t.graphReqs().length;
+    t.ctx.document.hidden = true;
+    await t.clock.advance(5 * 60000);
+    t.reload();
+    await flush();
+    assert.strictEqual(t.graphReqs().length, before, 'no graph request while the tab is hidden');
+    t.pages.live.destroy();
+    assert.deepStrictEqual(t.clock.intervals(), [], 'destroy() clears the interval');
+    assert.strictEqual(t.doc.count('visibilitychange'), 0, 'destroy() leaves no visibility listener');
+  });
+
+  test('#984: through loadNodes(), a failed graph response keeps the last good affinity data', async () => {
+    const t = makeLoadNodesSandbox();
+    const affinity = [];
+    t.ctx.HopResolver.setAffinity = (g) => affinity.push(g);
+    t.ctx.window.HopResolver = t.ctx.HopResolver;
+    t.reload();
+    await flush();
+    t.graphReqs()[0].ok(G1);
+    await flush();
+    t.reload();
+    await flush();
+    t.graphReqs()[1].status(503, { error: 'warming up' });
+    await flush();
+    t.reload();
+    await flush();
+    t.graphReqs()[2].truncated();
+    await flush();
+    assert.strictEqual(t.graphReqs().length, 3);
+    assert.deepStrictEqual(affinity, [G1], 'neither the 503 body nor a truncated one replaces the graph');
+    t.pages.live.destroy();
+  });
+
+  test('#984: Live destroy() stops the poller; a remount starts one fresh poller', async () => {
+    const ctx = makeSandbox();
+    addLiveGlobals(ctx);
+    const pages = {};
+    ctx.registerPage = (name, mod) => { pages[name] = mod; };
+    ctx.document.body.classList = { add() {}, remove() {}, contains() { return false; } };
+    loadInCtx(ctx, 'public/payload-labels.js');
+    loadInCtx(ctx, 'public/roles.js');
+    loadInCtx(ctx, 'public/live-heard-filter.js');
+    loadInCtx(ctx, 'public/packet-helpers.js');
+    loadInCtx(ctx, 'public/live.js');
+    // Swap in the fakes after load: live.js reads these globals when it polls.
+    const clock = makeClock();
+    const net = makeFetch();
+    const doc = makeDoc();
+    const affinity = [];
+    ctx.setTimeout = clock.setTimeout; ctx.clearTimeout = clock.clearTimeout;
+    ctx.setInterval = clock.setInterval; ctx.clearInterval = clock.clearInterval;
+    ctx.fetch = net.fn;
+    ctx.AbortController = AbortController;
+    ctx.document.addEventListener = doc.addEventListener;
+    ctx.document.removeEventListener = doc.removeEventListener;
+    ctx.HopResolver.setAffinity = (g) => affinity.push(g);
+    ctx.window.HopResolver = ctx.HopResolver;
+    const start = ctx.window._liveStartAffinityRefresh;
+    assert.strictEqual(typeof start, 'function', 'live.js must expose window._liveStartAffinityRefresh');
+    start();
+    assert.deepStrictEqual(clock.intervals(), [60000]);
+    assert.strictEqual(net.reqs.length, 1);
+    assert.strictEqual(net.reqs[0].url, '/api/analytics/neighbor-graph');
+    assert.strictEqual(doc.count('visibilitychange'), 1);
+    net.reqs[0].ok(G1);
+    await flush();
+    assert.deepStrictEqual(affinity, [G1], 'the graph reaches HopResolver.setAffinity');
+    await clock.advance(60000);
+    assert.strictEqual(net.reqs.length, 2, 'the interval polls');
+    const open = net.reqs[1];
+    pages.live.destroy();
+    assert.strictEqual(open.signal.aborted, true, 'destroy() aborts the open request');
+    assert.deepStrictEqual(clock.intervals(), [], 'destroy() clears the interval');
+    assert.strictEqual(clock.pending(), 0, 'and the timeout');
+    assert.strictEqual(doc.count('visibilitychange'), 0, 'destroy() removes the visibility listener');
+    assert.strictEqual(ctx.window._liveAffinityPoller(), null, 'and drops the poller');
+    await clock.advance(5 * 60000);
+    doc.fire('visibilitychange');
+    assert.strictEqual(net.reqs.length, 2, 'nothing polls after destroy()');
+    start(); // the next mount (#950 in-place remount, or a return visit)
+    start();
+    assert.deepStrictEqual(clock.intervals(), [60000], 'one interval after the remount');
+    assert.strictEqual(doc.count('visibilitychange'), 1, 'one listener after the remount');
+    assert.strictEqual(net.reqs.length, 3, 'one request after the remount');
+    pages.live.destroy();
+    assert.strictEqual(clock.pending(), 0);
+    assert.strictEqual(doc.count('visibilitychange'), 0);
   });
 }
 

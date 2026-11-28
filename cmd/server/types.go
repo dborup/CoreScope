@@ -417,6 +417,25 @@ type WardrivingEntryPrefix struct {
 	MessageCount     int    `json:"messageCount"` // distinct transmissions this prefix appeared as path[0] for
 }
 
+// PositionSource identifies where a displayed coordinate came from, so an
+// API/UI consumer can distinguish a station's own measured position from an
+// approximate stand-in instead of treating every non-nil Lat/Lon the same
+// way (issue #381 — upstream #2098). Never fabricate a position: when
+// neither source applies, Lat/Lon stay nil and PositionSource is
+// PositionSourceNone rather than a guess.
+type PositionSource string
+
+const (
+	// PositionSourceReal is the station's own self-reported node position
+	// (nodes.lat/lon for its pubkey), the only source that is an actual fix.
+	PositionSourceReal PositionSource = "real"
+	// PositionSourceIATA is the static IATA/region-code centroid, used only
+	// because no real position exists for this station.
+	PositionSourceIATA PositionSource = "iata"
+	// PositionSourceNone means no position is known at all.
+	PositionSourceNone PositionSource = "none"
+)
+
 // WardrivingObserverCoverage is how much wardriving traffic a given observer
 // station actually heard — observers sit at fixed, known locations (unlike
 // the wardriving sender, whose live GPS is deliberately not carried on-air
@@ -424,13 +443,19 @@ type WardrivingEntryPrefix struct {
 // is the reliable half of a coverage picture: "where do we know wardriving
 // signal actually reached."
 type WardrivingObserverCoverage struct {
-	ObserverID       string   `json:"observerId"`
-	ObserverName     string   `json:"observerName"`
-	IATA             string   `json:"iata,omitempty"`
-	Lat              *float64 `json:"lat,omitempty"`
-	Lon              *float64 `json:"lon,omitempty"`
-	ObservationCount int      `json:"observationCount"`
-	MessageCount     int      `json:"messageCount"` // distinct transmissions this observer heard
+	ObserverID   string   `json:"observerId"`
+	ObserverName string   `json:"observerName"`
+	IATA         string   `json:"iata,omitempty"`
+	Lat          *float64 `json:"lat,omitempty"`
+	Lon          *float64 `json:"lon,omitempty"`
+	// PositionSource is "real" when Lat/Lon came from the observer's own
+	// node position, "iata" when it's the configured IATA centroid used
+	// as a fallback (no real position known), or "none" when neither is
+	// available (#381: a real position must never be dropped just because
+	// the observer's IATA code isn't in the static table).
+	PositionSource   PositionSource `json:"positionSource"`
+	ObservationCount int            `json:"observationCount"`
+	MessageCount     int            `json:"messageCount"` // distinct transmissions this observer heard
 }
 
 // WardrivingSignalPoint is one time bucket of average signal quality across
@@ -586,6 +611,16 @@ type PerfCacheStats struct {
 
 type WebSocketStatsResp struct {
 	Clients int `json:"clients"`
+	// #1794: upgrade rejections since boot, split by cause so an operator can
+	// tell a deny-list hit from a client that is merely reconnecting too fast.
+	// omitempty: an install with no limits configured sends none of these
+	// rather than three permanent zeroes.
+	RejectedDeny    int64 `json:"rejectedDeny,omitempty"`
+	RejectedRate    int64 `json:"rejectedRate,omitempty"`
+	RejectedConnCap int64 `json:"rejectedConnCap,omitempty"`
+	// #369: upgrades refused by the global concurrent-client ceiling. A
+	// nonzero value means the server was full, not that one client misbehaved.
+	RejectedGlobalCap int64 `json:"rejectedGlobalCap,omitempty"`
 }
 
 type HealthPacketStoreStats struct {
@@ -816,11 +851,6 @@ type PacketDetailResponse struct {
 	Observations     []ObservationResp `json:"observations,omitempty"`
 }
 
-type PacketIngestResponse struct {
-	ID      int64       `json:"id"`
-	Decoded interface{} `json:"decoded"`
-}
-
 type DecodeResponse struct {
 	Decoded interface{} `json:"decoded"`
 }
@@ -846,6 +876,8 @@ type NodeListResponse struct {
 	Nodes  []map[string]interface{} `json:"nodes"`
 	Total  int                      `json:"total"`
 	Counts map[string]int           `json:"counts"`
+	// Dagi is set when a DAGI param was given (#740).
+	Dagi *DagiFilterInfo `json:"dagi,omitempty"`
 }
 
 type NodeSearchResponse struct {
@@ -853,8 +885,55 @@ type NodeSearchResponse struct {
 }
 
 type NodeDetailResponse struct {
-	Node          map[string]interface{}   `json:"node"`
-	RecentAdverts []map[string]interface{} `json:"recentAdverts"`
+	Node          map[string]interface{} `json:"node"`
+	RecentAdverts NodeAdvertRows         `json:"recentAdverts"`
+	// #2073: omitted when the identity is hidden (identityHidden, #68).
+	RecentAdvertsByRoute *NodeAdvertsByRoute `json:"recentAdvertsByRoute,omitempty"`
+	AdvertCounts         *NodeAdvertCounts   `json:"advertCounts,omitempty"`
+	// #245: estimated flood / zero-hop advert intervals, same opt-in.
+	AdvertIntervals *NodeAdvertIntervals `json:"advertIntervals,omitempty"`
+}
+
+// NodeAdvertRow is one transmission row on node detail: the /api/packets
+// transmission shape of the shared scanTransmissionRow plus, depending on
+// the list, observations and route_class (#2073). It stays map-shaped
+// because that shared scanner is (#1383); the named type keeps the response
+// fields typed.
+type NodeAdvertRow map[string]interface{}
+
+// NodeAdvertRows is a list of NodeAdvertRow.
+type NodeAdvertRows []NodeAdvertRow
+
+// NodeAdvertsByRoute is the newest adverts of a node per route class
+// (#2073), classified like Relay Airtime Share (classifyAdvertRoute). The
+// class is filtered in SQL before the per-class limit, so frequent zero-hop
+// adverts cannot push rare flood adverts out. Unknown (no usable route) is
+// only present when the node has such adverts.
+type NodeAdvertsByRoute struct {
+	Limit   int            `json:"limit"`
+	Flood   NodeAdvertRows `json:"flood"`
+	ZeroHop NodeAdvertRows `json:"zero_hop"`
+	Mixed   NodeAdvertRows `json:"mixed"`
+	Unknown NodeAdvertRows `json:"unknown,omitempty"`
+}
+
+// NodeAdvertCounts counts a node's distinct adverts (by hash) per route class
+// whose first_seen lies in the last 24 hours and 7 days (#2073).
+// RouteMaskBackfill tells whether legacy rows are still classified by their
+// first-inserted route_type (anything but "complete": provisional).
+type NodeAdvertCounts struct {
+	H24               AdvertRouteCounts       `json:"24h"`
+	D7                AdvertRouteCounts       `json:"7d"`
+	Truncated         bool                    `json:"truncated"`
+	RouteMaskBackfill RouteMaskBackfillStatus `json:"route_mask_backfill"`
+}
+
+// AdvertRouteCounts is one window of NodeAdvertCounts.
+type AdvertRouteCounts struct {
+	Flood   int `json:"flood"`
+	ZeroHop int `json:"zero_hop"`
+	Mixed   int `json:"mixed"`
+	Unknown int `json:"unknown"`
 }
 
 type NodeStatsResp struct {
@@ -879,13 +958,14 @@ type NodeObserverStatsResp struct {
 }
 
 type BulkHealthEntry struct {
-	PublicKey string                  `json:"public_key"`
-	Name      interface{}             `json:"name"`
-	Role      interface{}             `json:"role"`
-	Lat       interface{}             `json:"lat"`
-	Lon       interface{}             `json:"lon"`
-	Stats     NodeStatsResp           `json:"stats"`
-	Observers []NodeObserverStatsResp `json:"observers"`
+	PublicKey       string                `json:"public_key"`
+	Name            interface{}           `json:"name"`
+	Role            interface{}           `json:"role"`
+	Lat             interface{}           `json:"lat"`
+	Lon             interface{}           `json:"lon"`
+	Stats           NodeHealthStats       `json:"stats"`
+	DirectObservers []HeardDirectObserver `json:"directObservers"`
+	RelayObservers  []HeardRelayObserver  `json:"relayObservers"`
 }
 
 type NetworkStatusResponse struct {
@@ -976,6 +1056,7 @@ type ComputedNodeStats struct {
 type NodeAnalyticsResponse struct {
 	Node                map[string]interface{}  `json:"node"`
 	TimeRange           TimeRangeResp           `json:"timeRange"`
+	Coverage            NodeAnalyticsCoverage   `json:"coverage"`
 	ActivityTimeline    []TimeBucket            `json:"activityTimeline"`
 	SnrTrend            []SnrTrendEntry         `json:"snrTrend"`
 	PacketTypeBreakdown []PayloadTypeCount      `json:"packetTypeBreakdown"`
@@ -988,12 +1069,13 @@ type NodeAnalyticsResponse struct {
 }
 
 // NodeAnalyticsSummaryResponse is the light sibling of NodeAnalyticsResponse
-// (Fase 5.2a) — GET /api/nodes/{pubkey}/analytics/summary. Only timeRange +
-// computedStats: no node object, no clockSkew, none of the heavy display
+// (Fase 5.2a) — GET /api/nodes/{pubkey}/analytics/summary. Only timeRange,
+// coverage and computedStats: no node object, no clockSkew, none of the heavy display
 // arrays. See PacketStore.GetNodeAnalyticsSummary.
 type NodeAnalyticsSummaryResponse struct {
-	TimeRange     TimeRangeResp     `json:"timeRange"`
-	ComputedStats ComputedNodeStats `json:"computedStats"`
+	TimeRange     TimeRangeResp         `json:"timeRange"`
+	Coverage      NodeAnalyticsCoverage `json:"coverage"`
+	ComputedStats ComputedNodeStats     `json:"computedStats"`
 }
 
 // HopAnalyticsPacket is one transmission that passed through a specific node
@@ -1365,6 +1447,12 @@ type SubpathsResponse struct {
 	TotalPaths int           `json:"totalPaths"`
 }
 
+// SubpathsBulkResponse is /api/analytics/subpaths-bulk: one result per
+// requested group, in request order.
+type SubpathsBulkResponse struct {
+	Results []SubpathsResponse `json:"results"`
+}
+
 type SubpathNode struct {
 	Hop    string      `json:"hop"`
 	Name   string      `json:"name"`
@@ -1414,6 +1502,21 @@ type ChannelResp struct {
 
 type ChannelListResponse struct {
 	Channels []map[string]interface{} `json:"channels"`
+	// ApprovedChannels are the shared hashtag channels an administrator
+	// approved, listed even before they carry any traffic. Omitted when empty.
+	ApprovedChannels []ApprovedChannel `json:"approvedChannels,omitempty"`
+	// HiddenChannels names the channels with stored messages that are left out
+	// of Channels because their shared-channel proposal is not approved (#251).
+	// The page uses it so a live message does not bring such a row back.
+	// Omitted when nothing is hidden.
+	HiddenChannels []string `json:"hiddenChannels,omitempty"`
+}
+
+// ApprovedChannel is one shared hashtag channel. Hash equals Name: decrypted
+// hashtag traffic is stored under the channel name (see db.GetChannels).
+type ApprovedChannel struct {
+	Name string `json:"name"`
+	Hash string `json:"hash"`
 }
 
 type ChannelMessagesResponse struct {
@@ -1544,7 +1647,7 @@ type ClientConfigResponse struct {
 	Tiles               interface{}            `json:"tiles,omitempty"` // deprecated
 	SnrThresholds       interface{}            `json:"snrThresholds"`
 	DistThresholds      interface{}            `json:"distThresholds"`
-	MaxHopDist          interface{}            `json:"maxHopDist"`
+	MaxHopDist          *float64               `json:"maxHopDist"`
 	Limits              interface{}            `json:"limits"`
 	PerfSlowMs          interface{}            `json:"perfSlowMs"`
 	WsReconnectMs       interface{}            `json:"wsReconnectMs"`
@@ -1557,6 +1660,12 @@ type ClientConfigResponse struct {
 	MapDarkTileProvider string                 `json:"mapDarkTileProvider,omitempty"` // deprecated. TODO: remove after v3.5.0
 	Customizer          CustomizerClientConfig `json:"customizer"`
 	ClientRxCoverage    bool                   `json:"clientRxCoverage"`
+	// Moments says whether the server emits #881 moments ({"type":"moment"}
+	// WebSocket frames, GET /api/moments). Omitted when moments are off.
+	Moments *MomentsClientConfig `json:"moments,omitempty"`
+	// Kiosk is the #968 operator kiosk preset for #/live?kiosk=1 links
+	// (resolved, every member present). Omitted when config.json has none.
+	Kiosk *KioskConfig `json:"kiosk,omitempty"`
 	// GeoFilter is the configured geo_filter box/polygon (#730), exposed
 	// for client-side domestic/foreign classification — see
 	// nodePassesGeoFilter (public/app.js) and geo_filter.go. Omitted when
@@ -1570,6 +1679,33 @@ type ClientConfigResponse struct {
 	// {"enabled":true}: no operator-configured text is ever sent to the
 	// frontend. See PrivacyClientConfig below and PrivacyConfig (config.go).
 	Privacy *PrivacyClientConfig `json:"privacy,omitempty"`
+
+	EstimatedPositions EstimatedPositionsClientConfig `json:"estimatedPositions"`
+
+	// DHM offers the #680 terrain hillshade overlay. Omitted unless map.dhm
+	// is enabled with a token; it never carries the token itself.
+	DHM *DHMClientConfig `json:"dhm,omitempty"`
+
+	// Heritage offers the #723 protected ancient monuments overlay. Omitted
+	// unless map.heritage.enabled is true.
+	Heritage *HeritageClientConfig `json:"heritage,omitempty"`
+
+	// Masts offers the #724 antenna sites layer (GET /api/masts). Omitted
+	// unless map.masts.enabled is true.
+	Masts *MastsClientConfig `json:"masts,omitempty"`
+
+	// Skraafoto offers the #737 oblique aerial photos (search and
+	// preview). Omitted unless map.skraafoto.enabled and map.dhm has a
+	// token; it never carries the token.
+	Skraafoto *SkraafotoClientConfig `json:"skraafoto,omitempty"`
+
+	// Coverage offers the #941 predicted reach. Omitted unless
+	// map.coverage.enabled and DHM or the foreign fill gives terrain.
+	Coverage *CoverageClientConfig `json:"coverage,omitempty"`
+
+	// Share offers node share links (#811 M4). Omitted unless
+	// share.nodes.enabled is on.
+	Share *ShareClientConfig `json:"share,omitempty"`
 }
 
 // PrivacyClientConfig is the privacy block of /api/config/client. It carries

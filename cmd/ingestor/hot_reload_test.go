@@ -28,6 +28,17 @@ func writeTestConfig(t *testing.T, hashChannels, hashRegions []string) string {
 	return path
 }
 
+// mustRegionKeys is loadRegionKeys for tests whose config has no
+// hashRegionsPath, where an error can only mean the test setup is broken.
+func mustRegionKeys(t *testing.T, cfg *Config, configPath string) map[string][]byte {
+	t.Helper()
+	keys, err := loadRegionKeys(cfg, configPath)
+	if err != nil {
+		t.Fatalf("loadRegionKeys: %v", err)
+	}
+	return keys
+}
+
 func TestHotKeys_ReloadPicksUpNewChannelsAndRegions(t *testing.T) {
 	configPath := writeTestConfig(t, []string{"#alpha"}, []string{"#alpha"})
 
@@ -35,7 +46,7 @@ func TestHotKeys_ReloadPicksUpNewChannelsAndRegions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial LoadConfig: %v", err)
 	}
-	hk := newHotKeys(loadChannelKeys(cfg, configPath), loadRegionKeys(cfg))
+	hk := newHotKeys(loadChannelKeys(cfg, configPath), mustRegionKeys(t, cfg, configPath))
 
 	if _, ok := hk.Channels()["#alpha"]; !ok {
 		t.Fatalf("initial channel keys = %v, want #alpha present", hk.Channels())
@@ -75,7 +86,7 @@ func TestHotKeys_ReloadKeepsPreviousKeysOnParseError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial LoadConfig: %v", err)
 	}
-	hk := newHotKeys(loadChannelKeys(cfg, configPath), loadRegionKeys(cfg))
+	hk := newHotKeys(loadChannelKeys(cfg, configPath), mustRegionKeys(t, cfg, configPath))
 	before := hk.Channels()
 
 	// Corrupt the config file — reload must fail without blanking the keys.
@@ -99,7 +110,7 @@ func TestStartSIGHUPReload_ActuallyReloadsOnSignal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial LoadConfig: %v", err)
 	}
-	hk := newHotKeys(loadChannelKeys(cfg, configPath), loadRegionKeys(cfg))
+	hk := newHotKeys(loadChannelKeys(cfg, configPath), mustRegionKeys(t, cfg, configPath))
 
 	stop := startSIGHUPReload(hk, configPath)
 	defer stop()

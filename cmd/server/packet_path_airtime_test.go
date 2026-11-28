@@ -13,7 +13,7 @@ import (
 // View Path's estimated LoRa Time-on-Air x distinct-relay-count for the
 // packet's whole flood, sourced from the in-memory PacketStore (same
 // formula as the Relay Airtime Share analytics metric, issue #1768) via
-// the transmission ID GetPacketPath captures. Two observations record
+// the transmission ID getPacketPath captures. Two observations record
 // PARTIALLY overlapping resolved_path relay sets -- the union (3 distinct
 // pubkeys) is what should feed the estimate, not either path alone.
 func TestHandlePacketPath_Airtime(t *testing.T) {

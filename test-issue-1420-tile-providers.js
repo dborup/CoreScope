@@ -69,9 +69,15 @@ function makeSandbox(opts) {
   return ctx;
 }
 
+// #845 — CARTO is opt-in now. The switcher cases below use its ids as
+// examples, so a sandbox without a config of its own has CARTO on; pass
+// null for a truly unconfigured registry.
+const CARTO_ON = { tiles: { providers: { carto: { enabled: true } } } };
+
 function loadProviders(ctx, mapCfg) {
   // Optionally pre-populate MC_MAP_CFG before the IIFE runs
   if (mapCfg !== undefined) ctx.window.MC_MAP_CFG = mapCfg;
+  else if (ctx.window.MC_MAP_CFG === undefined) ctx.window.MC_MAP_CFG = CARTO_ON;
   const src = fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.js'), 'utf8');
   vm.runInContext(src, ctx);
 }
@@ -81,25 +87,32 @@ function loadProviders(ctx, mapCfg) {
 const ALL_CARTO_IDS  = ['carto-dark', 'carto-light', 'carto-voyager', 'carto-voyager-dark', 'positron-dark'];
 const ALL_OSM_IDS    = ['osm-standard', 'osm-dark'];
 const ALL_STAMEN_IDS = ['stamen-toner-lite', 'stamen-toner-dark'];
-const ALL_ESRI_IDS   = ['esri-darkgray-labels'];
+const ALL_ESRI_IDS   = ['esri-darkgray-labels', 'esri-imagery', 'esri-imagery-dark']; // #728: opt-in
+// #332 — the built-in non-CARTO defaults; registered regardless of gating.
+const FALLBACK_IDS   = ['osm-dark', 'osm-standard'];
 const ALL_IDS        = [...ALL_CARTO_IDS, ...ALL_OSM_IDS, ...ALL_STAMEN_IDS, ...ALL_ESRI_IDS];
 
 console.log('\u2500\u2500 #1420 Tile provider registry \u2500\u2500');
 
 // ─── Registry shape ──────────────────────────────────────────────────────────
 
-test('Default registry (no MC_MAP_CFG) contains only Carto providers', () => {
+test('Default registry (no MC_MAP_CFG) has the #332 fallback defaults and no Carto (#845)', () => {
   const ctx = makeSandbox();
-  loadProviders(ctx);
+  loadProviders(ctx, null);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   assert.ok(reg, 'registry must exist on window');
-  for (const id of ALL_CARTO_IDS) assert.ok(reg[id], 'should have ' + id);
-  for (const id of [...ALL_OSM_IDS, ...ALL_STAMEN_IDS]) assert.ok(!reg[id], 'should NOT have ' + id + ' without config');
+  for (const id of ALL_CARTO_IDS) assert.ok(!reg[id], 'should NOT have ' + id + ' (#845: CARTO is opt-in)');
+  // #332 — 'osm-dark' / 'osm-standard' are the keyless fallback defaults and
+  // are registered unconditionally so the active id always resolves (and
+  // stays selectable in the layer picker). The token-gated Stamen styles and
+  // the rest of the OSM family still need config.
+  for (const id of FALLBACK_IDS) assert.ok(reg[id], 'should have fallback default ' + id);
+  for (const id of ALL_STAMEN_IDS) assert.ok(!reg[id], 'should NOT have ' + id + ' without config');
 });
 
 test('Every registry entry has a url function or string with {z}', () => {
   const ctx = makeSandbox();
-  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true }, osm: { enabled: true }, stamen: { enabled: true, token: 'x' } } } });
+  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true }, osm: { enabled: true }, stamen: { enabled: true, token: 'x' }, esri: { enabled: true } } } });
   ctx.window.MC_initTileRegistry(false);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   assert.ok(Object.keys(reg).length >= 10, 'registry must contain all 10 providers when all enabled');
@@ -114,7 +127,7 @@ test('Every registry entry has a url function or string with {z}', () => {
 
 test('Every registry entry has a type of light or dark', () => {
   const ctx = makeSandbox();
-  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true }, osm: { enabled: true }, stamen: { enabled: true, token: 'x' } } } });
+  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true }, osm: { enabled: true }, stamen: { enabled: true, token: 'x' }, esri: { enabled: true } } } });
   ctx.window.MC_initTileRegistry(false);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   assert.ok(Object.keys(reg).length >= 10, 'registry must contain all 10 providers when all enabled');
@@ -135,13 +148,104 @@ test('OSM providers appear when osm.enabled=true in MC_MAP_CFG', () => {
   for (const id of ALL_OSM_IDS) assert.ok(reg[id], 'should have ' + id + ' when osm enabled');
 });
 
+// --- #1891: opt-in topographic layers (OpenTopoMap, USGS) ---
+// These reach third-party tile servers the operator has to opt into, so the
+// default-off gating is the security-relevant part, not a nicety.
+const TOPO_IDS = { opentopomap: ['opentopomap'], usgs: ['usgs-topo', 'usgs-imagery'] };
+
+test('#1891 topo providers are absent by default (no MC_MAP_CFG)', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  ctx.window.MC_initTileRegistry(false);
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  for (const ids of Object.values(TOPO_IDS)) {
+    for (const id of ids) assert.ok(!reg[id], id + ' must not appear without explicit opt-in');
+  }
+});
+
+test('#1891 topo providers stay absent under the shipped config.example.json', () => {
+  const providers = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.example.json'), 'utf8')).map.tiles.providers;
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  ctx.window.MC_MAP_CFG = { tiles: { providers } };
+  ctx.window.MC_initTileRegistry(false);
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  for (const ids of Object.values(TOPO_IDS)) {
+    for (const id of ids) assert.ok(!reg[id], id + ' must ship disabled in config.example.json');
+  }
+});
+
+for (const [provider, ids] of Object.entries(TOPO_IDS)) {
+  test('#1891 ' + provider + ' appears only when ' + provider + '.enabled=true', () => {
+    const on = makeSandbox();
+    loadProviders(on);
+    on.window.MC_MAP_CFG = { tiles: { providers: { [provider]: { enabled: true } } } };
+    on.window.MC_initTileRegistry(false);
+    for (const id of ids) assert.ok(on.window.MC_TILE_PROVIDERS[id], id + ' should appear when enabled');
+    // Enabling one topo provider must not pull in the other.
+    for (const [other, otherIds] of Object.entries(TOPO_IDS)) {
+      if (other === provider) continue;
+      for (const id of otherIds) assert.ok(!on.window.MC_TILE_PROVIDERS[id], id + ' must stay absent');
+    }
+
+    const off = makeSandbox();
+    loadProviders(off);
+    off.window.MC_MAP_CFG = { tiles: { providers: { [provider]: { enabled: false } } } };
+    off.window.MC_initTileRegistry(false);
+    for (const id of ids) assert.ok(!off.window.MC_TILE_PROVIDERS[id], id + ' should be absent when disabled');
+  });
+}
+
+test('#1891 topo layers carry their required attribution and zoom caps', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { opentopomap: { enabled: true }, usgs: { enabled: true } } } };
+  ctx.window.MC_initTileRegistry(false);
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  // OpenTopoMap is CC-BY-SA: dropping the credit is a licence violation.
+  assert.match(reg['opentopomap'].attribution, /OpenTopoMap/, 'OpenTopoMap credit required');
+  assert.match(reg['opentopomap'].attribution, /CC-BY-SA/, 'OpenTopoMap licence required');
+  // CC BY-SA 3.0 4(a) asks for the licence URI where the medium allows it,
+  // and Leaflet renders HTML here, so the credit and licence must be links.
+  assert.match(reg['opentopomap'].attribution, /creativecommons\.org\/licenses\/by-sa/, 'CC-BY-SA licence URI required');
+  assert.match(reg['opentopomap'].attribution, /href="https:\/\/opentopomap\.org"/, 'OpenTopoMap credit must link to the project');
+  assert.strictEqual(reg['opentopomap'].maxZoom, 17, 'OpenTopoMap serves no tiles above z17');
+  for (const id of TOPO_IDS.usgs) {
+    assert.match(reg[id].attribution, /U\.S\. Geological Survey/, id + ' must credit USGS');
+    assert.strictEqual(reg[id].maxZoom, 16, id + ' serves no tiles above z16');
+  }
+});
+
+test('#1891 topo tile URLs use the template each service expects', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { opentopomap: { enabled: true }, usgs: { enabled: true } } } };
+  ctx.window.MC_initTileRegistry(false);
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  const urlOf = (id) => typeof reg[id].url === 'function' ? reg[id].url() : reg[id].url;
+  // OpenTopoMap is {z}/{x}/{y}; the ArcGIS services are {z}/{y}/{x}. Getting
+  // the order wrong still yields 200s in some places, so pin it here.
+  assert.ok(urlOf('opentopomap').endsWith('/{z}/{x}/{y}.png'), 'OpenTopoMap uses z/x/y');
+  assert.ok(urlOf('opentopomap').startsWith('https://'), 'tiles must be fetched over TLS');
+  for (const id of TOPO_IDS.usgs) {
+    assert.ok(urlOf(id).endsWith('/tile/{z}/{y}/{x}'), id + ' uses the ArcGIS z/y/x order');
+    assert.ok(urlOf(id).startsWith('https://'), id + ' must be fetched over TLS');
+    assert.ok(!/\?|api_key|token/i.test(urlOf(id)), id + ' needs no credentials');
+  }
+});
+
 test('OSM providers absent when osm.enabled=false', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
   ctx.window.MC_MAP_CFG = { tiles: { providers: { osm: { enabled: false } } } };
   ctx.window.MC_initTileRegistry(false);
   const reg = ctx.window.MC_TILE_PROVIDERS;
-  for (const id of ALL_OSM_IDS) assert.ok(!reg[id], id + ' should be absent when disabled');
+  // #332 — 'osm-dark' / 'osm-standard' are the built-in fallback defaults and
+  // stay registered even here; `enabled` governs every other OSM style.
+  for (const id of ALL_OSM_IDS) {
+    if (FALLBACK_IDS.includes(id)) assert.ok(reg[id], id + ' is a #332 fallback default — must stay registered');
+    else assert.ok(!reg[id], id + ' should be absent when disabled');
+  }
 });
 
 test('Stamen providers appear when stamen.enabled=true and token provided', () => {
@@ -162,20 +266,27 @@ test('Carto absent only when carto.enabled=false', () => {
   for (const id of ALL_CARTO_IDS) assert.ok(!reg[id], id + ' should be absent when carto disabled');
 });
 
-test('Carto present when carto config is missing entirely (default on)', () => {
+test('Carto absent when carto config is missing entirely (#845: default off)', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
   ctx.window.MC_MAP_CFG = { tiles: { providers: {} } };
   ctx.window.MC_initTileRegistry(false);
   const reg = ctx.window.MC_TILE_PROVIDERS;
-  for (const id of ALL_CARTO_IDS) assert.ok(reg[id], id + ' should exist when carto has no enabled flag');
+  for (const id of ALL_CARTO_IDS) assert.ok(!reg[id], id + ' should be absent when carto has no enabled flag');
+});
+
+test('Carto present only with carto.enabled === true (#845)', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true } } } });
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  for (const id of ALL_CARTO_IDS) assert.ok(reg[id], id + ' should exist when carto.enabled is true');
 });
 
 // ─── invertFilter ────────────────────────────────────────────────────────────
 
 test('Dark-inverted providers have non-null invertFilter; others have null', () => {
   const ctx = makeSandbox();
-  loadProviders(ctx, { tiles: { providers: { osm: { enabled: true }, stamen: { enabled: true, token: 'x' } } } });
+  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true }, osm: { enabled: true }, stamen: { enabled: true, token: 'x' } } } });
   ctx.window.MC_initTileRegistry(false);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   // Explicit dark (invert) entries
@@ -213,11 +324,11 @@ test('MC_setDarkTileProvider rejects unknown IDs', () => {
   assert.strictEqual(ctx.events.length, 0, 'should not dispatch event on invalid ID');
 });
 
-test('MC_getDarkTileProvider falls back: localStorage > server default > carto-dark', () => {
+test('MC_getDarkTileProvider falls back: localStorage > server default > osm-dark (#332)', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
-  // No state → default
-  assert.strictEqual(ctx.window.MC_getDarkTileProvider(), 'carto-dark');
+  // No state → built-in default. #332 made this non-CARTO.
+  assert.strictEqual(ctx.window.MC_getDarkTileProvider(), 'osm-dark');
   // Server default surfaces
   ctx.window.MC_setServerDefaultTileProvider('carto-voyager-dark');
   assert.strictEqual(ctx.window.MC_getDarkTileProvider(), 'carto-voyager-dark');
@@ -248,11 +359,11 @@ test('MC_setLightTileProvider rejects unknown IDs', () => {
   assert.strictEqual(ctx.events.length, 0, 'should not dispatch event on invalid ID');
 });
 
-test('MC_getLightTileProvider falls back: localStorage > server default > carto-light', () => {
+test('MC_getLightTileProvider falls back: localStorage > server default > osm-standard (#332)', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
-  // No state → default
-  assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'carto-light');
+  // No state → built-in default. #332 made this non-CARTO.
+  assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'osm-standard');
   // Server light default
   ctx.window.MC_setServerDefaultLightTileProvider('carto-voyager');
   assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'carto-voyager');
@@ -266,8 +377,9 @@ test('MC_getLightTileProvider ignores stored dark-type providers', () => {
   loadProviders(ctx);
   // Manually jam a dark id into the light storage key to simulate stale state
   ctx.localStorage.setItem('mc-light-tile-provider', 'carto-dark');
-  // Should fall back to default because 'carto-dark' has type === 'dark'
-  assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'carto-light');
+  // Should fall back to the built-in light default because 'carto-dark' has
+  // type === 'dark'.
+  assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'osm-standard');
 });
 
 // ─── CSS filter behavior ──────────────────────────────────────────────────────
@@ -325,12 +437,13 @@ test('MC_initTileRegistry(false) does NOT dispatch mc-tile-provider-changed', ()
 test('MC_TILE_PROVIDERS reference stays in sync after MC_initTileRegistry rebuild', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
-  // Initially carto only
-  assert.ok(!ctx.window.MC_TILE_PROVIDERS['osm-standard'], 'osm absent before config');
-  ctx.window.MC_MAP_CFG = { tiles: { providers: { osm: { enabled: true } } } };
+  // #332 keeps the fallback defaults registered, so use a token-gated style
+  // to observe the rebuild instead.
+  assert.ok(!ctx.window.MC_TILE_PROVIDERS['stamen-toner-lite'], 'stamen absent before config');
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { stamen: { enabled: true, token: 'x' } } } };
   ctx.window.MC_initTileRegistry(false);
   // After re-init, window.MC_TILE_PROVIDERS must reflect the new registry
-  assert.ok(ctx.window.MC_TILE_PROVIDERS['osm-standard'], 'osm present after re-init');
+  assert.ok(ctx.window.MC_TILE_PROVIDERS['stamen-toner-lite'], 'stamen present after re-init');
 });
 
 // ─── OSM URL generation ───────────────────────────────────────────────────────
@@ -463,6 +576,9 @@ test('MC_createLayerControl handles Auto mode and explicit layers correctly', ()
   };
   
   const mockMap = {
+    // Like the Map page (default 'topleft' position): it has its own
+    // attribution control, so the registry adds none (#728).
+    attributionControl: {},
     hasLayer: (l) => addedLayers.includes(l),
     addLayer: (l) => { addedLayers.push(l); removedLayers = removedLayers.filter(x => x !== l); },
     removeLayer: (l) => { removedLayers.push(l); addedLayers = addedLayers.filter(x => x !== l); },
@@ -497,8 +613,11 @@ test('MC_createLayerControl handles Auto mode and explicit layers correctly', ()
     assert.fail('Could not find inverted tile layer to test CSS filter');
   }
 
-  // Simulate Leaflet switching to a non-inverted explicit layer and assert the CSS filter is cleared
-  const lightLayer = ctx._capturedBaseMaps['carto-light'];
+  // Simulate Leaflet switching to a non-inverted explicit layer and assert the CSS filter is cleared.
+  // #845: the sandbox is in the dark theme, which lists only dark styles,
+  // so the non-inverted one is carto-dark (a native dark tile).
+  assert.ok(!ctx._capturedBaseMaps['carto-light'], '#845: a light style is listed in the dark theme');
+  const lightLayer = ctx._capturedBaseMaps['carto-dark'];
   if (lightLayer) {
     lightLayer._events['add']();
     assert.strictEqual(ctx.tilePane.style.filter, '', 'pane.style.filter should be cleared on non-inverted explicit layer add');

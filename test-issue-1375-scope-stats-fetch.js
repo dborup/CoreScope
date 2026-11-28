@@ -146,18 +146,18 @@ function makeSandbox() {
         id, innerHTML: '', textContent: '', value: '',
         style: {}, dataset: {}, classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
         addEventListener() {}, removeEventListener() {},
-        // init()'s deep-link tab selector (analytics.js ~205) does
-        // `analyticsTabs.querySelector('[data-tab="scopes"]')` to find the
-        // tab button matching a `#/analytics?tab=scopes` hash, then reads
-        // it back truthy to set `_currentTab`. A generic `[data-tab="x"]`
-        // match (rather than special-casing the analyticsTabs id) covers
-        // that real production lookup without hand-modeling the tab bar's
-        // actual child markup.
-        querySelector(sel) {
-          const m = /\[data-tab="([^"]+)"\]/.exec(sel || '');
-          return m ? elFor('tab-btn:' + m[1]) : null;
+        // init()'s deep-link lookup (#193) lists `analyticsTabs.querySelectorAll
+        // ('.tab-btn')` and matches `btn.dataset.tab` against ?tab= (it no
+        // longer builds a selector from the URL). A generic `.tab-btn` list of
+        // the two tabs this test drives (rather than special-casing the
+        // analyticsTabs id) covers that real production lookup without
+        // hand-modeling the tab bar's actual child markup. `#/analytics
+        // ?tab=scopes` therefore finds the Scopes button and sets _currentTab.
+        querySelector() { return null; },
+        querySelectorAll(sel) {
+          if (sel !== '.tab-btn') return [];
+          return ['overview', 'scopes'].map((t) => { const b = elFor('tab-btn:' + t); b.dataset.tab = t; return b; });
         },
-        querySelectorAll() { return []; },
         appendChild() {}, closest() { return null; },
         getAttribute() { return null; }, setAttribute() {}, removeAttribute() {},
       });

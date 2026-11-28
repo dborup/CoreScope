@@ -309,6 +309,37 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
   color: #94a3b8;
   border: 1px solid rgba(148, 163, 184, 0.4);
 }
+/* #674 — Mark mode of the 1-byte hop setting. Recommendation (amber
+ * --path-hash-warn) styling, as the Channels "Sent with: 1-byte" badge. */
+.mc-rt-status-unsure {
+  background: color-mix(in srgb, var(--path-hash-warn) 16%, transparent);
+  color: var(--path-hash-warn);
+  border: 1px dashed var(--path-hash-warn);
+  cursor: help;
+}
+.mc-rt-row.mc-rt-unsure .mc-rt-name { text-decoration: underline dashed var(--path-hash-warn); text-underline-offset: 3px; }
+.mc-rt-onebyte {
+  margin: 4px 0 6px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--path-hash-warn);
+  border-radius: 0 4px 4px 0;
+  background: var(--surface-2);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.mc-rt-onebyte .mc-rt-hash { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border: 1px solid var(--path-hash-warn); border-radius: var(--badge-radius, 8px); background: var(--surface-1); }
+.mc-rt-onebyte-summary { margin-top: 4px; color: var(--text); }
+.mc-rt-detail-unsure {
+  margin-bottom: 6px; padding: 4px 6px;
+  border-left: 3px solid var(--path-hash-warn);
+  background: var(--surface-2);
+  font-size: 11px; color: var(--text);
+}
+.mc-rt-mobile-unsure { color: var(--path-hash-warn); font-weight: 600; }
+.mc-rt-marker--unsure::after {
+  content: ''; position: absolute; inset: -3px; border-radius: 50%;
+  border: 2px dashed var(--path-hash-warn); pointer-events: none;
+}
 .mc-rt-status-payload {
   background: rgba(6, 182, 212, 0.15);
   color: #67e8f9;

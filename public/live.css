@@ -7,15 +7,15 @@
 .live-page {
   position: relative;
   width: 100%;
-  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px));
-  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px));
+  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
+  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
   overflow: hidden;
   background: var(--surface-0);
 }
 /* Override #app height constraint on live page */
 #app:has(.live-page) {
-  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px));
-  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px));
+  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
+  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
   overflow: visible;
 }
 
@@ -48,6 +48,12 @@
   flex-direction: column;
   gap: 1px;
 }
+
+/* #943: the feed body is a column flex container with overflow-y:auto and
+   min-height:0. Items default to flex-shrink:1 and are overflow:hidden, so a
+   full feed squeezed every item below its content height instead of
+   overflowing and scrolling (same cause as #940). Keep natural height. */
+.live-feed .panel-content > .live-feed-item { flex: none; }
 
 /* #1207: empty-state placeholder fills the feed body so the panel never
    renders as orphan chrome (✕ + ◫ buttons with no content). The placeholder
@@ -306,10 +312,18 @@
    * around a sparse legend). Drive height by content and cap width so
    * the PACKET TYPES legend stops dominating the map.
    */
-  bottom: calc(var(--vcr-bar-height, 58px) + 10px);
+  bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
   right: 12px;
   height: max-content;
   max-width: 260px;
+  /* #875: the header (corner button + close x) is a fixed row and the content
+   * scrolls, so the panel never outgrows the room between the nav band
+   * (--live-legend-top) and the VCR bar, whatever corner it sits in. The floor
+   * is the header row alone, so on a viewport too short for the panel the
+   * header still fits inside the box instead of spilling over the credit. */
+  max-height: max(var(--live-legend-min-h, 58px),
+    calc(100% - var(--live-legend-top, 64px) - var(--live-legend-clear, 0px)
+    - var(--vcr-bar-height, 58px) - var(--live-credit-height, 0px) - 20px));
   background: color-mix(in srgb, var(--surface-1) 92%, transparent);
   backdrop-filter: blur(12px);
   padding: 10px 14px;
@@ -339,7 +353,37 @@
  */
 .live-legend { pointer-events: none; }
 .live-legend .panel-header,
-.live-legend .panel-corner-btn { pointer-events: auto; }
+.live-legend .panel-corner-btn,
+.live-legend .feed-hide-btn { pointer-events: auto; }
+/* #875: the close x is part of the header row (not pinned 6px below the panel's
+ * top edge), so a short panel can never leave it hanging under the VCR bar. */
+.live-legend .feed-hide-btn { position: static; flex-shrink: 0; }
+/* #875: the legend body stays click-through (map clicks, marker taps, popups,
+ * drags and the node-filter list all work under it, as on master). A long
+ * legend scrolls through a narrow rail on its right edge instead: the rail is
+ * the only part of the body that catches input, and only while it overflows. */
+.live-legend .legend-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.live-legend .panel-content { scrollbar-width: none; }
+.live-legend .panel-content::-webkit-scrollbar { display: none; }
+.live-legend .legend-scroll-rail {
+  display: none;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -12px;
+  width: 12px;
+  overflow-y: scroll;
+  scrollbar-width: thin;
+  pointer-events: auto;
+}
+.live-legend.is-scrollable .legend-scroll-rail { display: block; }
+.live-legend .legend-scroll-spacer { width: 1px; }
 
 .legend-title {
   font-size: 9px;
@@ -495,8 +539,8 @@
   position: absolute;
   top: 50%;
   left: 50%;
-  width: max(100%, 44px);
-  height: 44px;
+  width: max(100%, 48px);
+  height: 48px;
   transform: translate(-50%, -50%);
 }
 
@@ -535,7 +579,7 @@ body.live-fullscreen .vcr-bar { display: none !important; }
 body.live-fullscreen .bottom-nav { display: none !important; }
 body.live-fullscreen .live-feed,
 body.live-fullscreen .live-legend,
-body.live-fullscreen .legend-toggle-btn,
+body.live-fullscreen .live-legend-toggle-ctl,
 body.live-fullscreen .feed-show-btn { display: none !important; }
 
 /* Collapse the header chrome to just the floating stats row pinned
@@ -563,6 +607,352 @@ body.live-fullscreen:not(.nav-pinned) .top-nav {
 body.live-fullscreen:not(.nav-pinned) .leaflet-top.leaflet-right,
 body.live-fullscreen:not(.nav-pinned) .live-header {
   top: 12px !important;
+}
+
+/* ---- #883 M1 Live kiosk mode (#/live?kiosk=1) ----
+   body.kiosk is set by live.js for the Live mount only and never
+   persisted. It composes the #1532 fullscreen rules above and also hides
+   the top nav (even when pinned), the bottom nav reserve, the map's
+   top controls (zoom, layers, fullscreen, settings, legend), the beacon
+   strip, the stats pills and the Moments pause and drawer buttons. The map
+   credit (.leaflet-bottom) stays visible. --vcr-bar-height is 0 here: live.js
+   publishes the same 0 inline once it measures the bar, but Live awaits its
+   nodes before that, and whatever sits on the bar height (the Moments on a
+   phone) is on screen by then: this rule keeps it off the 58px fallback.
+   #883 M2 — the TV layout. Two tokens size it (the customizer later, M4):
+   --kiosk-scale multiplies the kiosk type and the large Moments (1 up to
+   1280x720 and on phones, 1.5 at 1080p, 2 at 1440p and up), and
+   --kiosk-safe-inset (3 % of the short side, owner decision 8) keeps every
+   kiosk element and the map credit clear of TV overscan. */
+body.kiosk {
+  --bottom-nav-reserve: 0px;
+  --kiosk-scale: 1;
+  --kiosk-safe-inset: 3vmin;
+}
+@media (min-width: 1200px) and (min-height: 800px) { body.kiosk { --kiosk-scale: 1.25; } }
+@media (min-width: 1600px) and (min-height: 1000px) { body.kiosk { --kiosk-scale: 1.5; } }
+@media (min-width: 2400px) and (min-height: 1350px) { body.kiosk { --kiosk-scale: 2; } }
+body.kiosk .live-page { --vcr-bar-height: 0px; }
+/* The credit is never hidden, faded or collapsed (OSM, CARTO terms): inside
+   the safe inset at the bottom-right corner, its type scaled for distance. */
+body.kiosk #liveMap .leaflet-bottom { bottom: max(var(--kiosk-safe-inset), env(safe-area-inset-bottom, 0px)); }
+body.kiosk #liveMap .leaflet-right { right: max(var(--kiosk-safe-inset), env(safe-area-inset-right, 0px)); }
+body.kiosk #liveMap .leaflet-control-attribution { font-size: calc(11px * var(--kiosk-scale)); }
+/* The closed nav drawer sits off-screen left, but its shadow reached ~20px
+   into the picture; kiosk has no way to open it. */
+body.kiosk .nav-drawer:not(.is-open) { box-shadow: none; }
+/* No top nav, no bottom nav: the page is the whole viewport from the first
+   paint, before live.js measures it (the base rule keeps 52px for the nav). */
+body.kiosk:has(.live-page) #app:has(.live-page),
+body.kiosk:has(.live-page) .live-page {
+  height: calc(100vh - var(--warmup-pills-h, 0px));
+  height: calc(100dvh - var(--warmup-pills-h, 0px));
+}
+body.kiosk .live-header-body,
+body.kiosk .live-controls-body,
+body.kiosk .live-controls-toggle,
+body.kiosk .live-header-toggle,
+body.kiosk .vcr-bar,
+body.kiosk .bottom-nav,
+body.kiosk .live-feed,
+body.kiosk .live-legend,
+body.kiosk .live-legend-toggle-ctl,
+body.kiosk .feed-show-btn,
+body.kiosk .top-nav,
+body.kiosk .live-header-critical,
+body.kiosk .live-stats-row,
+body.kiosk .live-moments-pause,
+body.kiosk .live-moments-open,
+body.kiosk #liveMap .leaflet-top .leaflet-control { display: none !important; }
+/* The Moments bar keeps its count only: even padding without the buttons. */
+body.kiosk .live-moments-bar { padding-right: 10px; }
+body.kiosk .live-header {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}
+/* Idle: no cursor anywhere (Leaflet sets its own grab cursors). */
+body.kiosk.kiosk-idle,
+body.kiosk.kiosk-idle * { cursor: none !important; }
+
+/* Step label and "2 / 3", top-left inside a 3 % inset (TV overscan). */
+.live-kiosk-step {
+  position: absolute;
+  top: max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px));
+  left: max(var(--kiosk-safe-inset), env(safe-area-inset-left, 0px));
+  z-index: 950;
+  max-width: calc(100% - 2 * var(--kiosk-safe-inset) - 140px);
+  padding: 10px 16px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card-bg) 88%, transparent);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 10px var(--shadow);
+  pointer-events: none;
+}
+.live-kiosk-step-label {
+  font-size: calc(28px * var(--kiosk-scale));
+  font-weight: 700;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+.live-kiosk-step-count {
+  margin-top: 2px;
+  font-size: calc(16px * var(--kiosk-scale));
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.live-kiosk-step-count:empty { display: none; }
+.live-kiosk-progress {
+  height: 3px;
+  margin-top: 8px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform-origin: left center;
+  animation-name: live-kiosk-progress;
+  animation-timing-function: linear;
+  animation-fill-mode: both;
+}
+.live-kiosk-step.is-paused .live-kiosk-progress { visibility: hidden; }
+@keyframes live-kiosk-progress { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+/* "Skipped: …" for 10 s at start. */
+.live-kiosk-note {
+  position: absolute;
+  top: max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 950;
+  max-width: min(480px, calc(100% - 24px));
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+/* Exit button: shown with the cursor, hidden when idle. */
+.live-kiosk-exit {
+  position: absolute;
+  top: max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px));
+  right: max(var(--kiosk-safe-inset), env(safe-area-inset-right, 0px));
+  z-index: 1150;
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px var(--shadow);
+  transition: opacity 0.3s ease, visibility 0.3s;
+}
+.live-kiosk-exit:hover { border-color: var(--accent); }
+.live-kiosk-exit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+body.kiosk.kiosk-idle .live-kiosk-exit { opacity: 0; visibility: hidden; }
+/* Gone while the node panel is open: on a phone the button sits over the
+   panel's close button, and the tap that opened the node has just woken it.
+   The panel has its own close; Escape still exits. Both are children of
+   .live-page and the button comes later, so a sibling selector does it.
+   display, not visibility: no 0.3 s fade during which it still takes taps. */
+body.kiosk .live-node-detail:not(.hidden) ~ .live-kiosk-exit { display: none; }
+
+/* #883 M2 — big numbers (plan §4.3). The HUD only groups the step label
+   and the tiles for the phone layout below; on a desktop or a TV each is
+   placed on its own: the tiles along the bottom, above the map credit. */
+.live-kiosk-hud { display: contents; }
+.live-kiosk-tiles {
+  position: absolute;
+  left: max(var(--kiosk-safe-inset), env(safe-area-inset-left, 0px));
+  right: max(var(--kiosk-safe-inset), env(safe-area-inset-right, 0px));
+  bottom: calc(max(var(--kiosk-safe-inset), env(safe-area-inset-bottom, 0px)) + var(--live-credit-height, 0px) + 8px);
+  z-index: 950;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: calc(12px * var(--kiosk-scale));
+  pointer-events: none;
+}
+.live-kiosk-tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+  padding: calc(10px * var(--kiosk-scale)) calc(18px * var(--kiosk-scale));
+  border-radius: calc(10px * var(--kiosk-scale));
+  background: color-mix(in srgb, var(--kiosk-tile-bg) 92%, transparent);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 10px var(--shadow);
+}
+.live-kiosk-tile[hidden] { display: none; }
+.live-kiosk-tile-line {
+  display: flex;
+  align-items: baseline;
+  gap: calc(10px * var(--kiosk-scale));
+  min-width: 0;
+}
+.live-kiosk-tile-value {
+  font-size: calc(56px * var(--kiosk-scale));
+  font-weight: 700;
+  line-height: 1.05;
+  color: var(--kiosk-number);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.live-kiosk-tile-area {
+  min-width: 0;
+  max-width: calc(360px * var(--kiosk-scale)); /* a long area label ellipsizes; the tiles stay on one row */
+  font-size: calc(28px * var(--kiosk-scale));
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-kiosk-tile-area::before { content: '· '; }
+.live-kiosk-tile-area:empty { display: none; }
+.live-kiosk-tile-label {
+  margin-top: calc(4px * var(--kiosk-scale));
+  font-size: calc(18px * var(--kiosk-scale));
+  color: var(--text-muted);
+}
+.live-kiosk-tile--records {
+  gap: calc(8px * var(--kiosk-scale));
+  max-width: min(calc(560px * var(--kiosk-scale)), 100%);
+}
+.live-kiosk-record { display: flex; flex-direction: column; min-width: 0; }
+.live-kiosk-record-label {
+  font-size: calc(16px * var(--kiosk-scale));
+  color: var(--text-muted);
+}
+.live-kiosk-record-line {
+  display: flex;
+  align-items: baseline;
+  gap: calc(10px * var(--kiosk-scale));
+  min-width: 0;
+}
+.live-kiosk-record-value {
+  max-width: 100%;
+  font-size: calc(28px * var(--kiosk-scale));
+  font-weight: 700;
+  color: var(--kiosk-number);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-kiosk-record-detail {
+  min-width: 0;
+  font-size: calc(16px * var(--kiosk-scale));
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-kiosk-record-detail:empty { display: none; }
+
+/* Large Moments (plan §4.3): top-right inside the inset, under the exit
+   button's spot, at most two cards (live.js cardCap). The size tokens are
+   the #881 card's; on a phone the existing one-card rule stays. */
+@media (min-width: 641px) {
+  body.kiosk .live-moments {
+    --moment-stack-width: calc(420px * var(--kiosk-scale));
+    --moment-title-size: calc(18px * var(--kiosk-scale));
+    --moment-detail-size: calc(16px * var(--kiosk-scale));
+    --moment-icon-size: calc(24px * var(--kiosk-scale));
+    --moment-pad: calc(10px * var(--kiosk-scale)) calc(14px * var(--kiosk-scale));
+    top: calc(max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px)) + 56px);
+    right: max(var(--kiosk-safe-inset), env(safe-area-inset-right, 0px));
+    bottom: auto;
+    left: auto;
+    transform: none;
+  }
+  body.kiosk .live-moments-bar { align-self: flex-end; font-size: calc(13px * var(--kiosk-scale)); }
+  body.kiosk .live-moment-link { font-size: calc(12px * var(--kiosk-scale)); }
+}
+
+/* Start overlay: the Fullscreen API needs a click or a key. */
+.live-kiosk-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--surface-0) 55%, transparent);
+}
+.live-kiosk-start {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 20px 32px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--accent-strong);
+  color: var(--text-on-accent);
+  box-shadow: 0 4px 16px var(--shadow);
+  font: inherit;
+  cursor: pointer;
+}
+.live-kiosk-start:focus-visible { outline: 3px solid var(--text); outline-offset: 3px; }
+.live-kiosk-start-title { font-size: 26px; font-weight: 700; }
+.live-kiosk-start-hint {
+  font-size: 15px;
+  animation: live-kiosk-hint-fade 0.6s ease 5s both;
+}
+@keyframes live-kiosk-hint-fade { to { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .live-kiosk-progress { display: none; }
+  .live-kiosk-exit { transition: none; }
+  .live-kiosk-start-hint { animation: none; }
+}
+@media (max-width: 640px) {
+  /* Here the Moments bar holds only the drawer button, hidden above. */
+  body.kiosk .live-moments-bar { display: none !important; }
+  /* The one card stays clear of the credit, which kiosk lifts into the
+     safe inset. */
+  body.kiosk .live-moments { bottom: calc(max(var(--kiosk-safe-inset), env(safe-area-inset-bottom, 0px)) + var(--live-credit-height, 0px) + 10px); }
+  /* One column at the top: the step label, then one compact row of tiles
+     (the Moments card and the credit keep the bottom). */
+  .live-kiosk-hud {
+    position: absolute;
+    top: max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px));
+    left: max(var(--kiosk-safe-inset), env(safe-area-inset-left, 0px));
+    right: max(var(--kiosk-safe-inset), env(safe-area-inset-right, 0px));
+    z-index: 950;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    pointer-events: none;
+  }
+  .live-kiosk-hud > .live-kiosk-step { position: static; }
+  .live-kiosk-tiles { position: static; order: 1; align-self: stretch; align-items: stretch; flex-wrap: nowrap; gap: 6px; }
+  .live-kiosk-tile { flex: 1 1 0; padding: 6px 8px; border-radius: 8px; }
+  .live-kiosk-tile--records { flex-grow: 1.6; gap: 2px; }
+  .live-kiosk-tile-line { flex-wrap: wrap; gap: 0 4px; }
+  .live-kiosk-tile-value { font-size: 20px; }
+  .live-kiosk-tile-area { font-size: 12px; }
+  .live-kiosk-tile-label { margin-top: 2px; font-size: 11px; }
+  .live-kiosk-record-label { font-size: 10px; }
+  .live-kiosk-record-value { font-size: 13px; }
+  .live-kiosk-record-detail { display: none; }
+  .live-kiosk-step { padding: 6px 10px 8px; max-width: calc(100% - 2 * var(--kiosk-safe-inset) - 120px); }
+  .live-kiosk-step-label { font-size: 20px; }
+  .live-kiosk-step-count { font-size: 13px; }
+  .live-kiosk-start { padding: 16px 20px; }
+  .live-kiosk-start-title { font-size: 20px; }
+  .live-kiosk-start-hint { font-size: 13px; }
 }
 
 
@@ -614,6 +1004,18 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   .live-controls.is-expanded { max-width: calc(100vw - 24px); margin-top: 12px; }
   .live-controls.is-expanded .live-controls-body { flex-wrap: wrap; }
   .live-controls.is-expanded .live-toggles { flex-wrap: wrap; max-height: 50vh; overflow-y: auto; }
+
+  /* #664 — the gear (#liveControlsToggle) lives in the Leaflet top-right
+     stack, outside #liveHeader. With region groups the expanded panel grew
+     down over the gear and swallowed every tap, so it could not be closed.
+     While expanded, keep the panel out of the control rail (10px Leaflet
+     margin + 52px control + 6px gap) so no panel height can cover it.
+     Not a max-height + scroll: overflow would clip the absolutely
+     positioned region/area dropdown menus. */
+  body:not(.live-fullscreen) .live-header:has(.live-controls.is-expanded) {
+    --live-ctrl-rail: 68px;
+    max-width: calc(100vw - 12px - var(--live-ctrl-rail));
+  }
 }
 
 /* ---- Responsive ---- */
@@ -621,7 +1023,7 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   .live-feed { display: none !important; }
   .feed-show-btn { display: none !important; }
   .live-legend { display: none !important; }
-  .legend-toggle-btn { display: none !important; }
+  .live-legend-toggle-ctl { display: none !important; }
   .live-header {
     gap: 6px; padding: 6px 10px;
     top: 56px; left: 8px; right: 8px; max-width: calc(100vw - 16px);
@@ -630,7 +1032,18 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   .live-stat-pill { font-size: 11px; padding: 2px 7px; }
   .live-toggles { font-size: 10px; gap: 6px; margin-left: 0; overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; width: 100%; min-width: 0; }
   .live-title { font-size: 12px; letter-spacing: 1px; }
+}
 
+/* #672 — the #1234 header layout also serves short landscape at 641–768px
+   (height ≤ 500px; at that width this is always landscape). There the
+   top-nav (52px, duplicated by the bottom-nav at ≤ 768px) and the 48px
+   chart toggle in the header row left a capped controls panel (#667) a
+   43–83px scroll box. Only the header and the top-nav switch here: the
+   feed, the legend, the VCR touch targets and the gear keep their
+   641–768px rules, and the Leaflet controls keep the #666 landscape row
+   below the 56px offset. The VCR bar slims down with it (before "Mobile
+   VCR"). */
+@media (max-width: 640px), (max-width: 768px) and (max-height: 500px) {
   /* #1234 chrome-reduction pass 2 — mobile-only adjustments.
    * - Drop MESH LIVE text label and the chart-icon header toggle; counters
    *   speak for themselves on a narrow phone.
@@ -677,10 +1090,22 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   body:has(.live-page) .top-nav { display: none !important; }
   body:has(.live-page) #app:has(.live-page),
   body:has(.live-page) .live-page {
-    height: calc(100vh - var(--bottom-nav-reserve, 0px));
-    height: calc(100dvh - var(--bottom-nav-reserve, 0px));
+    height: calc(100vh - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
+    height: calc(100dvh - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
   }
+}
 
+/* #894: on /live the top nav is a fixed overlay (live.js) above 640px, so
+ * the stale-source pill row (in flow, right after the nav) starts below the
+ * nav's 52px band instead of under it. Padding, not margin, so the row's
+ * measured height (--warmup-pills-h) includes it. Not when the nav is hidden
+ * (fullscreen, unpinned). */
+@media (min-width: 641px) {
+  body:has(.live-page):not(.live-fullscreen) .warmup-pills,
+  body.live-fullscreen.nav-pinned:has(.live-page) .warmup-pills { padding-top: calc(52px + 4px); }
+}
+
+@media (max-width: 640px) {
   /* #1234 — VCR scope: 12h/24h collapse into the More dropdown at ≤640px. */
   .vcr-scope-btn--overflow { display: none !important; }
   .vcr-scope-more-wrap { display: inline-flex !important; position: relative; }
@@ -750,7 +1175,6 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   /* Touch targets */
   .feed-hide-btn { width: 36px; height: 36px; font-size: 16px; }
   .feed-show-btn { padding: 10px 12px; min-width: 44px; min-height: 44px; }
-  .legend-toggle-btn { min-width: 44px; min-height: 44px; }
   /* Feed resize handle: disable on mobile (can't drag easily) */
   .feed-resize-handle { display: none; }
   /* Leaflet zoom controls */
@@ -762,9 +1186,9 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   /* No absolute positioning needed; they stack normally in leaflet-right */
 }
 .live-leaflet-toggle a {
-  width: 44px !important;
-  height: 44px !important;
-  line-height: 44px !important;
+  width: 48px !important;
+  height: 48px !important;
+  line-height: 48px !important;
   font-size: 20px !important;
   background-color: var(--surface-1) !important;
   color: var(--text) !important;
@@ -906,16 +1330,28 @@ body.live-fullscreen #liveFullscreenToggle:hover,
 .feed-hide-btn:hover { opacity: 1; color: #fff; background: rgba(239,68,68,0.6); }
 
 .feed-show-btn {
-  /* #1107: pin fixed bottom-right (stacked above legend toggle) so the
+  /* #1107: pin bottom-right (stacked above legend toggle) so the
    * activate/hide button group docks together as a tidy cluster.
-   * bottom uses max() to clear the VCR bar when present (#1206). */
+   * bottom uses max() to clear the VCR bar when present (#1206).
+   * #1833 round 2: use the same .live-page containing block as .vcr-bar.
+   * A viewport-fixed anchor drifts by --bottom-nav-reserve at 641..768px.
+   * #1833 round 3: at short viewport heights the stacked-above-legend
+   * offset can rise far enough to land under .top-nav (.live-page sits at
+   * viewport-top, with .top-nav fixed on top of it, not pushing it down —
+   * so "bottom" offsets big enough reach right into the nav's 52px band).
+   * The old margin-bottom stacking trick is folded into bottom below so
+   * there is a single total offset to clamp; its ceiling keeps the
+   * button's top edge at least .top-nav's height below .live-page's own
+   * top edge, regardless of viewport height. min() only ever pulls the
+   * offset DOWN from its VCR-bar-clearing value, so it cannot reintroduce
+   * the VCR-bar overlap this same rule already prevents. */
   --legend-toggle-stack: calc(var(--legend-toggle-h, 46px) + 10px); /* gap above legend-toggle */
-  position: fixed;
-  bottom: max(1rem, calc(var(--vcr-bar-height, 0px) + 10px + var(--legend-toggle-stack)));
+  position: absolute;
+  bottom: max(1rem, min(
+    calc(max(1rem, calc(var(--vcr-bar-height, 0px) + var(--live-credit-height, 0px) + 10px + var(--legend-toggle-stack))) + var(--legend-toggle-stack)),
+    calc(100% - var(--legend-toggle-h, 46px) - 52px - 10px)
+  ));
   right: 1rem; z-index: 500;
-  /* Stack above .legend-toggle-btn using margin-bottom so the `right: 1rem`
-   * invariant (and bottom-right anchor) stays consistent across both buttons. */
-  margin-bottom: var(--legend-toggle-stack);
   background: color-mix(in srgb, var(--surface-1) 92%, transparent); backdrop-filter: blur(8px);
   border: 1px solid var(--border); border-radius: 8px;
   color: var(--text-muted); font-size: 18px; padding: 8px 10px;
@@ -928,6 +1364,82 @@ body.live-fullscreen #liveFullscreenToggle:hover,
 .live-page .leaflet-top.leaflet-right {
   top: 64px;
 }
+
+/* #666 — on a landscape phone the one-column stack (zoom, layers,
+   fullscreen, gear) runs from y 74 to 356, so in a ~375px-tall viewport the
+   gear ends under the VCR bar or below the .live-page clip. Lay the stack
+   out as one row instead (y 74–174, gear still in the corner). The legend
+   toggle is the last control of that row (#875), so nothing overlaps it. Short desktop windows (≤ 500px tall) get the row too.
+   The header stops short of the row (5 × 10px Leaflet margin + 52 + 48 +
+   52 + 52 + 52px controls + 6px gap: zoom, layers, Fullscreen, Settings,
+   Legend) while expanded, so it cannot cover the controls either. At
+   ≤ 640px wide the legend control is hidden (#875), so the row is four
+   controls (250px) again. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .live-page .leaflet-top.leaflet-right {
+    display: flex;
+    align-items: flex-start;
+  }
+  body:not(.live-fullscreen) .live-header:has(.live-controls.is-expanded) {
+    --live-ctrl-rail: 312px;
+    max-width: calc(100vw - 12px - var(--live-ctrl-rail));
+  }
+}
+/* #875: a narrow window (the bottom navigation takes 58px) 501-620px tall has
+ * no room for the five-control column: its last control, Legend, would run
+ * under the VCR bar and the credit. The legend goes the way it does on a
+ * phone: panel and toggle are hidden. */
+@media (max-width: 768px) and (min-height: 501px) and (max-height: 620px) {
+  .live-legend, .live-legend-toggle-ctl { display: none !important; }
+}
+@media (orientation: landscape) and (max-height: 500px) and (max-width: 640px) {
+  body:not(.live-fullscreen) .live-header:has(.live-controls.is-expanded) {
+    --live-ctrl-rail: 250px;
+  }
+}
+
+/* #875: just above the row breakpoint (501–540px) the five-control column is
+ * 418px tall and its last control, Legend, ends under the credit that sits on
+ * the VCR bar. Closing Legend's 10px gap and trimming it to the 44px touch
+ * target lifts it clear; the controls above keep their place (#666). */
+@media (min-height: 501px) and (max-height: 540px) {
+  .live-page .leaflet-top.leaflet-right .live-legend-toggle-ctl { margin-top: 0; }
+  .live-page .live-legend-toggle-ctl a { height: 44px !important; line-height: 44px !important; }
+}
+
+/* #667 — the expanded panel is an overlay in the `overflow: hidden`
+   .live-page, so content below the map area (VCR bar, bottom-nav, viewport
+   edge) could not be reached. live.js sets `.is-capped` only while the
+   content does not fit, and publishes where the body starts
+   (--live-ctrl-top) and how much of the viewport bottom is taken
+   (--live-ctrl-reserve). The body then ends 12px above that (header padding
+   + border + gap, or the bottom safe area if larger) and scrolls. While
+   capped, an open region/area menu takes the full body width and no more,
+   so the scroll box cannot clip it sideways; a panel that fits keeps the
+   pre-#667 menu width. */
+.live-controls.is-expanded.is-capped .live-controls-body {
+  --live-ctrl-gutter: max(12px, env(safe-area-inset-bottom, 0px));
+  max-height: calc(100vh - var(--live-ctrl-top, 0px) - var(--live-ctrl-reserve, 0px) - var(--live-ctrl-gutter));
+  max-height: calc(100dvh - var(--live-ctrl-top, 0px) - var(--live-ctrl-reserve, 0px) - var(--live-ctrl-gutter));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+/* The feed card (z-index 1000, later in the DOM) covers the scrolled-in
+   controls of a capped panel. Drop only the feed below the header (also
+   1000, first in the DOM) while capped. Raising the header instead would put
+   it over node detail (a 1000 overlay from 641px up) and the VCR "More" menu
+   (1100, but inside the 1000 VCR bar), which both come later in the DOM and
+   must stay on top.
+   #670: the panel wins at every width where the feed is shown (641px up),
+   not only 641–768px. A capped panel reaches down to the VCR reserve and
+   the feed sits wholly inside its box, so the feed is unusable until the
+   gear closes the panel. Moving the feed aside does not fit: the rail right
+   of the panel is 250px, the feed 280–360px. */
+.live-page:has(.live-controls.is-expanded.is-capped) .live-feed { z-index: 999; }
+.live-controls.is-expanded.is-capped .live-controls-body :is(.live-region-filter-container, .live-area-filter-container):has(.region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
+.live-controls.is-expanded.is-capped .live-controls-body .region-dropdown-wrap:has(> .region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
+.live-controls.is-expanded.is-capped .live-controls-body .region-dropdown-menu { min-width: 0; max-width: 100%; }
 
 /* === VCR Bar === */
 .vcr-bar {
@@ -982,6 +1494,9 @@ body.live-fullscreen #liveFullscreenToggle:hover,
 
 /* #1110 Live page node filter — match toolbar control sizing & theme */
 .live-node-filter-wrap { position: relative; display: inline-flex; align-items: center; }
+/* The label around the compact input is its 48px hit area (#235). Scoped
+   to .live-toggles so it wins over .live-toggles label (cursor: pointer). */
+.live-toggles .live-node-filter-hitarea { display: inline-flex; align-items: center; min-height: 48px; cursor: text; }
 input.live-node-filter-input {
   box-sizing: border-box;
   height: 30px;
@@ -1017,6 +1532,12 @@ input.live-node-filter-input:focus {
   min-width: 200px;
 }
 .live-node-filter-dropdown.hidden { display: none; }
+/* #671 — at <= 768px .live-toggles is a scroll container (overflow-y: auto,
+   and overflow-x: auto at <= 640px), which clipped the open list to the
+   48px node-filter row; below it, taps reached the region quick-picks. Let
+   that row overflow only while its list is open, so the toggles row and
+   the closed filter row keep their scroll behaviour. */
+.live-toggles:has(> .live-node-filter-wrap > .live-node-filter-dropdown:not(.hidden)) { overflow: visible; }
 .live-node-filter-option {
   padding: 6px 10px;
   cursor: pointer;
@@ -1053,9 +1574,9 @@ input.live-node-filter-input:focus {
   border-radius: 4px;
   margin-left: auto;
 }
-.vcr-mode-live { color: var(--status-green); }
-.vcr-mode-paused { color: var(--status-yellow); background: rgba(251,191,36,0.1); }
-.vcr-mode-replay { color: var(--accent); background: rgba(96,165,250,0.1); }
+.vcr-mode-live { color: var(--status-green-text); }
+.vcr-mode-paused { color: var(--warning); background: rgba(251,191,36,0.1); }
+.vcr-mode-replay { color: var(--link-color); background: rgba(96,165,250,0.1); }
 
 .vcr-live-dot {
   display: inline-block;
@@ -1212,12 +1733,18 @@ input.live-node-filter-input:focus {
  * (and other bottom-pinned overlays) always clear the bar regardless of
  * how tall it grows (mobile two-row layout, safe-area-inset, etc.).
  */
-.live-feed { bottom: calc(var(--vcr-bar-height, 58px) + 10px); }
+.live-feed { bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px); }
+/* #680/#728 — the attribution control the tile registry gives Live (base map
+ * and overlay credits) must sit above the VCR bar, not under it. The
+ * bottom-pinned overlays above also clear its measured height
+ * (--live-credit-height, published with --vcr-bar-height), so they never
+ * cover the credit. */
+#liveMap .leaflet-bottom { bottom: var(--vcr-bar-height, 58px); }
 /* Cap the feed's height so its scrollable content never extends below the
  * VCR bar top edge, even when the feed is pinned to a bottom corner.
  */
 .live-feed {
-  max-height: min(340px, calc(100dvh - 64px - var(--vcr-bar-height, 58px) - 24px));
+  max-height: min(340px, calc(100dvh - 64px - var(--vcr-bar-height, 58px) - var(--live-credit-height, 0px) - 24px));
 }
 
 /* Backdrop for mobile tap-outside-to-close (#797) */
@@ -1230,6 +1757,18 @@ input.live-node-filter-input:focus {
 }
 @media (max-width: 640px) {
   .node-detail-backdrop.active { display: block; }
+}
+
+/* #672 — slimmer VCR bar in short landscape at 641–768px: the 60px LCD
+   set its height (77px). The mobile LCD size and the mobile vertical padding
+   bring it to the height of the buttons row; the buttons keep their sizes.
+   Before "Mobile VCR", whose bar padding still wins at ≤ 640px. */
+@media (max-width: 640px), (max-width: 768px) and (max-height: 500px) {
+  .vcr-bar { padding-top: 4px; padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px)); }
+  .vcr-lcd { padding: 2px 4px; }
+  .vcr-lcd-canvas { width: 74px; height: 18px; }
+  .vcr-lcd-mode { font-size: 0.55rem; letter-spacing: 1px; }
+  .vcr-lcd-pkts { font-size: 0.5rem; letter-spacing: 1px; }
 }
 
 /* Mobile VCR */
@@ -1263,12 +1802,8 @@ input.live-node-filter-input:focus {
      * free space via flex:1 instead. */
     margin-left: 0;
     min-width: 0;
-    padding: 2px 4px;
     flex-shrink: 0;
   }
-  .vcr-lcd-canvas { width: 74px; height: 18px; }
-  .vcr-lcd-mode { font-size: 0.55rem; letter-spacing: 1px; }
-  .vcr-lcd-pkts { font-size: 0.5rem; letter-spacing: 1px; }
   .vcr-scope-btns { order: 2; flex-shrink: 0; gap: 1px; }
   .vcr-mode { display: none; }
   /* #1244: timeline absorbs remaining width on the single row. */
@@ -1315,27 +1850,6 @@ input.live-node-filter-input:focus {
   border: 0;
 }
 
-/* Legend toggle button — visible at all sizes (#60, #279).
- * #1107: pinned fixed bottom-right so the activate/hide button group
- * docks consistently (with .feed-show-btn) instead of floating loose
- * inside the map container. */
-.legend-toggle-btn {
-  position: fixed;
-  bottom: calc(var(--vcr-bar-height, 58px) + 10px);
-  right: 1rem;
-  z-index: 500;
-  background: color-mix(in srgb, var(--surface-1) 92%, transparent);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text-muted);
-  font-size: 18px;
-  padding: 8px 10px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.legend-toggle-btn:hover { color: var(--text); border-color: rgba(59,130,246,0.4); }
-
 /* Feed resize handle (#27) */
 .feed-resize-handle {
   position: absolute;
@@ -1379,8 +1893,8 @@ input.live-node-filter-input:focus {
 /* Corner positions — applied via data-position attribute on .live-overlay panels */
 .live-overlay[data-position="tl"] { top: 64px; left: 12px; bottom: auto; right: auto; }
 .live-overlay[data-position="tr"] { top: 64px; right: 12px; bottom: auto; left: auto; }
-.live-overlay[data-position="bl"] { bottom: calc(var(--vcr-bar-height, 58px) + 10px); left: 12px; top: auto; right: auto; }
-.live-overlay[data-position="br"] { bottom: calc(var(--vcr-bar-height, 58px) + 10px); right: 12px; top: auto; left: auto; }
+.live-overlay[data-position="bl"] { bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px); left: 12px; top: auto; right: auto; }
+.live-overlay[data-position="br"] { bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px); right: 12px; top: auto; left: auto; }
 
 /* Override hide animations for positioned panels — slide toward nearest edge */
 .live-overlay[data-position="tl"].hidden,
@@ -1388,6 +1902,37 @@ input.live-node-filter-input:focus {
 .live-overlay[data-position="tr"].hidden,
 .live-overlay[data-position="br"].hidden { transform: translateX(100%); }
 .live-overlay[data-position].hidden { opacity: 0; pointer-events: none; visibility: hidden; }
+
+/* #875: the legend panel keeps clear of the right-hand Leaflet control stack
+ * (zoom, layers, Fullscreen, Settings, Legend) in the right corners. 68px =
+ * 10px control margin + ~50px control + gap, the same rail .live-header uses. */
+.live-legend[data-position="tr"],
+.live-legend[data-position="br"] { right: var(--live-ctrl-rail-legend, 68px); }
+
+/* #875: in short landscape viewports the control stack is a row across the top
+ * right (see #666), not a column, so the right-hand corners keep below it
+ * (74px start + 100px zoom + 10px margin + 10px gap = 120px under the nav
+ * band) instead of beside it. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .live-legend { --live-legend-clear: 0px; --live-legend-min-h: 34px; padding: 2px 8px; }
+  .live-legend .panel-header { padding: 0; }
+  .live-legend .feed-hide-btn { width: 28px; height: 28px; }
+  .live-legend[data-position="tr"],
+  .live-legend[data-position="br"] {
+    --live-legend-clear: 120px;
+    right: 12px;
+  }
+  .live-legend[data-position="tr"] { top: calc(var(--live-legend-top, 64px) + var(--live-legend-clear)); }
+}
+/* #875: at 350px and under the panel is a header row only; the top-right
+ * corner would put its x under the VCR bar, so it sits on the bottom edge
+ * like the bottom-right one. */
+@media (orientation: landscape) and (max-height: 350px) {
+  .live-legend[data-position="tr"] {
+    top: auto;
+    bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
+  }
+}
 
 /* Corner toggle button */
 .panel-corner-btn {
@@ -1494,3 +2039,456 @@ input.live-node-filter-input:focus {
 .leaflet-zoom-anim .leaflet-liveAnimPane-pane {
   display: none !important;
 }
+
+/* #660 — "Last heard" filter select in the live toggles row. */
+select.live-heard-select {
+  box-sizing: border-box;
+  height: 26px;
+  min-height: 26px; /* Override global min-height on form controls */
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 4px;
+  font-size: inherit;
+}
+.live-toggles .live-heard-label { cursor: default; }
+
+/* ── #881 M2 — Moments: cards, bar and drawer ──────────────────────────────
+ * Anchored bottom-centre above the VCR bar (and the tile credit). The
+ * container never takes pointer events; only its buttons and links do.
+ * z-index 900 sits below every .live-overlay panel (1000), so a panel the
+ * viewer moved over the stack wins; the right edge on phones stops at
+ * --live-ctrl-rail so a card can never reach the Leaflet control rail.
+ * Colours are theme variables; the card fill and the per-kind accents are
+ * the --moment-* tokens (style.css, customizer Theme tab). Visible cards and
+ * the dwell are viewer settings (live-moments.js SETTINGS).
+ * #883 M2: the card sizes are tokens too, so Live's kiosk mode can show
+ * large cards. These defaults are the px the cards always had; only
+ * body.kiosk scales them (the kiosk rules near the top of this file). */
+.live-moments,
+.live-moments-drawer {
+  --moment-stack-width: 320px;
+  --moment-title-size: 12px;
+  --moment-detail-size: 12px;
+  --moment-icon-size: 16px;
+  --moment-pad: 6px 8px;
+}
+.live-moments {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
+  width: min(var(--moment-stack-width), calc(100% - 24px));
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+.live-moments[hidden],
+.live-moments-bar[hidden],
+.live-moments-drawer[hidden],
+.live-moments-backdrop[hidden] { display: none !important; }
+.live-moments-stack { display: flex; flex-direction: column; gap: 6px; order: 1; }
+.live-moments-bar {
+  order: 0;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 10px;
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px var(--shadow);
+  font-size: 12px;
+  pointer-events: auto;
+}
+.live-moments-count { white-space: nowrap; }
+.live-moments-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.live-moments-btn:hover,
+.live-moments-btn:focus-visible { background: var(--accent-bg); }
+.live-moments-more:empty { display: none; }
+.live-moments-more { font-weight: 600; color: var(--accent); }
+.live-moments.is-paused .live-moments-count::after { content: ' · paused'; }
+/* #958: outside kiosk the window is a Live drag panel (.live-overlay, the
+ * bar its .panel-header, live.js gates it to DRAG_MQ). In a corner it
+ * drops the centring and, like the legend (#875), keeps clear of the
+ * Leaflet control rail on the right. Once the viewer moved it (a corner or
+ * a drag) it is on the panels' level, 1000, and later in the page, so its
+ * bar and corner button stay reachable over the Feed, the Legend or the
+ * header in the same corner; at its own anchor it stays at 900, below
+ * them. Its bar keeps its own fill on hover, and a drag shadows the bar
+ * and cards, not the transparent box. */
+.live-moments[data-position="tl"],
+.live-moments[data-position="tr"],
+.live-moments[data-position="bl"],
+.live-moments[data-position="br"] { transform: none; z-index: 1000; }
+.live-moments[data-dragged="true"] { z-index: 1000; }
+.live-moments[data-position="tr"],
+.live-moments[data-position="br"] { right: var(--live-ctrl-rail-legend, 68px); }
+.live-moments-bar.panel-header:hover { background: var(--card-bg); }
+.live-moments.is-dragging { box-shadow: none; }
+@media not all and (pointer: fine) and (min-width: 768px) {
+  .live-moments .panel-corner-btn { display: none; }
+}
+
+.live-moment-card,
+.live-moment-row {
+  display: flex;
+  align-items: stretch;
+  background: var(--moment-card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--moment-accent, var(--accent));
+  border-radius: 8px;
+  overflow: hidden;
+}
+/* One accent per kind: the stripe and the icon (#881 M3). The kind is also
+   the icon and the title, so colour is never the only carrier. */
+.live-moment-card[data-kind="new_node"],
+.live-moment-row[data-kind="new_node"] { --moment-accent: var(--moment-new-node); }
+.live-moment-card[data-kind="back_online"],
+.live-moment-row[data-kind="back_online"] { --moment-accent: var(--moment-back-online); }
+.live-moment-card[data-kind="record_link"],
+.live-moment-row[data-kind="record_link"] { --moment-accent: var(--moment-record-link); }
+.live-moment-card[data-kind="busiest_repeater"],
+.live-moment-row[data-kind="busiest_repeater"] { --moment-accent: var(--moment-busiest); }
+.live-moment-card {
+  box-shadow: 0 4px 14px var(--shadow);
+  pointer-events: auto;
+  animation: live-moment-in 0.25s ease-out;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.live-moment-card.is-leaving { opacity: 0; transform: translateY(4px); }
+@keyframes live-moment-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.live-moment-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: var(--moment-pad);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.live-moment-main:hover,
+.live-moment-main:focus-visible { background: var(--accent-bg); }
+.live-moment-main .ph-icon { flex: none; color: var(--moment-accent, var(--accent)); font-size: var(--moment-icon-size); }
+.live-moment-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.live-moment-title { font-size: var(--moment-title-size); font-weight: 600; }
+.live-moment-detail,
+.live-moment-time { font-size: var(--moment-detail-size); color: var(--text-muted); }
+.live-moment-detail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.live-moment-time { flex: none; white-space: nowrap; }
+.live-moment-link {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--accent);
+  border-left: 1px solid var(--border);
+}
+
+.live-moments-drawer {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
+  width: min(360px, calc(100% - 24px));
+  max-height: min(420px, calc(100% - var(--vcr-bar-height, 58px) - 96px));
+  z-index: 1060;
+  display: flex;
+  flex-direction: column;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+.live-moments-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 6px 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.live-moments-drawer-title { flex: 1; font-weight: 600; font-size: 13px; }
+.live-moments-list { list-style: none; margin: 0; padding: 6px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+/* A row is overflow: hidden, so its automatic min-height is 0 and it would
+   shrink inside this scrolling column instead of making the list scroll
+   (#940). Rows keep their content height. */
+.live-moments-list > .live-moment-row { flex: none; }
+.live-moments-empty { padding: 8px; color: var(--text-muted); font-size: 12px; }
+.live-moments-backdrop { display: none; }
+
+/* Fly-to highlight: a divIcon ring, so CSS can style it on the canvas map. */
+.live-moment-hl {
+  border: 3px solid var(--accent);
+  border-radius: 50%;
+  box-sizing: border-box;
+  background: transparent;
+  animation: live-moment-hl-pulse 1.2s ease-out 4;
+}
+@keyframes live-moment-hl-pulse {
+  from { box-shadow: 0 0 0 0 var(--accent-border); }
+  to { box-shadow: 0 0 0 14px transparent; }
+}
+.live-moment-hl.is-static { animation: none; }
+
+@media (pointer: coarse) {
+  .live-moments-btn { min-width: 40px; height: 40px; }
+  .live-moment-main { min-height: 40px; }
+}
+
+/* Phone: one card from 8px to the control rail, the drawer button beside
+ * it, the count and pause move into the drawer, and the drawer is a bottom
+ * sheet with a backdrop.
+ * The sheet and backdrop are fixed to the viewport, not absolute in
+ * .live-page: there the hidden node-detail sheet makes .live-page wider
+ * than the screen, and any programmatic sideways scroll of it (a tap's
+ * scroll-into-view, a focus) would carry the sheet off the left edge. They
+ * end at --bottom-nav-reserve, the same reserve .live-page leaves for the
+ * bottom nav. */
+@media (max-width: 640px) {
+  .live-moments {
+    left: 8px;
+    right: var(--live-ctrl-rail, 68px);
+    width: auto;
+    transform: none;
+    flex-direction: row;
+    align-items: flex-end;
+  }
+  .live-moments-stack { flex: 1; min-width: 0; order: 0; }
+  .live-moments-bar { order: 1; padding: 2px; align-self: flex-end; }
+  .live-moments-bar .live-moments-count,
+  .live-moments-bar .live-moments-pause { display: none; }
+  .live-moment-card { max-height: 56px; }
+  .live-moments-drawer {
+    position: fixed;
+    left: 0; right: 0; bottom: var(--bottom-nav-reserve, 0px);
+    width: auto;
+    transform: none;
+    max-height: 60dvh;
+    border-radius: 16px 16px 0 0;
+    z-index: 1101;
+  }
+  .live-moments-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0 0 var(--bottom-nav-reserve, 0px) 0;
+    z-index: 1100;
+    background: var(--shadow);
+  }
+}
+/* Short phone landscape (e.g. 568x320): no cards (live-moments.js
+ * SHORT_MQ), only the drawer button. The Leaflet controls are a row there
+ * (#666), 250px wide at ≤640px with the legend hidden (#875), and the
+ * Fullscreen control would sit straight above the button with only the
+ * font-dependent VCR bar height between them. Keep the button left of the
+ * whole row instead. */
+@media (max-width: 640px) and (max-height: 419px) {
+  .live-moments { right: calc(250px + 12px); }
+}
+@media (min-width: 641px) {
+  .live-moments-drawer-head .live-moments-pause { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-moment-card { animation: none; transition: none; }
+  .live-moment-hl { animation: none; }
+}
+
+/* #880 — "Follow a packet": popup/feed buttons, the follow card and the
+   map markers. Colours come from the --follow-* tokens in style.css. */
+.lc-follow-btn,
+.fdc-follow {
+  border: 1px solid color-mix(in srgb, var(--follow-ring) 60%, transparent);
+  background: color-mix(in srgb, var(--follow-ring) 14%, transparent);
+  color: var(--text);
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.lc-follow-btn { margin-left: 8px; padding: 1px 8px; font-size: 11px; }
+.fdc-follow { display: block; width: 100%; margin-top: 4px; padding: 6px; font-size: .75rem; }
+.lc-follow-btn:hover,
+.fdc-follow:hover { background: color-mix(in srgb, var(--follow-ring) 28%, transparent); }
+/* "Follow next packet" lives where it moves nothing (#670, #671): an icon
+   in the feed header above 640px, a row in the controls panel at <= 640px,
+   where the feed is hidden. One state, two buttons; live.js keeps them in
+   step. */
+.live-toggles .live-follow-next--menu { display: none; width: auto; padding: 2px 8px; font: inherit; }
+.live-feed .live-follow-next--feed {
+  flex-shrink: 0;
+  width: 28px; height: 28px; padding: 0;
+  margin-left: auto; margin-right: 22px; /* clear of the absolute #feedHideBtn */
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 4px;
+  background: transparent; color: var(--text-muted);
+  opacity: 0.7; cursor: pointer;
+}
+.live-feed .live-follow-next--feed:hover { opacity: 1; background: color-mix(in srgb, var(--text) 12%, transparent); }
+.live-feed .live-follow-next--feed:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 2px; }
+.live-follow-next.active { opacity: 1; color: var(--follow-ring); border-color: var(--follow-ring); }
+@media (max-width: 640px) {
+  .live-toggles .live-follow-next--menu { display: inline-block; }
+}
+
+.live-follow-card {
+  position: absolute;
+  top: 64px; /* clear of the overlaid top nav */
+  right: 70px;
+  width: 300px;
+  max-width: calc(100% - 90px);
+  max-height: calc(100% - 190px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  z-index: 1050;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--surface-1) 95%, transparent);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--follow-ring);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px var(--shadow);
+  color: var(--text);
+  font-size: .8rem;
+}
+.live-follow-card [hidden] { display: none !important; }
+.live-follow-card .lf-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; padding: 0; }
+.live-follow-card .lf-title { font-size: .75rem; letter-spacing: .06em; color: var(--follow-ring); }
+.live-follow-card .lf-type { color: var(--text-muted); font-family: var(--mono, monospace); font-size: .75rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-follow-card .lf-close {
+  margin-left: auto; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 32px; min-height: 32px;
+  background: none; border: none; border-radius: 6px; color: var(--text-muted); cursor: pointer;
+}
+.live-follow-card .lf-close:hover { color: var(--text); background: color-mix(in srgb, var(--text) 12%, transparent); }
+.live-follow-card .lf-status { color: var(--text); font-variant-numeric: tabular-nums; }
+.live-follow-card .lf-progress { height: 4px; margin: 6px 0; border-radius: 2px; background: color-mix(in srgb, var(--text) 12%, transparent); overflow: hidden; }
+.live-follow-card .lf-bar { height: 100%; width: 0; background: var(--follow-ring); }
+.live-follow-card .lf-controls { display: flex; gap: 6px; }
+.live-follow-card .lf-controls .vcr-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; min-height: 32px; }
+.live-follow-card .lf-summary { margin-top: 6px; }
+.live-follow-card .lf-rows { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+.live-follow-card .lf-rows dt { color: var(--text-muted); }
+.live-follow-card .lf-rows dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.live-follow-card .lf-caption,
+.live-follow-card .lf-note { margin: 6px 0; color: var(--text-muted); font-size: .72rem; }
+.live-follow-card .lf-observers { margin: 4px 0 0; padding-left: 20px; max-height: 160px; overflow-y: auto; }
+.live-follow-card .lf-observers li { margin: 2px 0; overflow-wrap: anywhere; }
+.live-follow-card .lf-observers li.lf-late { color: var(--text-muted); }
+.live-follow-card .lf-obs-name { font-weight: 600; }
+.live-follow-card .lf-obs-when { margin-left: 6px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.live-follow-card .badge-iata { margin-left: 4px; font-size: 10px; }
+.live-follow-card .lf-clock-flag { margin-left: 6px; color: var(--follow-flag); font-weight: 600; cursor: help; }
+.live-follow-card .lf-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.live-follow-card .lf-link { color: var(--accent); }
+
+.live-follow-toast {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+  z-index: 1050; padding: 6px 12px; border-radius: 6px;
+  background: var(--surface-1); color: var(--text); border: 1px solid var(--border);
+  box-shadow: 0 4px 12px var(--shadow); font-size: .8rem;
+}
+
+/* Map markers (divIcons on liveAnimPane; built in live.js with textContent). */
+.live-follow-icon { background: none; border: none; }
+.lf-marker { position: relative; width: 0; height: 0; }
+.lf-marker .lf-dot {
+  position: absolute; left: -6px; top: -6px; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--surface-1);
+  animation: lfPop .35s ease-out;
+}
+.lf-origin .lf-dot { left: -8px; top: -8px; width: 16px; height: 16px; background: var(--follow-ring); }
+.lf-relay .lf-dot { background: var(--follow-relay); }
+.lf-observer .lf-dot { background: var(--follow-observer); }
+.lf-observer.lf-late .lf-dot { opacity: .6; }
+.lf-marker .lf-label {
+  position: absolute; left: 10px; top: -9px; white-space: nowrap;
+  padding: 1px 5px; border-radius: 4px; font-size: 11px; line-height: 16px;
+  background: color-mix(in srgb, var(--surface-1) 88%, transparent); color: var(--text);
+  border: 1px solid var(--border);
+}
+.lf-marker .lf-clock-flag { width: 12px; height: 12px; margin-left: 4px; vertical-align: -2px; color: var(--follow-flag); }
+@keyframes lfPop { from { transform: scale(0.2); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .lf-marker .lf-dot { animation: none; }
+}
+
+@media (max-width: 768px) {
+  /* Bottom sheet above the bottom nav, like .feed-detail-card. */
+  .live-follow-card {
+    position: fixed;
+    left: 0; right: 0; top: auto; bottom: 58px;
+    width: 100%; max-width: 100vw; max-height: 40vh;
+    border-radius: 10px 10px 0 0;
+    border-left: 1px solid var(--border);
+    border-top: 3px solid var(--follow-ring);
+  }
+  .live-follow-card .lf-close,
+  .live-follow-card .lf-controls .vcr-btn,
+  .live-follow-card .lf-replay,
+  .live-toggles .live-follow-next--menu,
+  .fdc-follow { min-width: 44px; min-height: 44px; }
+  /* Touch targets for the popup's Follow and the summary's packet link. */
+  .lc-follow-btn,
+  .live-follow-card .lf-link {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 44px; min-height: 44px; vertical-align: middle;
+  }
+  .live-follow-card .lf-link { padding: 0 6px; }
+  .live-follow-card .lf-observers { max-height: none; }
+}
+
+/* #882 — "SCOPES (last 15 min)" legend section. Swatch colours come from the
+ * --scope-* variables (style.css), so the theme drives them. */
+.live-scope-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 4px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.live-scope-legend .legend-list li { overflow-wrap: anywhere; }
+.live-scope-legend { margin-bottom: 8px; }
+.live-scope-empty,
+.live-scope-more { color: var(--text-muted); font-style: italic; }
+/* Settings-panel copy of the SCOPES list: only where the legend panel is
+ * hidden (phones, and the 501-620px-tall narrow window, #875). */
+.live-scope-legend--menu { display: none; margin: 6px 0 0; }
+@media (max-width: 640px) {
+  .live-scope-legend--menu:not([hidden]) { display: block; }
+}
+@media (max-width: 768px) and (min-height: 501px) and (max-height: 620px) {
+  .live-scope-legend--menu:not([hidden]) { display: block; }
+}
+.live-scope-legend--menu .legend-list { font-size: 12px; }

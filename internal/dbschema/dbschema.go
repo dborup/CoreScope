@@ -2,7 +2,9 @@
 // assertions for the CoreScope SQLite DB. Per issue #1287 the writer
 // (cmd/ingestor) owns ALL CREATE/ALTER/INSERT/UPDATE/DELETE on schema
 // objects; the server (cmd/server) only ASSERTS that the schema is in
-// the expected shape and refuses to start otherwise.
+// the expected shape. It waits (bounded) while the ingestor's in-progress
+// start-up migration is still missing (NotReadyError.Transient) and refuses
+// to start otherwise.
 //
 // Apply(rw, log) runs from the ingestor at startup BEFORE subscribing to
 // MQTT. AssertReady(ro) runs from the server at startup and returns an
@@ -118,33 +120,221 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureTransmissionsLastSeenColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure transmissions.last_seen: %w", err)
 	}
+	if err := ensureChannelProposalsTable(rw, logf); err != nil {
+		return fmt.Errorf("ensure channel_proposals: %w", err)
+	}
+	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS approved_region_scopes (
+		name TEXT COLLATE BINARY PRIMARY KEY,
+		status TEXT NOT NULL CHECK(status IN ('approved','rejected','revoked')),
+		created_at INTEGER NOT NULL,
+		reviewed_at INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("ensure approved_region_scopes: %w", err)
+	}
+	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS region_scope_audit (
+		request_id TEXT PRIMARY KEY,
+		name TEXT COLLATE BINARY NOT NULL,
+		operation TEXT NOT NULL,
+		previous_status TEXT,
+		new_status TEXT NOT NULL,
+		decided_at INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("ensure region_scope_audit: %w", err)
+	}
+	if err := ensureNodeAntennaClaimsTable(rw); err != nil {
+		return fmt.Errorf("ensure node_antenna_claims: %w", err)
+	}
+	if err := ensureAntennaClaimParts(rw, logf); err != nil {
+		return fmt.Errorf("ensure node_antenna_claims parts: %w", err)
+	}
+	if err := ensureTransmissionsRouteMaskColumn(rw, logf); err != nil {
+		return fmt.Errorf("ensure transmissions.route_mask: %w", err)
+	}
+	if err := ensureRouteMaskChangesTable(rw, logf); err != nil {
+		return fmt.Errorf("ensure route_mask_changes: %w", err)
+	}
 	return nil
 }
 
+// NotReadyError is AssertReady's error: the required schema items that are
+// missing or malformed, and the items whose probe failed (each with its
+// error, so no failure can be recorded without the error that classifies it).
+type NotReadyError struct {
+	Missing []string // human-readable item names; never row data
+	Probes  []ProbeFailure
+}
+
+// ProbeFailure is a schema item AssertReady could not verify.
+type ProbeFailure struct {
+	Item string
+	Err  error
+}
+
+// Items lists every item that is missing, malformed or unverified.
+func (e *NotReadyError) Items() []string {
+	items := append([]string(nil), e.Missing...)
+	for _, p := range e.Probes {
+		items = append(items, fmt.Sprintf("%s (probe error: %v)", p.Item, p.Err))
+	}
+	return items
+}
+
+func (e *NotReadyError) Error() string {
+	return fmt.Sprintf("schema not migrated by ingestor; restart ingestor first. missing: %s",
+		strings.Join(e.Items(), ", "))
+}
+
+// Transient reports whether the ingestor resolves the problem by itself
+// while it starts: the only missing items are this PR's start-up migration
+// still in progress (route_mask_changes not created yet, and possibly the
+// transmissions.route_mask column added just before it in the same Apply),
+// and every probe failure is SQLite BUSY or LOCKED. Anything else (another
+// missing item, a malformed change log, a change log whose migration is
+// recorded but whose table is gone, the column missing while the table
+// exists, any other SQLite error) is permanent. Classification uses SQLite
+// result codes, never error text.
+func (e *NotReadyError) Transient() bool {
+	if len(e.Missing) == 0 && len(e.Probes) == 0 {
+		return false
+	}
+	tableUnknown := false // not created yet, or its probe was BUSY/LOCKED
+	for _, p := range e.Probes {
+		if !isBusyOrLocked(p.Err) {
+			return false
+		}
+		if p.Item == "table:route_mask_changes" {
+			tableUnknown = true
+		}
+	}
+	for _, m := range e.Missing {
+		if m == "table:route_mask_changes" {
+			tableUnknown = true
+		}
+	}
+	for _, m := range e.Missing {
+		switch {
+		case m == AntennaClaimPartsItem:
+			// The ingestor runs it at start-up, in one transaction.
+		case m == "table:route_mask_changes":
+		case m == "transmissions.route_mask" && tableUnknown:
+			// Added by the same Apply, right before the table.
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isBusyOrLocked reports whether err carries SQLite primary result code
+// SQLITE_BUSY (5) or SQLITE_LOCKED (6), including extended codes such as
+// SQLITE_BUSY_SNAPSHOT. The driver's errors expose Code().
+func isBusyOrLocked(err error) bool {
+	var coded interface{ Code() int }
+	if !errors.As(err, &coded) {
+		return false
+	}
+	primary := coded.Code() & 0xff
+	return primary == 5 || primary == 6
+}
+
 // AssertReady verifies the schema is in the expected shape. The server
-// calls this at startup against a read-only connection; if it returns
-// non-nil, the server MUST fatal-log and exit so the operator restarts
-// the ingestor (which owns migrations).
-func AssertReady(ro *sql.DB) error {
+// calls this at startup against a read-only connection. A non-nil result is
+// a *NotReadyError: the server waits (bounded) while it is Transient() and
+// fails otherwise, so the operator restarts the ingestor (which owns
+// migrations).
+func AssertReady(ro *sql.DB) error { return assertReady(ro, nil) }
+
+// assertReady is AssertReady; tests pass probed to run code right after the
+// probe of an item ("table:<name>" or "<table>.<column>").
+func assertReady(ro *sql.DB, probed func(item string)) error {
+	if probed == nil {
+		probed = func(string) {}
+	}
+	// Every probe reads one snapshot: the ingestor may commit a migration
+	// while this runs, and a check that saw half of it would call the
+	// in-progress migration permanent.
+	tx, err := ro.Begin()
+	if err != nil {
+		return &NotReadyError{Probes: []ProbeFailure{{Item: "read transaction", Err: err}}}
+	}
+	defer tx.Rollback()
+
 	var missing []string
+	var probes []ProbeFailure
+	probeFailed := func(item string, err error) {
+		probes = append(probes, ProbeFailure{Item: item, Err: err})
+	}
 
 	mustCol := func(table, col string) {
-		has, err := TableHasColumn(ro, table, col)
+		has, err := tableHasColumn(tx, table, col)
+		probed(table + "." + col)
 		if err != nil {
-			missing = append(missing, fmt.Sprintf("%s.%s (probe error: %v)", table, col, err))
+			probeFailed(table+"."+col, err)
 			return
 		}
 		if !has {
 			missing = append(missing, fmt.Sprintf("%s.%s", table, col))
 		}
 	}
-	mustTable := func(name string) {
+	tableExists := func(name string) (bool, error) {
 		var n int
-		err := ro.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n)
+		err := tx.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n)
+		probed("table:" + name)
 		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return err == nil, err
+	}
+	mustTable := func(name string) {
+		ok, err := tableExists(name)
+		if err != nil {
+			probeFailed("table:"+name, err)
+		} else if !ok {
 			missing = append(missing, "table:"+name)
-		} else if err != nil {
-			missing = append(missing, fmt.Sprintf("table:%s (probe error: %v)", name, err))
+		}
+	}
+	// #89: once the change log exists it must match the approved definition
+	// (the ingestor creates table, index and marker in one transaction). A
+	// missing table is the migration still to come, unless its marker is
+	// already recorded: the ingestor never recreates such a table.
+	mustRouteMaskChanges := func() {
+		const item = "table:route_mask_changes"
+		ok, err := tableExists("route_mask_changes")
+		if err != nil {
+			probeFailed(item, err)
+			return
+		}
+		if !ok {
+			recorded, err := migrationRecorded(tx, RouteMaskChangesMigration)
+			switch {
+			case err != nil:
+				probeFailed(item, err)
+			case recorded:
+				missing = append(missing, item+" (recorded in _migrations)")
+			default:
+				missing = append(missing, item)
+			}
+			return
+		}
+		for _, col := range []string{"id", "transmission_id", "route_mask", "created_at"} {
+			mustCol("route_mask_changes", col)
+		}
+		var ddl string
+		if err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='route_mask_changes'`).Scan(&ddl); err != nil {
+			probeFailed("route_mask_changes definition", err)
+		} else if !strings.Contains(strings.ToUpper(ddl), "AUTOINCREMENT") {
+			missing = append(missing, "route_mask_changes.id AUTOINCREMENT")
+		}
+		// The index covers exactly transmission_id (columns in index order).
+		var cols string
+		err = tx.QueryRow(`SELECT COALESCE(group_concat(name, ','), '') FROM (
+			SELECT ii.name AS name FROM sqlite_master m, pragma_index_info(m.name) ii
+			WHERE m.type='index' AND m.name=? AND m.tbl_name='route_mask_changes' ORDER BY ii.seqno)`, RouteMaskChangesTxIndex).Scan(&cols)
+		switch {
+		case err != nil:
+			probeFailed("index:"+RouteMaskChangesTxIndex, err)
+		case cols != "transmission_id":
+			missing = append(missing, "index:"+RouteMaskChangesTxIndex)
 		}
 	}
 
@@ -160,6 +350,8 @@ func AssertReady(ro *sql.DB) error {
 	// (cmd/ingestor/db.go OpenStore: ALTER + index + async backfill);
 	// server reads it to filter the hot-window query.
 	mustCol("transmissions", "last_seen")
+	mustCol("transmissions", "route_mask")
+	mustRouteMaskChanges()
 	// #1321: server's detectSchema PRAGMA-detects these and caches a
 	// boolean. To kill the startup race they're owned + asserted here.
 	mustCol("transmissions", "scope_name")
@@ -207,17 +399,73 @@ func AssertReady(ro *sql.DB) error {
 	mustCol("observers", "last_neighbors_report_at")
 	mustTable("observer_neighbors")
 	mustTable("observer_neighbor_metrics")
+	// #898: the claims table itself stays optional (a server treats a
+	// missing one as no claims), but once it exists the server reads the
+	// claim parts, so they must be migrated, and every row must carry a part.
+	func() {
+		ok, err := tableExists("node_antenna_claims")
+		if err != nil {
+			probeFailed("table:node_antenna_claims", err)
+			return
+		}
+		if !ok {
+			return
+		}
+		recorded, err := migrationRecorded(tx, AntennaClaimPartsMigration)
+		if err != nil {
+			probeFailed(AntennaClaimPartsItem, err)
+			return
+		}
+		if !recorded {
+			missing = append(missing, AntennaClaimPartsItem)
+			return
+		}
+		for _, c := range antennaClaimPartColumns {
+			mustCol("node_antenna_claims", c.name)
+		}
+		mustTable("node_claim_admin_contacts")
+		var partless bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM node_antenna_claims WHERE height_op IS NULL AND details_op IS NULL)`).Scan(&partless); err != nil {
+			probeFailed("node_antenna_claims parts", err)
+		} else if partless {
+			missing = append(missing, "node_antenna_claims rows without a part")
+		}
+	}()
 
-	if len(missing) > 0 {
-		return fmt.Errorf("schema not migrated by ingestor; restart ingestor first. missing: %s",
-			strings.Join(missing, ", "))
+	if len(missing) > 0 || len(probes) > 0 {
+		return &NotReadyError{Missing: missing, Probes: probes}
 	}
 	return nil
+}
+
+// migrationRecorded reports whether the _migrations marker name exists. A
+// database without _migrations has recorded nothing yet.
+func migrationRecorded(db querier, name string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_migrations'`).Scan(&n)
+	if err != nil || n == 0 {
+		return false, err
+	}
+	err = db.QueryRow(`SELECT 1 FROM _migrations WHERE name = ?`, name).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// querier is what *sql.DB and *sql.Tx share for schema probes.
+type querier interface {
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
 }
 
 // TableHasColumn reports whether the given table has the given column.
 // Exported because tests and the read-side need it without re-implementing.
 func TableHasColumn(db *sql.DB, table, column string) (bool, error) {
+	return tableHasColumn(db, table, column)
+}
+
+func tableHasColumn(db querier, table, column string) (bool, error) {
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return false, err
@@ -576,6 +824,102 @@ func ensureObservationsRawHexColumn(rw *sql.DB, logf Logger) error {
 	return nil
 }
 
+// Issue #89: transmissions.route_mask records every raw route type observed
+// for a content hash. Bit r (0..3) is set when a frame with route type r was
+// seen; bits are only ever OR-ed in, never cleared, so the result does not
+// depend on ingest order. NULL means "not backfilled yet": the column is
+// added without a default, so existing rows stay NULL until the ingestor's
+// async backfill fills them from route_type and observations.raw_hex (a
+// lower bound; it never invents bits).
+//
+// RouteMaskPendingIndex tracks the rows the backfill still has to process. It
+// is deliberately NOT created here: building it on a staging-sized DB takes
+// 18-19.5 s cold, and Apply runs before the MQTT subscription exists. The
+// ingestor builds it inside the async backfill, where IngestBuffer covers the
+// write stall. The server reports the backfill as pending until it exists.
+const (
+	RouteMaskColumnMigration       = "transmissions_route_mask_v1"
+	RouteMaskBackfillMigration     = "tx_route_mask_backfill_v1"
+	RouteMaskPendingIndex          = "idx_tx_route_mask_null"
+	CreateRouteMaskPendingIndexSQL = `CREATE INDEX IF NOT EXISTS idx_tx_route_mask_null ON transmissions(id) WHERE route_mask IS NULL`
+)
+
+func ensureTransmissionsRouteMaskColumn(rw *sql.DB, logf Logger) error {
+	if err := ensureMigrationsTable(rw); err != nil {
+		return err
+	}
+	has, err := TableHasColumn(rw, "transmissions", "route_mask")
+	if err != nil {
+		return err
+	}
+	if !has {
+		// PREFLIGHT: async=false reason="nullable ADD COLUMN without a default is a metadata-only schema change in SQLite (no row scan); measured 8-15 ms on a 4.95 GB staging copy"
+		if _, err := rw.Exec(`ALTER TABLE transmissions ADD COLUMN route_mask INTEGER`); err != nil {
+			return fmt.Errorf("alter transmissions add route_mask: %w", err)
+		}
+		logf("[dbschema] added route_mask column to transmissions (#89)")
+	}
+	if _, err := rw.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES (?)`, RouteMaskColumnMigration); err != nil {
+		return fmt.Errorf("record %s: %w", RouteMaskColumnMigration, err)
+	}
+	return nil
+}
+
+const (
+	RouteMaskChangesMigration = "route_mask_changes_v1"
+	RouteMaskChangesTxIndex   = "idx_route_mask_changes_tx"
+	// CreateRouteMaskChangesTableSQL and CreateRouteMaskChangesIndexSQL are
+	// exported so tests build the table exactly as Apply does.
+	CreateRouteMaskChangesTableSQL = `CREATE TABLE IF NOT EXISTS route_mask_changes (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		transmission_id INTEGER NOT NULL,
+		route_mask      INTEGER NOT NULL,
+		created_at      INTEGER NOT NULL
+	)`
+	CreateRouteMaskChangesIndexSQL = `CREATE INDEX IF NOT EXISTS ` + RouteMaskChangesTxIndex + ` ON route_mask_changes(transmission_id)`
+)
+
+// ensureRouteMaskChangesTable creates route_mask_changes, the durable change
+// log from the ingestor to running servers (#89, PR #93 review). The
+// ingestor appends one row, in the same transaction, whenever an observation
+// adds a route bit to an existing transmission's route_mask; route_mask is
+// the resulting full mask and created_at the ingest time (Unix seconds).
+// Servers poll it by id, so AUTOINCREMENT keeps ids from being reused after
+// retention deletes the newest rows. The full route_mask in transmissions
+// stays authoritative on a cold load; this table only notifies servers that
+// already hold the transmission. A new, empty table: no scan of existing data.
+func ensureRouteMaskChangesTable(rw *sql.DB, logf Logger) error {
+	if err := ensureMigrationsTable(rw); err != nil {
+		return err
+	}
+	var one int
+	if err := rw.QueryRow(`SELECT 1 FROM _migrations WHERE name = ?`, RouteMaskChangesMigration).Scan(&one); err == nil {
+		return nil // already applied
+	}
+	// Table, index and marker in one transaction: a server that sees the
+	// table also sees its index, and a failure leaves nothing behind.
+	tx, err := rw.Begin()
+	if err != nil {
+		return fmt.Errorf("begin route_mask_changes: %w", err)
+	}
+	defer tx.Rollback() // no-op after a successful Commit
+	if _, err := tx.Exec(CreateRouteMaskChangesTableSQL); err != nil {
+		return fmt.Errorf("create route_mask_changes: %w", err)
+	}
+	// PREFLIGHT: async=false reason="index on a new, empty table; no scan of existing data"
+	if _, err := tx.Exec(CreateRouteMaskChangesIndexSQL); err != nil {
+		return fmt.Errorf("create %s: %w", RouteMaskChangesTxIndex, err)
+	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES (?)`, RouteMaskChangesMigration); err != nil {
+		return fmt.Errorf("record %s: %w", RouteMaskChangesMigration, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit route_mask_changes: %w", err)
+	}
+	logf("[dbschema] created route_mask_changes table (#89)")
+	return nil
+}
+
 // ensureMigrationsTable is idempotent — the ingestor's applySchema also
 // creates this table on legacy paths. Keeping it here lets the gated
 // `INSERT OR IGNORE` markers above stay self-sufficient even when Apply
@@ -779,11 +1123,21 @@ func ensureTransmissionsLastSeenColumn(rw *sql.DB, logf Logger) error {
 // Deliberately just a detection index, not the computed stats themselves:
 // tx_id/hash/channel_hash/sender/first_seen are cheap to write once at
 // ingest time, while farthest/deepest/spread/airtime are derived from the
-// SAME GetPacketPath + airtime-annotation logic View Path already uses,
+// SAME getPacketPath + airtime-annotation logic View Path already uses,
 // recomputed periodically by the server's ping-scores recomputer
 // (cmd/server/ping_scores.go) rather than persisted here -- so a later
 // observation of an old ping (e.g. a station that only just relayed it
 // upstream) can still improve a standing record without a migration.
+// Unlike transmissions and observations, these index rows survive packet
+// retention (see PruneOldPackets and PruneTransmissions in cmd/ingestor).
+// The server joins them with computed scores in its separate
+// ping_scores_history.db, and treats this table as the authority on which
+// entries should exist: planPingScoreHistoryReconcile puts every tx_id
+// absent from a fresh ping_triggers read into its ToDelete list
+// (cmd/server/ping_score_history_index.go), and the next recompute cycle
+// erases those rows from the history file. Deleting an old trigger therefore
+// destroys that ping's all-time contribution permanently -- it does not
+// merely hide a score that stays on disk.
 func ensurePingTriggersTable(rw *sql.DB, logf Logger) error {
 	if err := ensureMigrationsTable(rw); err != nil {
 		return err
@@ -921,5 +1275,287 @@ func ensureObserverNeighborMetricsTable(rw *sql.DB, logf Logger) error {
 		return fmt.Errorf("record observer_neighbor_metrics_v1: %w", err)
 	}
 	logf("[dbschema] created observer_neighbor_metrics table")
+	return nil
+}
+
+// ensureChannelProposalsTable creates the table behind publicly suggested
+// hashtag channels (internal/channelregistry), and upgrades one created
+// before 'revoked' existed (see upgradeChannelProposalsStatusCheck). The
+// ingestor is its only writer. It is deliberately NOT part of AssertReady: a
+// new server must keep working against a database an older ingestor has not
+// migrated yet, and its readers (channelregistry.ListApprovedNames /
+// ListProposals) treat the missing table as empty on every query instead of
+// caching its absence.
+//
+// name is COLLATE BINARY because the firmware derives the channel key from
+// the exact bytes of the name: "#Test" and "#test" are different channels.
+func ensureChannelProposalsTable(rw *sql.DB, logf Logger) error {
+	if _, err := rw.Exec(channelProposalsDDL("channel_proposals")); err != nil {
+		return fmt.Errorf("create channel_proposals: %w", err)
+	}
+	if err := upgradeChannelProposalsStatusCheck(rw, logf); err != nil {
+		return err
+	}
+	if _, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_channel_proposals_status ON channel_proposals(status, created_at)`); err != nil {
+		return fmt.Errorf("create idx_channel_proposals_status: %w", err)
+	}
+	return ensureChannelProposalsApprovedBy(rw, logf)
+}
+
+// autoApprovalWindowMs is how soon after its submission an approval counts as
+// the auto-approve policy when approved_by is inferred: auto-approval stamps
+// reviewed_at in the same command that inserts the row (reviewed_at -
+// created_at is the queue latency, well under a second), an administrator
+// needs at least the round trip through the review dialog.
+const autoApprovalWindowMs = 60000
+
+// approvedByColumnDDL is the approved_by column (#616): 'auto' or 'admin'
+// while approved, NULL otherwise. Written only by the ingestor
+// (cmd/ingestor/channel_proposals.go).
+const approvedByColumnDDL = `approved_by TEXT NULL CHECK(approved_by IN ('auto','admin'))`
+
+// ensureChannelProposalsApprovedBy adds channel_proposals.approved_by when it
+// is missing and classifies every approved row that has no value: those
+// approved before the column existed, and those an older ingestor approved
+// after a rollback (it does not know the column). The value is INFERRED from
+// the timestamps — under autoApprovalWindowMs between submission and approval
+// is 'auto', anything slower 'admin' — while the ingestor writes it exactly
+// from then on. Column and classification commit in one transaction, and a
+// second run finds nothing to do (no NULL approved rows) and logs nothing.
+//
+// Deliberately NOT part of AssertReady: like the table itself it is optional
+// for the server, which detects it through a self-healing schema flag
+// (cmd/server/db.go detectSchema), so a new server keeps working against a
+// database an older ingestor migrated, and an older server ignores it.
+func ensureChannelProposalsApprovedBy(rw *sql.DB, logf Logger) error {
+	tx, err := rw.Begin()
+	if err != nil {
+		return fmt.Errorf("begin channel_proposals.approved_by: %w", err)
+	}
+	defer tx.Rollback()
+	has, err := tableHasColumn(tx, "channel_proposals", "approved_by")
+	if err != nil {
+		return fmt.Errorf("probe channel_proposals.approved_by: %w", err)
+	}
+	if !has {
+		if _, err := tx.Exec(`ALTER TABLE channel_proposals ADD COLUMN ` + approvedByColumnDDL); err != nil {
+			return fmt.Errorf("add channel_proposals.approved_by: %w", err)
+		}
+	}
+	res, err := tx.Exec(`UPDATE channel_proposals
+		SET approved_by = CASE WHEN reviewed_at - created_at < ? THEN 'auto' ELSE 'admin' END
+		WHERE status = 'approved' AND approved_by IS NULL`, autoApprovalWindowMs)
+	if err != nil {
+		return fmt.Errorf("classify channel_proposals.approved_by: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("classify channel_proposals.approved_by: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit channel_proposals.approved_by: %w", err)
+	}
+	if !has || n > 0 {
+		logf("[dbschema] channel_proposals.approved_by: column added=%v, %d approved row(s) classified from timestamps (inferred)", !has, n)
+	}
+	return nil
+}
+
+// channelProposalsDDL is the current channel_proposals definition under the
+// given table name. status includes 'revoked' (an approval an admin undid).
+// approved_by (#616) is not part of it: ensureChannelProposalsApprovedBy adds
+// it to every table, new, old or rebuilt, so there is one path to test.
+func channelProposalsDDL(table string) string {
+	return `CREATE TABLE IF NOT EXISTS ` + table + ` (
+		id TEXT PRIMARY KEY,
+		name TEXT COLLATE BINARY NOT NULL UNIQUE,
+		status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','revoked')),
+		created_at INTEGER NOT NULL,
+		reviewed_at INTEGER NULL
+	)`
+}
+
+// upgradeChannelProposalsStatusCheck rebuilds a channel_proposals table
+// created by commit 4868622e, the first shared-channel-proposals commit,
+// which was pushed and can have run against test databases. Its status CHECK
+// lacks 'revoked', CREATE TABLE IF NOT EXISTS does not change an existing
+// table, and SQLite cannot alter a CHECK in place, so every revoke would fail
+// with "CHECK constraint failed". The rebuild keeps every row and runs in one
+// transaction: a crash leaves either the old table or the new one, never
+// neither. A table whose DDL already allows 'revoked' is left alone.
+func upgradeChannelProposalsStatusCheck(rw *sql.DB, logf Logger) error {
+	var ddl string
+	err := rw.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'channel_proposals'`).Scan(&ddl)
+	if err != nil {
+		return fmt.Errorf("read channel_proposals DDL: %w", err)
+	}
+	if strings.Contains(ddl, "'revoked'") {
+		return nil
+	}
+	tx, err := rw.Begin()
+	if err != nil {
+		return fmt.Errorf("begin channel_proposals rebuild: %w", err)
+	}
+	defer tx.Rollback()
+	steps := []string{
+		`DROP TABLE IF EXISTS channel_proposals_rebuild`,
+		channelProposalsDDL("channel_proposals_rebuild"),
+		`INSERT INTO channel_proposals_rebuild (id, name, status, created_at, reviewed_at)
+		 SELECT id, name, status, created_at, reviewed_at FROM channel_proposals`,
+		`DROP TABLE channel_proposals`,
+		`ALTER TABLE channel_proposals_rebuild RENAME TO channel_proposals`,
+	}
+	for _, q := range steps {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("rebuild channel_proposals: %w", err)
+		}
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM channel_proposals`).Scan(&n); err != nil {
+		return fmt.Errorf("count rebuilt channel_proposals: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit channel_proposals rebuild: %w", err)
+	}
+	logf("[dbschema] rebuilt channel_proposals so status CHECK allows 'revoked' (%d row(s) kept)", n)
+	return nil
+}
+
+// ensureNodeAntennaClaimsTable creates the owner antenna-height claims (#789
+// M2a). The ingestor is the only writer: it inserts claims from the server's
+// queue, proves them at advert ingest and applies admin decisions; the server
+// reads approved rows. #898 adds the claim parts, the station details and
+// the contacts (ensureAntennaClaimParts). No IP or user agent is stored; the
+// only free text is the owner's two optional contacts.
+func ensureNodeAntennaClaimsTable(rw *sql.DB) error {
+	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS node_antenna_claims (
+		request_id TEXT PRIMARY KEY,
+		pubkey TEXT NOT NULL,
+		height_m REAL NULL CHECK(height_m IS NULL OR (height_m >= 0 AND height_m <= 100)),
+		code TEXT NOT NULL,
+		status TEXT NOT NULL CHECK(status IN ('pending','proven','approved','rejected','revoked','expired','superseded')),
+		needs_review INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		proven_at INTEGER NULL,
+		proof_hash TEXT NULL,
+		proof_lat REAL NULL,
+		proof_lon REAL NULL,
+		reviewed_at INTEGER NULL,
+		approved_by TEXT NULL CHECK(approved_by IS NULL OR approved_by IN ('auto','admin','owner'))
+	)`); err != nil {
+		return err
+	}
+	if _, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_node_antenna_claims_pubkey_status ON node_antenna_claims(pubkey, status)`); err != nil {
+		return err
+	}
+	_, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_node_antenna_claims_status ON node_antenna_claims(status, created_at)`)
+	return err
+}
+
+// EnsureNodeAntennaClaims creates the claims tables exactly as Apply does,
+// for tests that need them without the rest of the schema (the server's
+// tests build them on a scratch database; the server never writes them).
+func EnsureNodeAntennaClaims(rw *sql.DB) error {
+	if err := ensureNodeAntennaClaimsTable(rw); err != nil {
+		return err
+	}
+	return ensureAntennaClaimParts(rw, func(string, ...interface{}) {})
+}
+
+// AntennaClaimPartsMigration records the #898 combined-claim migration:
+// the per-part ops, in-force flags, station details and contacts, and the
+// one-time backfill of the pre-#898 rows.
+const AntennaClaimPartsMigration = "antenna_claim_parts_v1"
+
+// AntennaClaimPartsItem is AssertReady's item for a claims table the
+// ingestor has not migrated yet: transient, like the route-mask change log.
+const AntennaClaimPartsItem = "migration:" + AntennaClaimPartsMigration
+
+// antennaClaimPartColumns are the #898 columns of node_antenna_claims, in
+// the order they are added: a CHECK may only name columns that exist
+// before it.
+//
+// The ops are explicit: height_op = 'clear' is the only way to say "remove
+// the height", details_op = 'clear' the only way to say "remove the
+// details", and a NULL op means the claim does not carry that part,
+// whatever the value columns hold. The in-force flags mean something only
+// while status = 'approved': a newer approved claim that carries a part sets
+// the older claim's flag for that part to 0 (#898 M0 revision §5).
+var antennaClaimPartColumns = []struct{ name, ddl string }{
+	{"height_op", `height_op TEXT NULL CHECK(height_op IS NULL OR (height_op IN ('set','clear') AND (height_op = 'set') = (height_m IS NOT NULL)))`},
+	{"details_op", `details_op TEXT NULL CHECK(details_op IS NULL OR details_op IN ('set','clear'))`},
+	{"height_in_force", `height_in_force INTEGER NOT NULL DEFAULT 0 CHECK(height_in_force IN (0,1) AND (height_in_force = 0 OR height_op IS NOT NULL))`},
+	{"details_in_force", `details_in_force INTEGER NOT NULL DEFAULT 0 CHECK(details_in_force IN (0,1) AND (details_in_force = 0 OR details_op IS NOT NULL))`},
+	{"antenna_type", `antenna_type TEXT NULL CHECK(antenna_type IS NULL OR (details_op IS 'set' AND antenna_type IN ('omni','yagi','panel','other')))`},
+	{"gain_dbi", `gain_dbi REAL NULL CHECK(gain_dbi IS NULL OR (details_op IS 'set' AND gain_dbi >= -5 AND gain_dbi <= 20))`},
+	{"power_mask", `power_mask INTEGER NULL CHECK(power_mask IS NULL OR (details_op IS 'set' AND power_mask BETWEEN 1 AND 7))`},
+	{"installation", `installation TEXT NULL CHECK(installation IS NULL OR (details_op IS 'set' AND installation IN ('roof','mast','indoor','portable')))`},
+	{"contact_public", `contact_public TEXT NULL CHECK(contact_public IS NULL OR (details_op IS 'set' AND length(contact_public) BETWEEN 1 AND 32))`},
+}
+
+// CreateNodeClaimAdminContactsSQL is the admin-only contact (#898): its own
+// table, read only by the admin list and never by a public query. A row
+// exists only while its claim is pending, proven, or approved with its
+// details in force; the ingestor deletes it on every other transition, the
+// cascade on retention, and an orphan sweep at every prune.
+const CreateNodeClaimAdminContactsSQL = `CREATE TABLE IF NOT EXISTS node_claim_admin_contacts (
+		request_id TEXT PRIMARY KEY REFERENCES node_antenna_claims(request_id) ON DELETE CASCADE,
+		contact TEXT NOT NULL CHECK(length(contact) BETWEEN 1 AND 32)
+	)`
+
+// ensureAntennaClaimParts adds the #898 columns and the admin contact table
+// and backfills the pre-#898 rows, in one transaction: a server never sees
+// the columns without the backfill.
+//
+// The backfill is the only place a NULL height_m is read as a clear. That is
+// safe there: before #898 every row was a height claim, and a NULL height
+// meant a clear by construction (Command.Validate allowed exactly one of
+// heightM or clear). It runs once, guarded by AntennaClaimPartsMigration.
+func ensureAntennaClaimParts(rw *sql.DB, logf Logger) error {
+	if err := ensureMigrationsTable(rw); err != nil {
+		return err
+	}
+	if done, err := migrationRecorded(rw, AntennaClaimPartsMigration); err != nil || done {
+		return err
+	}
+	tx, err := rw.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // no-op after a successful Commit
+	added := 0
+	for _, c := range antennaClaimPartColumns {
+		has, err := tableHasColumn(tx, "node_antenna_claims", c.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		// PREFLIGHT: async=false reason="ADD COLUMN on node_antenna_claims only; a CHECKed ADD COLUMN reads that table once, which the claim caps keep to a few thousand rows; never transmissions"
+		if _, err := tx.Exec(`ALTER TABLE node_antenna_claims ADD COLUMN ` + c.ddl); err != nil {
+			return fmt.Errorf("add %s: %w", c.name, err)
+		}
+		added++
+	}
+	if _, err := tx.Exec(CreateNodeClaimAdminContactsSQL); err != nil {
+		return fmt.Errorf("create node_claim_admin_contacts: %w", err)
+	}
+	res, err := tx.Exec(`UPDATE node_antenna_claims
+		SET height_op = CASE WHEN height_m IS NULL THEN 'clear' ELSE 'set' END,
+		    height_in_force = (status = 'approved')
+		WHERE height_op IS NULL AND details_op IS NULL`)
+	if err != nil {
+		return fmt.Errorf("backfill claim parts: %w", err)
+	}
+	backfilled, _ := res.RowsAffected()
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES (?)`, AntennaClaimPartsMigration); err != nil {
+		return fmt.Errorf("record %s: %w", AntennaClaimPartsMigration, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	logf("[dbschema] node_antenna_claims: added %d #898 column(s), backfilled %d claim(s)", added, backfilled)
 	return nil
 }

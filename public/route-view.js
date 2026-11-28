@@ -13,6 +13,33 @@
 (function () {
   'use strict';
 
+  // #123: map.js destroy() removes the map when the page is left, and Leaflet
+  // fires 'unload' on it. A timer scheduled before that (e.g. the teardown
+  // invalidateSize below) must not touch the removed map: Leaflet throws
+  // "Cannot read properties of undefined (reading '_leaflet_pos')".
+  var watchedMaps = new WeakSet(), removedMaps = new WeakSet();
+
+  // #1689 r1 (adv #1): bucket-key prefix for a path whose every hop the
+  // hide-1-byte filter removed (see the path picker in buildSidebar).
+  var ALL_ONE_BYTE_KEY = '⟨all-1byte⟩::';
+
+  // #1633: the hops the hide-1-byte-hops toggle leaves visible.
+  function visibleHops(hops) {
+    return window.MC_filterPathHops ? window.MC_filterPathHops(hops) : hops;
+  }
+  function watchMapRemoval(mapRef) {
+    if (!mapRef || typeof mapRef.once !== 'function' || watchedMaps.has(mapRef)) return;
+    watchedMaps.add(mapRef);
+    mapRef.once('unload', function () { removedMaps.add(mapRef); });
+  }
+  // mapTimeout is setTimeout for callbacks that touch mapRef: inert once the
+  // map has been removed.
+  function mapTimeout(mapRef, fn, ms) {
+    return setTimeout(function () {
+      if (mapRef && !removedMaps.has(mapRef)) fn();
+    }, ms);
+  }
+
   function haversineKm(a, b) {
     if (a == null || b == null || a.lat == null || b.lat == null) return null;
     var R = 6371, dLat = (b.lat - a.lat) * Math.PI / 180;
@@ -80,6 +107,16 @@
   var escapeHtml = _MC_RT_U.escapeHtml;
   var buildPacketContextBlock = _MC_RT_U.buildPacketContextBlock;
   var buildSnrSparkline = _MC_RT_U.buildSnrSparkline;
+  var buildOneByteNotice = _MC_RT_U.buildOneByteNotice;
+  var buildUnsureChip = _MC_RT_U.buildUnsureChip;
+  var isMarkedUnsure = _MC_RT_U.isMarkedUnsure;
+  var buildUnsureDetail = _MC_RT_U.buildUnsureDetail;
+
+  // #674 — Mark mode of the 1-byte hop setting: uncertain hops get a chip in
+  // the sidebar and a dashed marker/segment on the map.
+  function isMarkMode() {
+    return typeof window.MC_get1ByteHopsMode === 'function' && window.MC_get1ByteHopsMode() === 'mark';
+  }
 
   // Polish review (carmack #1423): bound _detailCache (was unbounded plain
   // object; every distinct pubkey ever clicked was retained for the tab's
@@ -114,10 +151,12 @@
   }
 
   function renderHopDetail(p, container) {
-    container.innerHTML = '<div class="mc-rt-detail-loading">Loading hop info…</div>';
+    // #674: the uncertain-hop words for touch, where the chip's tooltip is out of reach.
+    var unsureNote = isMarkMode() ? buildUnsureDetail(p) : '';
+    container.innerHTML = unsureNote + '<div class="mc-rt-detail-loading">Loading hop info…</div>';
     fetchHopDetail(p.pubkey).then(function (data) {
       if (!data) {
-        container.innerHTML = '<div class="mc-rt-detail-na">No data for this node</div>';
+        container.innerHTML = unsureNote + '<div class="mc-rt-detail-na">No data for this node</div>';
         return;
       }
       var node = (data.detail && data.detail.node) || {};
@@ -157,7 +196,7 @@
         (routeCount > 1 ? ' <span class="mc-rt-route-badge">' + routeCount + ' routes</span>' : '') +
       '</a>';
 
-      container.innerHTML =
+      container.innerHTML = unsureNote +
         '<div class="mc-rt-detail">' +
           '<div class="mc-rt-detail-row1">' +
             '<span class="mc-rt-detail-name">' + escapeHtml(node.name || p.name || '?') + '</span>' +
@@ -227,9 +266,31 @@
     return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#' + name + '"/></svg>';
   }
 
+  // #532: hops shown in route meta are recorded relays only. Rows marked
+  // _fromPayload are sender/recipient endpoints decoded from the payload; they
+  // stay in `positions` for layout, distance and stripes but are not hops.
+  function relayHopCount(positions) {
+    var n = 0;
+    if (!positions) return 0;
+    for (var i = 0; i < positions.length; i++) {
+      if (positions[i] && !positions[i]._fromPayload) n++;
+    }
+    return n;
+  }
+
+  // Shared by the desktop header and the mobile collapsed summary.
+  // opts (mobile only): { type, multiPath, totalObservers }.
+  function routeMetaText(positions, totalKm, opts) {
+    opts = opts || {};
+    return (opts.type ? '<b>' + escapeHtml(opts.type) + '</b> · ' : '') +
+      relayHopCount(positions) + ' hops · ' + totalKm + ' km' +
+      (opts.multiPath ? ' · ' + opts.totalObservers + ' obs' : '');
+  }
+
   function buildSidebar(positions, mapRef, layer, edges, markers, opts) {
     opts = opts || {};
     var total = positions.length;
+    var markMode = isMarkMode();
     // Compute hop distances
     var dists = [], maxDist = 0;
     for (var i = 1; i < total; i++) {
@@ -272,14 +333,22 @@
       var glyph = roleGlyph(p.role);
       var name = escapeHtml(p.name || (p.pubkey ? String(p.pubkey).slice(0,8) : '?'));
       // Show a status badge for unresolved hops:
-      //  - gpsless: node identified but missing GPS → no-GPS pin chip
-      //  - else:    couldn't resolve prefix       → unknown chip
+      //  - gpsless:  node identified but missing GPS      → no-GPS pin chip
+      //  - unlisted: #598, nodes share the prefix but none
+      //              fits this point in the path           → unlisted chip
+      //  - else:     couldn't resolve prefix               → unknown chip
       var statusBadge = '';
       if (p.resolved === false) {
         if (p.gpsless) {
           statusBadge = ' <span class="mc-rt-status-chip mc-rt-status-nogps" title="Node identified but has no GPS coordinates"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-map-pin"/></svg> no GPS</span>';
         } else {
-          statusBadge = ' <span class="mc-rt-status-chip mc-rt-status-unknown" title="Could not resolve this hop prefix to a known node"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> unknown</span>';
+          // #598 — an inferred hop was left unlisted: a node missing from the
+          // node list, or one without GPS. "unknown" would read as a lookup
+          // failure, which is a different thing from "no listed node fits".
+          var unknownTitle = p.unlisted
+            ? 'No listed node with this prefix fits this point in the path'
+            : 'Could not resolve this hop prefix to a known node';
+          statusBadge = ' <span class="mc-rt-status-chip mc-rt-status-unknown" title="' + escapeHtml(unknownTitle) + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> ' + (p.unlisted ? 'unlisted' : 'unknown') + '</span>';
         }
       }
       // hops derived from the packet's PAYLOAD (sender/recipient
@@ -292,6 +361,8 @@
         payloadBadge = ' <span class="mc-rt-status-chip mc-rt-status-payload" title="Sender/recipient decoded from packet payload (not from outer path bytes)">from payload</span>';
       }
       var unresolved = p.resolved === false ? ' mc-rt-unresolved' : '';
+      var unsureChip = markMode ? buildUnsureChip(p) : '';
+      if (unsureChip) unresolved += ' mc-rt-unsure';
       // Stripe color: incoming edge color (idx-1) for non-origin, outgoing for origin.
       var stripeIdx = idx === 0 ? 0 : (idx - 1);
       var stripeColor = total > 1 ? rampColor(stripeIdx, total - 1) : 'transparent';
@@ -304,7 +375,7 @@
         '<span class="mc-rt-stripe" aria-hidden="true"></span>' +
         '<span class="mc-rt-seq">' + (idx + 1) + '</span>' +
         '<span class="mc-rt-glyph" title="' + (p.role || 'unknown') + '">' + glyph + '</span>' +
-        '<span class="mc-rt-name">' + name + obsChip + statusBadge + payloadBadge + '</span>' +
+        '<span class="mc-rt-name">' + name + obsChip + statusBadge + unsureChip + payloadBadge + '</span>' +
         '<span class="mc-rt-distlabel">' + distLabel + '</span>' +
         '<div class="mc-rt-distbar-wrap">' + distBar + '</div>' +
         '</li>';
@@ -360,7 +431,7 @@
         var hops = (typeof window !== 'undefined' && window.MC_filterPathHops)
           ? window.MC_filterPathHops(rawHops)
           : rawHops;
-        var k = hops.length ? hops.join('→') : ('⟨all-1byte⟩::' + rawHops.join('→'));
+        var k = hops.length ? hops.join('→') : (ALL_ONE_BYTE_KEY + rawHops.join('→'));
         if (!pathGroups[k]) pathGroups[k] = { key: k, observers: [], count: 0, allOneByte: hops.length === 0 && rawHops.length > 0, rawHops: rawHops };
         pathGroups[k].observers.push(p.observer || '?');
         pathGroups[k].count++;
@@ -419,10 +490,11 @@
           '<div class="mc-rt-title">Route</div>' +
           backLink +
         '</div>' +
-        '<div class="mc-rt-meta">' + total + ' hops · ' + totalKm + ' km' +
+        '<div class="mc-rt-meta">' + routeMetaText(positions, totalKm) +
           (unresolvedCount ? ' · ' + unresolvedCount + ' unresolved' : '') +
         '</div>' +
         contextBlock +
+        '<div class="mc-rt-onebyte-slot">' + buildOneByteNotice(positions, pktCtx && pktCtx.pathHashSize, markMode ? 'mark' : '') + '</div>' +
         multiPathChip +
         pathPicker +
         '<div class="mc-rt-spark-wrap">' + spark + '</div>' +
@@ -465,18 +537,18 @@
           return Array.isArray(p.path) && opts.canonicalPath &&
             p.path.length === opts.canonicalPath.length;
         }) || opts.allPaths[0];
-        hexRoute = (bestMatch.path || []).map(function (h) {
+        hexRoute = visibleHops(bestMatch.path || []).map(function (h) {
           return String(h).slice(0, 2).toUpperCase();
         }).join('→');
       } else if (Array.isArray(opts.canonicalPath) && opts.canonicalPath.length) {
-        hexRoute = opts.canonicalPath.map(function (h) {
+        hexRoute = visibleHops(opts.canonicalPath).map(function (h) {
           return String(h).slice(0, 2).toUpperCase();
         }).join('→');
       }
     } catch (e) { console.warn('[route-view]', e); }
-    summaryLine = (typeTag ? '<b>' + escapeHtml(typeTag) + '</b> · ' : '') +
-                  total + ' hops · ' + totalKm + ' km' +
-                  (multiPath ? ' · ' + totalObservers + ' obs' : '') +
+    var unsureCount = markMode ? positions.filter(isMarkedUnsure).length : 0;
+    summaryLine = routeMetaText(positions, totalKm, { type: typeTag, multiPath: multiPath, totalObservers: totalObservers }) +
+                  (unsureCount ? ' · <span class="mc-rt-mobile-unsure">' + unsureCount + ' uncertain</span>' : '') +
                   (hexRoute ? '<br><span class="mc-rt-mobile-hex">' + escapeHtml(hexRoute) + '</span>' : '');
     sidebar.innerHTML =
       // Desktop: resize handle on the right edge + collapse button.
@@ -503,7 +575,7 @@
         // caret-left when expanded). Replaces prior ▶/◀ Misc-Symbols chars. // EMOJI-OK: comment
         collapseBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#' +
           (collapsed ? 'ph-caret-right' : 'ph-caret-left') + '"/></svg>';
-        setTimeout(function () { if (mapRef && mapRef.invalidateSize) mapRef.invalidateSize(); }, 280);
+        mapTimeout(mapRef, function () { if (mapRef.invalidateSize) mapRef.invalidateSize(); }, 280);
       });
     }
     // Collapsed-state click-to-expand on the vertical "ROUTE" label
@@ -516,7 +588,7 @@
             collapseBtn.setAttribute('aria-label', 'Collapse route panel');
             collapseBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-left"/></svg>';
           }
-          setTimeout(function () { if (mapRef && mapRef.invalidateSize) mapRef.invalidateSize(); }, 280);
+          mapTimeout(mapRef, function () { if (mapRef.invalidateSize) mapRef.invalidateSize(); }, 280);
         }
       });
     }
@@ -560,7 +632,7 @@
         document.body.classList.toggle('mc-rt-mobile-sheet-expanded', expanded);
         handle.setAttribute('aria-expanded', String(expanded));
         // Force map to recompute size + re-fit after sheet animation settles
-        setTimeout(function () {
+        mapTimeout(mapRef, function () {
           try {
             if (mapRef && typeof mapRef.invalidateSize === 'function') mapRef.invalidateSize();
             // Re-fit to current positions so the route stays centered as the
@@ -651,10 +723,20 @@
     // canonical edges + markers with the selected path's own. Stroke-width
     // stays = global observer count per edge. "All" restores the union view.
     // Hides ALL canonical markers + edges to avoid phantom polylines.
+    // #674: re-render the Mark notice for the path the sidebar now shows.
+    function refreshOneByteNotice(list) {
+      var slot = sidebar.querySelector('.mc-rt-onebyte-slot');
+      if (slot) slot.innerHTML = buildOneByteNotice(list, pktCtx && pktCtx.pathHashSize, markMode ? 'mark' : '');
+    }
+
     function isolatePath(pathKey) {
       if (!pathKey) return restoreAllPaths();
-      var prefixes = pathKey.split('\u2192').filter(function(s){return s.length>0;});
-      if (!prefixes.length) return restoreAllPaths();
+      // #673: an all-1-byte bucket (hide toggle ON) has no visible hop; its
+      // key only carries the raw prefixes to keep buckets apart, so isolate
+      // the endpoints instead of resolving those hidden prefixes to nodes.
+      var prefixes = pathKey.indexOf(ALL_ONE_BYTE_KEY) === 0 ? []
+        : pathKey.split('\u2192').filter(function(s){return s.length>0;});
+      if (!prefixes.length && pathKey.indexOf(ALL_ONE_BYTE_KEY) !== 0) return restoreAllPaths();
       function findPosByPrefix(pre) {
         var preLow = pre.toLowerCase();
         for (var k = 0; k < positions.length; k++) {
@@ -722,8 +804,10 @@
         var ratio = matchCount / localTotalObs;
         var w = 2 + ratio * 6;
         var color = rampColor(i, iso.length - 1);
+        var isoUnsure = markMode && (isMarkedUnsure(a) || isMarkedUnsure(b)); // #674
         var poly = L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
-          color: color, weight: w, opacity: 0.95,
+          color: color, weight: w, opacity: isoUnsure ? 0.6 : 0.95,
+          dashArray: isoUnsure ? '6 4' : null,
           className: 'mc-rt-edge mc-rt-edge-iso'
         }).addTo(layer);
         sidebar._isoEdges.push(poly);
@@ -735,7 +819,7 @@
         var ep = { isOrigin: i === 0, isDest: i === iso.length - 1, resolved: true };
         var built = buildMarkerSVG(ep, { color: c, seqNum: i + 1 });
         var icon = L.divIcon({
-          html: '<div class="mc-rt-marker mc-rt-iso-marker" aria-label="Hop ' + (i+1) + ' of ' + iso.length + ', ' + escapeHtml(p.name || '?') + '">' + built.html + '</div>',
+          html: '<div class="mc-rt-marker mc-rt-iso-marker' + (markMode && isMarkedUnsure(p) ? ' mc-rt-marker--unsure' : '') + '" aria-label="Hop ' + (i+1) + ' of ' + iso.length + ', ' + escapeHtml(p.name || '?') + (markMode && isMarkedUnsure(p) ? ' (uncertain)' : '') + '">' + built.html + '</div>',
           className: 'mc-rt-marker-icon',
           iconSize: [built.size + 4, built.size + 4],
           iconAnchor: [(built.size + 4)/2, (built.size + 4)/2]
@@ -810,7 +894,7 @@
             '<span class="mc-rt-stripe" aria-hidden="true"></span>' +
             '<span class="mc-rt-seq">' + (idx + 1) + '</span>' +
             '<span class="mc-rt-glyph" title="' + (p.role || '?') + '">' + glyph + '</span>' +
-            '<span class="mc-rt-name">' + name + '</span>' +
+            '<span class="mc-rt-name">' + name + (markMode ? buildUnsureChip(p) : '') + '</span>' +
             '<span class="mc-rt-distlabel">' + distLabel + '</span>' +
             '<div class="mc-rt-distbar-wrap">' + distBar + '</div>' +
             '</li>';
@@ -819,6 +903,7 @@
         if (pinnedTop) pinnedTop.innerHTML = rowFor(iso[0], 0);
         if (pinnedBottom) pinnedBottom.innerHTML = iso.length > 1 ? rowFor(iso[iso.length - 1], iso.length - 1) : '';
         listEl.innerHTML = iso.slice(1, -1).map(function (p, k) { return rowFor(p, k + 1); }).join('');
+        refreshOneByteNotice(iso); // #674: the notice describes the path on screen
       }
     }
     function restoreAllPaths() {
@@ -846,6 +931,7 @@
         if (pinnedTop2) pinnedTop2.innerHTML = sidebar._canonRows.top;
         if (pinnedBottom2) pinnedBottom2.innerHTML = sidebar._canonRows.bottom;
         if (listEl2) listEl2.innerHTML = sidebar._canonRows.middle;
+        refreshOneByteNotice(positions); // #674
         var newRowEls = sidebar.querySelectorAll('.mc-rt-row');
         // Polish review (dijkstra #1423): centralized wireRow ensures the
         // restore path picks up every listener type the initial render
@@ -885,6 +971,13 @@
           }
           return null;
         }
+        // #674: in Mark mode a 1-byte union hop is uncertain when it is one of
+        // the route's marked guesses, or when it was only resolved here by a
+        // first prefix match in the node list (a guess by construction).
+        function unionHopUnsure(pre, pos) {
+          if (!markMode || String(pre).length !== 2 || !pos) return false;
+          return positions.indexOf(pos) === -1 ? true : isMarkedUnsure(pos);
+        }
         sidebar._unionOverlay = [];
         sidebar._unionMarkers = [];
         // Track unique nodes seen (for marker rendering)
@@ -901,11 +994,13 @@
           var count = opts.edgeCounts[k];
           var ratio = count / (opts.totalObservers || 1);
           var w = 2 + ratio * 6; // 2..8
+          var unionUnsure = unionHopUnsure(aPre, aPos) || unionHopUnsure(bPre, bPos); // #674
           // Single color (no gradient — sequence has no meaning here)
           var poly = L.polyline([[aPos.lat, aPos.lon], [bPos.lat, bPos.lon]], {
             color: 'var(--accent, #06b6d4)',
             weight: w,
-            opacity: 0.7,
+            opacity: unionUnsure ? 0.45 : 0.7,
+            dashArray: unionUnsure ? '6 4' : null,
             className: 'mc-rt-edge mc-rt-edge-union'
           }).addTo(layer);
           // Convert CSS var to inline (Leaflet doesn't resolve CSS vars in stroke)
@@ -919,7 +1014,8 @@
         Object.keys(uniqueNodes).forEach(function (pre) {
           var n = uniqueNodes[pre];
           var accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#06b6d4';
-          var html = '<div class="mc-rt-marker mc-rt-marker-union" aria-label="' + escapeHtml(n.name || pre) + '">' +
+          var uUnsure = unionHopUnsure(pre, n);
+          var html = '<div class="mc-rt-marker mc-rt-marker-union' + (uUnsure ? ' mc-rt-marker--unsure' : '') + '" aria-label="' + escapeHtml(n.name || pre) + (uUnsure ? ' (uncertain)' : '') + '">' +
             '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">' +
               '<circle cx="7" cy="7" r="4" fill="' + accent + '" stroke="#fff" stroke-width="1"/>' +
             '</svg></div>';
@@ -1043,7 +1139,7 @@
         location.hash = '#/map';
         // Leaflet cached width while sidebar was open — force re-measure.
         if (mapRef && typeof mapRef.invalidateSize === 'function') {
-          setTimeout(function () { mapRef.invalidateSize(); }, 50);
+          mapTimeout(mapRef, function () { mapRef.invalidateSize(); }, 50);
         }
       });
     }
@@ -1053,6 +1149,7 @@
 
   function render(mapRef, layer, positions, opts) {
     if (!positions || !positions.length) return;
+    watchMapRemoval(mapRef);
     opts = opts || {};
     var total = positions.length;
 
@@ -1113,7 +1210,7 @@
         // re-measure so markers/tiles re-render at full width.
         if (mapRef && typeof mapRef.invalidateSize === 'function') {
           // Wait a tick for CSS to recompute (left:320px → unset).
-          setTimeout(function () { mapRef.invalidateSize(); }, 50);
+          mapTimeout(mapRef, function () { mapRef.invalidateSize(); }, 50);
         }
       }
     }
@@ -1250,11 +1347,14 @@
       // visible. Range 2..8 px (4× ratio). Linear in coverage ratio.
       return 3 + ratio * 6;
     }
+    var markUnsure = isMarkMode();
     for (var i = 0; i < total - 1; i++) {
       var ca = resolveCoord(i), cb = resolveCoord(i + 1);
       if (!ca || !cb) { edges.push(null); continue; }
       var color = rampColor(i, total - 1);
-      var unresolvedEdge = !ca.resolved || !cb.resolved;
+      // #674: a segment touching an uncertain hop is drawn like an unresolved one.
+      var unresolvedEdge = !ca.resolved || !cb.resolved ||
+        (markUnsure && (isMarkedUnsure(positions[i]) || isMarkedUnsure(positions[i + 1])));
       var w = edgeWeight(i);
       var poly = L.polyline([[ca.lat, ca.lon], [cb.lat, cb.lon]], {
         color: color, weight: w, opacity: unresolvedEdge ? 0.5 : 0.85,
@@ -1280,7 +1380,8 @@
       var color = (window.ROLE_COLORS && window.ROLE_COLORS[p.role]) || '#3b82f6';
       var isLoop = srcDstSameNode && (p.isOrigin || p.isDest);
       var built = buildMarkerSVG(p, { color: color, seqNum: i + 1, isLoop: isLoop });
-      var html = '<div class="mc-rt-marker" data-hop-idx="' + i + '" tabindex="0" aria-label="Hop ' + (i+1) + ' of ' + total + ', ' + escapeHtml(p.name || '?') + '">' + built.html + '</div>';
+      var unsureMk = markUnsure && isMarkedUnsure(p);
+      var html = '<div class="mc-rt-marker' + (unsureMk ? ' mc-rt-marker--unsure' : '') + '" data-hop-idx="' + i + '" tabindex="0" aria-label="Hop ' + (i+1) + ' of ' + total + ', ' + escapeHtml(p.name || '?') + (unsureMk ? ' (uncertain)' : '') + '">' + built.html + '</div>';
       var icon = L.divIcon({
         html: html, className: 'mc-rt-marker-icon',
         iconSize: [built.size + 4, built.size + 4],
@@ -1370,16 +1471,16 @@
     // (Function declared but `sidebar` ref deferred until after buildSidebar.)
     function exposeRespider() {
       if (typeof sidebar !== 'undefined' && sidebar) {
-        sidebar._respider = function () { setTimeout(spiderFanMarkers, 200); };
+        sidebar._respider = function () { mapTimeout(mapRef, spiderFanMarkers, 200); };
       }
     }
     // Run spider after Leaflet finishes projecting + on zoom only (pan
     // shouldn't re-cluster since relative positions don't change).
-    setTimeout(spiderFanMarkers, 400);
+    mapTimeout(mapRef, spiderFanMarkers, 400);
     var _spiderDebounce = null;
     mapRef.on('zoomend', function () {
       if (_spiderDebounce) clearTimeout(_spiderDebounce);
-      _spiderDebounce = setTimeout(spiderFanMarkers, 250);
+      _spiderDebounce = mapTimeout(mapRef, spiderFanMarkers, 250);
     });
 
     // Sidebar
@@ -1492,7 +1593,7 @@
       var _resizeRefitTimer = null;
       function onResize() {
         if (_resizeRefitTimer) clearTimeout(_resizeRefitTimer);
-        _resizeRefitTimer = setTimeout(refit, 200);
+        _resizeRefitTimer = mapTimeout(mapRef, refit, 200);
       }
       window.__mc_routeResizeRefit = onResize;
       window.addEventListener('resize', onResize);
@@ -1511,5 +1612,12 @@
     }
   }
 
-  window.MeshRouteView = { render: render };
+  // #673: drop the route layer and sidebar without leaving route mode, for a
+  // re-render in which nothing survives the hide-1-byte-hops filter.
+  function clear(layer) {
+    if (layer && layer.clearLayers) layer.clearLayers();
+    document.querySelectorAll('.mc-rt-sidebar').forEach(function (el) { el.remove(); });
+  }
+
+  window.MeshRouteView = { render: render, clear: clear, relayHopCount: relayHopCount, routeMetaText: routeMetaText };
 })();

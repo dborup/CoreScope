@@ -22,9 +22,23 @@ COPY internal/dbconfig/ ../../internal/dbconfig/
 COPY internal/dbschema/ ../../internal/dbschema/
 COPY internal/prunequeue/ ../../internal/prunequeue/
 COPY internal/perfio/ ../../internal/perfio/
+COPY internal/brokerurl/ ../../internal/brokerurl/
+COPY internal/pprofbind/ ../../internal/pprofbind/
 COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/lora/ ../../internal/lora/
 COPY internal/regions/ ../../internal/regions/
+COPY internal/channelregistry/ ../../internal/channelregistry/
+COPY internal/configkey/ ../../internal/configkey/
+COPY internal/dhm/ ../../internal/dhm/
+COPY internal/mastedb/ ../../internal/mastedb/
+COPY internal/cardkit/ ../../internal/cardkit/
+COPY internal/profilecard/ ../../internal/profilecard/
+COPY internal/nodecard/ ../../internal/nodecard/
+COPY internal/packetcard/ ../../internal/packetcard/
+COPY internal/copdem/ ../../internal/copdem/
+COPY internal/heritage/ ../../internal/heritage/
+COPY internal/buildings/ ../../internal/buildings/
+COPY internal/skraafoto/ ../../internal/skraafoto/
 RUN go mod download
 COPY cmd/server/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
@@ -40,8 +54,12 @@ COPY internal/dbconfig/ ../../internal/dbconfig/
 COPY internal/dbschema/ ../../internal/dbschema/
 COPY internal/prunequeue/ ../../internal/prunequeue/
 COPY internal/perfio/ ../../internal/perfio/
+COPY internal/brokerurl/ ../../internal/brokerurl/
+COPY internal/pprofbind/ ../../internal/pprofbind/
 COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/regions/ ../../internal/regions/
+COPY internal/channelregistry/ ../../internal/channelregistry/
+COPY internal/configkey/ ../../internal/configkey/
 RUN go mod download
 COPY cmd/ingestor/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
@@ -86,9 +104,10 @@ COPY docker/Caddyfile /etc/caddy/Caddyfile
 RUN mkdir -p /app/data /var/lib/mosquitto /data/caddy && \
     chown -R mosquitto:mosquitto /var/lib/mosquitto
 
-# Entrypoint
+# Entrypoint (+ opt-in non-root helper, #339; unused unless enabled)
 COPY docker/entrypoint-go.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY docker/nonroot.sh /usr/local/lib/corescope/nonroot.sh
+RUN chmod +x /entrypoint.sh /usr/local/lib/corescope/nonroot.sh
 
 EXPOSE 80 443 1883
 

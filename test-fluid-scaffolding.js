@@ -18,18 +18,27 @@ function test(name, fn) {
 
 // --- Helpers ---------------------------------------------------------------
 
-// Extract the :root { ... } block (first occurrence — the light/default one).
-function rootBlock() {
-  const m = css.match(/:root\s*\{([\s\S]*?)\}/);
-  if (!m) throw new Error(':root block not found in style.css');
-  return m[1];
+// The bodies of every top-level, unconditional `:root { ... }` block.
+// style.css has several (f0addfda / #1668 put the palette block first), so
+// reading only the first one misses the fluid tokens. Comments are stripped
+// first; a block preceded by `{` is nested (e.g. in @media) and skipped.
+function rootBlocks() {
+  const code = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const blocks = [...code.matchAll(/(?<=(?:^|\})\s*):root\s*\{([^}]*)\}/g)].map((m) => m[1]);
+  if (!blocks.length) throw new Error(':root block not found in style.css');
+  return blocks;
 }
 
-// Find the value of a custom property declared in :root.
+// Find the value of a custom property declared in :root (the last
+// declaration wins, as in the cascade).
 function rootVar(name) {
-  const re = new RegExp(`${name}\\s*:\\s*([^;]+);`);
-  const m = rootBlock().match(re);
-  return m ? m[1].trim() : null;
+  const re = new RegExp(`(?:^|[;{\\s])${name}\\s*:\\s*([^;]+);`);
+  let value = null;
+  for (const block of rootBlocks()) {
+    const m = block.match(re);
+    if (m) value = m[1].trim();
+  }
+  return value;
 }
 
 function assertClamp(name) {

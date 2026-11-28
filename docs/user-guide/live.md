@@ -64,11 +64,19 @@ Each packet type has a color and icon:
 | Trace | 🔍 | Pink |
 | Path | 🛤️ | Teal |
 
+## Follow a packet
+
+**Follow ▶** in a packet's line popup or feed card, **Follow next packet**, or a `#/live?follow=<hash>` link replays how that one packet spread through the mesh: rings per hop, the relays that retransmitted it and the observers that heard it, then a summary. Times are as reported by observers (whole seconds, not clock-corrected).
+
+Customize → Display → **Live Map** sets, for this browser: **Replay speed** (0.5×, 1×, 2×), **Replay length target** (3 to 15 s at 1×) and **Settle delay** (how long a follow of a just-heard packet waits for late observations; empty is the server's value). The colours are in Customize → Theme → *Live follow a packet*.
+
 ## Controls
 
 - **Favorites only** — show only packets from your claimed nodes
 - **Multibyte only** — show only multibyte (≥2-byte path-hash) packets and hide single-byte traffic. Single-byte path hashes collide heavily at scale, so their paths are unreliable; enable this for a cleaner, more trustworthy live picture. Off by default; the choice is remembered.
 - **Matrix mode** — visual effect overlay (just for fun)
+
+- **Moments** — short cards for a new node, a repeater back online, a record link or the busiest repeater, when the operator has turned them on. See [Live Moments](../moments.md).
 
 ## Tips
 

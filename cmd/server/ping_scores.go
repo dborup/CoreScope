@@ -4,7 +4,7 @@
 // message to ping_triggers (tx_id, hash, channel_hash, sender, first_seen
 // -- see cmd/ingestor/ping_triggers.go and internal/dbschema's
 // ensurePingTriggersTable). This file periodically joins that detection
-// index with the SAME GetPacketPath + airtime-annotation logic View Path
+// index with the SAME getPacketPath + airtime-annotation logic View Path
 // already uses, deriving records (farthest, most hops, widest spread,
 // fastest full spread, most airtime-efficient) and leaderboards (which
 // relay appears most often, which observer hears pings first most often),
@@ -26,7 +26,7 @@ import (
 // pingScoresRecomputeInterval: pings are rare relative to general channel
 // traffic, so this doesn't need the 60s cadence of the hotter recomputers
 // (neighbor graph, analytics) -- a couple of minutes keeps the highscore
-// board fresh without adding needless periodic GetPacketPath-per-ping load.
+// board fresh without adding needless periodic getPacketPath-per-ping load.
 const pingScoresRecomputeInterval = 2 * time.Minute
 
 // PingScore is one ping's computed highscore-relevant stats.
@@ -66,6 +66,10 @@ type PingScore struct {
 	relayPubkeys []string
 	firstPubkey  string
 	firstName    string
+
+	// A retained distance may use older landmark evidence than today's
+	// earliest observation. Never use this origin for first-hearer credit.
+	distanceFirstPubkey string
 }
 
 // PingLeaderboardEntry is one row of a leaderboard ranking.
@@ -78,6 +82,11 @@ type PingLeaderboardEntry struct {
 // PingScoresSnapshot is the full cached ping-score board: current records
 // plus leaderboards, global (not scoped by region/area).
 type PingScoresSnapshot struct {
+	// Only the displayed record slots have a bounded durable path archive.
+	// Published together with these scores and immutable thereafter; HTTP
+	// handlers must copy before applying live visibility rules.
+	pathArchives map[string]PingScorePathArchive
+
 	GeneratedAt string `json:"generatedAt"`
 	TotalPings  int    `json:"totalPings"`
 
@@ -171,11 +180,11 @@ func (db *DB) fetchPingTriggers() ([]pingTriggerRow, error) {
 	return out, nil
 }
 
-// computePingScore builds one ping's full stats via the same GetPacketPath
+// computePingScore builds one ping's full stats via the same getPacketPath
 // + airtime-annotation path View Path uses, so the numbers on the
 // highscore board always match what "View path" shows for that packet.
 func (s *Server) computePingScore(trigger pingTriggerRow) *PingScore {
-	resp, err := s.db.GetPacketPath(trigger.hash, EstimateMaxEdgeKm)
+	resp, err := s.db.getPacketPath(trigger.hash, EstimateMaxEdgeKm, s.estimatedPositionsEnabled())
 	if err != nil {
 		return nil
 	}
@@ -183,17 +192,17 @@ func (s *Server) computePingScore(trigger pingTriggerRow) *PingScore {
 }
 
 // buildPingScoreFromPath is the shared scoring core computePingScore uses
-// (with resp sourced from a live GetPacketPath call, as before this
+// (with resp sourced from a live getPacketPath call, as before this
 // extraction -- behavior and API output are unchanged) and that a future
 // bulk recomputer (Phase 4D+) will reuse with resp sourced from
-// GetPacketPathsBulk instead, without duplicating this logic. resp is not
+// getPacketPathsBulk instead, without duplicating this logic. resp is not
 // yet airtime-annotated when passed in -- annotatePacketPathAirtime is
 // applied exactly once, here, so neither caller needs to remember to call
 // it separately (and a caller that DOES call it first would double-annotate,
 // which this function's callers must not do).
 //
-// nil (or a response with zero branches) means GetPacketPath/
-// GetPacketPathsBulk couldn't build a usable path for this trigger this
+// nil (or a response with zero branches) means getPacketPath/
+// getPacketPathsBulk couldn't build a usable path for this trigger this
 // cycle -- explicitly returns nil rather than a zero-value *PingScore, so
 // callers can distinguish "no score, don't record anything" from "score,
 // but every field happens to be zero".
@@ -211,7 +220,7 @@ func (s *Server) buildPingScoreFromPath(trigger pingTriggerRow, resp *PacketPath
 		StationCount: len(resp.Branches),
 	}
 
-	// Branches are sorted deepest-first by GetPacketPath.
+	// Branches are sorted deepest-first by getPacketPath.
 	deepest := resp.Branches[0]
 	score.DeepestHops = deepest.Hops
 	if deepest.Observer != nil {
@@ -261,6 +270,7 @@ func (s *Server) buildPingScoreFromPath(trigger pingTriggerRow, resp *PacketPath
 	if resp.First != nil && resp.First.Observer != nil {
 		score.firstPubkey = resp.First.Observer.PublicKey
 		score.firstName = resp.First.Observer.Name
+		score.distanceFirstPubkey = score.firstPubkey
 	}
 	return score
 }

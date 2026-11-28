@@ -9,7 +9,7 @@ CoreScope takes 30–45 minutes to start on large databases (325K transmissions,
 | Phase | Time | Blocking? |
 |---|---|---|
 | `Load()` — read SQLite → memory | ~90s | Yes |
-| Build subpath index | ~20s | Yes |
+| Build subpath index (removed by #413: Route Patterns now count on demand) | ~20s | Yes |
 | Build distance index | ~15s | Yes |
 | Build path-hop index | <1s | Yes |
 | Load neighbor edges from SQLite | <1s | Yes |

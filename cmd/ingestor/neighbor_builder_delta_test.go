@@ -35,8 +35,9 @@ func TestNeighborEdgesBuilderDeltaScan(t *testing.T) {
 	}
 	defer store.Close()
 
+	// Hop nodes need a relay role: the prefix index holds relays only (#188).
 	if _, err := store.db.Exec(
-		`INSERT INTO nodes (public_key, name) VALUES (?, ?), (?, ?)`,
+		`INSERT INTO nodes (public_key, name, role) VALUES (?, ?, 'repeater'), (?, ?, 'repeater')`,
 		"aaaaaaaaaa", "from-node",
 		"bbbbbbbbbb", "first-hop",
 	); err != nil {

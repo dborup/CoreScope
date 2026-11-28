@@ -1,0 +1,1568 @@
+{
+ "_source": "Extracted from test-fixtures/e2e-fixture.db; the five longest 1-byte observation paths plus the node and observer catalogue they resolve against. Regenerate with tools/dump-hop-path-fixture.sh.",
+ "nodes": [
+  {
+   "lat": 37.888,
+   "lon": -122.268,
+   "name": "KN6PLV-BrkOxfLA-Yebes",
+   "public_key": "988396af0ff369c2178a8c2a303661bf26193257136ed4452b6eadd9547011e9",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.29399,
+   "lon": -121.99283,
+   "name": "SKCE_RS",
+   "public_key": "14531bd262bd3ee2e50053b738e9bf1351246691bb0b8ab4f9dc428fc888581b",
+   "role": "room"
+  },
+  {
+   "lat": 37.658604,
+   "lon": -122.058554,
+   "name": "R5-D4 300D Rak",
+   "public_key": "300ddc9e145dbe6cb4d6c2d93c74e9f862f5e247783f64ef89a4732e68dd473c",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.78406,
+   "lon": -122.42401,
+   "name": "CLTR Repeater",
+   "public_key": "f13bb9481d8949d5c62ad81d484810c01a2a2a79265c1ffb7cdea380739d083e",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.88116,
+   "lon": -122.27638,
+   "name": "Key Route H-BRK \ud83d\udddd\ufe0f",
+   "public_key": "1f5dd36fdd499d6c0a2772093028fe52ae695a15ff0dd0a4d9c752bf27632435",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.86255,
+   "lon": -121.92779,
+   "name": "DBLS \ud83c\udf33",
+   "public_key": "dc501dc0eb5c431545fb5d7e8ffd123a5388e3099801a0da3fe3d55f405608bd",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.02553,
+   "lon": -121.591798,
+   "name": "GY889 Repeater",
+   "public_key": "1e598d0f11783a33c04d701ff3151fd8d8c0a96686d88267df70993f59ef760c",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.352921,
+   "lon": -121.885628,
+   "name": "80/Luna Park RPTR",
+   "public_key": "808a18f633d09c318eb852a3e7d81aefc7247cd903c5443788cc70a4e6777b20",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.978555,
+   "lon": -121.976901,
+   "name": "caora repeater",
+   "public_key": "b9c1fd6537fb74e4b99618276ac36f54f4bbe8356b0b78c65cd31ac9d951588b",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.05,
+   "lon": -122.12,
+   "name": "Tyler-R",
+   "public_key": "61ad1f628d408f2c763b535faf28c05981469ad3ffb1c5031d1e742adc30e3f7",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.73015,
+   "lon": -122.42609,
+   "name": "EW-HomeBase",
+   "public_key": "b3a462eb724b927b31ace57dac7c4fef397efdfeb0b7c86208372eedc9fdee9c",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.751379,
+   "lon": -122.484909,
+   "name": "Sunset Reservoir",
+   "public_key": "6b9c219ce5063c91244403216dd02de1ae13cd40ebd90a3d13f20d04e7ee7327",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.76047,
+   "lon": -122.41755,
+   "name": "CJS SF Mission Repeater",
+   "public_key": "37cf083223a222353d7617b0aec121a822a4924431577b08215706e787621577",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.125703,
+   "lon": -121.976118,
+   "name": "Quail Peak \ud83e\udeb6",
+   "public_key": "78af7025644e3b17abf64729ed04bfcc7c1b41c53eb3a4eba3f3a379a8bbc932",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.838994,
+   "lon": -121.38865,
+   "name": "SBC 3CF3 Repeater",
+   "public_key": "3cf395e699b0cab6a3c384312084977ca9660a03017770fe0255b05baadf6217",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.77272,
+   "lon": -122.485,
+   "name": "\ud83e\ude86 little russia",
+   "public_key": "6026b7a9b156a05c236ead028fc2e315952e605e3b047e0133c342d2a3ee2b69",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.81591,
+   "lon": -121.380668,
+   "name": "Hollister Repeater",
+   "public_key": "27d7e95231632b41b8c63a6bcdd16afed5a19c5516cf728cde15756262f89adb",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.757308,
+   "lon": -121.504264,
+   "name": "PEAK\ud83c\udf33",
+   "public_key": "73cff971e1cb5754a742c152b2d2e0eb108a19b246d663ed8898a72c4a5ad86e",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.0,
+   "lon": -122.1,
+   "name": "MRR2-R",
+   "public_key": "46d62de27d4c5194d7821fc5a34a45565dcc2537b300b9ab6275255cefb65d84",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.49858,
+   "lon": -122.296974,
+   "name": "Pilsner Peak",
+   "public_key": "9ba2235773b113cefce40c539a89543f49a9992e4c4b0a92d5fe331902017677",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.664,
+   "lon": -121.795,
+   "name": "N6IJ Repeater",
+   "public_key": "ec3433bb3adf1acaee0ce117600b0ca473705486ec666137379a1e8cbb7e75f4",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.190464,
+   "lon": -122.023119,
+   "name": "KO6DYK RPT02",
+   "public_key": "ad3531d47e1b2e0f00c9dc8080711ec4b5d21bfcbe3a4b70801b1d8efe79342f",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.168553,
+   "lon": -121.972411,
+   "name": "Crayons",
+   "public_key": "2e0de40ad148de6f86cb11c49eb19a138693b4568a184ab368b2db4e6769606a",
+   "role": "companion"
+  },
+  {
+   "lat": 37.167541,
+   "lon": -121.974433,
+   "name": "KO6DYK RPT 01",
+   "public_key": "b4f9555c5264b09f701e6abc326608c6f9d364918126aab5b2c0febd52c2f5a9",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.810602,
+   "lon": -122.197658,
+   "name": "King tide \ud83c\udf11",
+   "public_key": "68629095d62e605a3ceb0d13ed65e1dfed6363e795aaf02fd933c5ad2b69532c",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.90328,
+   "lon": -122.56725,
+   "name": "Homestead MC",
+   "public_key": "f509fda5e8f6107db3fe93dbda0f5ec4e7ff7ba578903fd0a93d033bedc42484",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.760626,
+   "lon": -122.485447,
+   "name": "Central Sunset \ud83c\udf33",
+   "public_key": "4de22fef4e4179bfb8edc9a8ee45d2ca92ac675fc97054e413df413cb60f23f3",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.35601,
+   "lon": -122.04859,
+   "name": "jim-svl-Repeater",
+   "public_key": "e1958430979a0c670853e7bfa8fe061c6b07c5a67c5127d7a0b140580ba873cd",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.904532,
+   "lon": -122.544167,
+   "name": "tam-station-01",
+   "public_key": "7b8b3590b542175dd0fb5d8dfbc62b3744444e87634fee987864a0967db240f1",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.929096,
+   "lon": -122.577774,
+   "name": "East Peak 1 \u23f1\ufe0f",
+   "public_key": "e320ed0a172f69979feed8a9c0f45cd275a8ff3d5cfcf38121960e5fbd490f9c",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.715599,
+   "lon": -122.394687,
+   "name": "Sonia M. Sotomayor",
+   "public_key": "4a85687d988114c16609cd52407b501d0446040f1e638d1766cc1eae88565bbc",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.74048,
+   "lon": -122.39075,
+   "name": "EW-SFC-NODE04",
+   "public_key": "5d8e24a61ce63c734cac47435194f39632133ec6630b2c0cea8c30abcdbc515e",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.12039,
+   "lon": -121.92857,
+   "name": "Summit Store Repeater",
+   "public_key": "4ca3dcec6fdfe37fee1215f4e3ac36ec4af75ec3c81572d6568e8fdac96fe367",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.020839,
+   "lon": -121.594161,
+   "name": "ESP1 Gilroy Repeater",
+   "public_key": "f81d265c03c5c1b2508d172633e2160eabe3126ef05538c20d94c8c1f2783a61",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.979171,
+   "lon": -122.062843,
+   "name": "highview n5hpb",
+   "public_key": "557a098aa8c38a01274a5fc943f44f8e4b058e03a13a4d3d366de1aa7018cc60",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.929292,
+   "lon": -122.073994,
+   "name": "67 Repeater",
+   "public_key": "676767c3c697c82fe8eb93cba090aa0fd1d996028afc39aa1d497c2d83bed33f",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.206202,
+   "lon": -121.865965,
+   "name": "KM6LHD Repeater",
+   "public_key": "da2a5f66ddb5a5a688797f9ef62d2e38f45557497fa58a9e0503819de40c77aa",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.201892,
+   "lon": -122.032676,
+   "name": "MRO-RPT04",
+   "public_key": "20aaa863297b2a97372c8ef877d35ee46aa6b5ff4a68ea8bdec3a0dc77cfa54b",
+   "role": "repeater"
+  },
+  {
+   "lat": 35.569759,
+   "lon": -120.527801,
+   "name": "MULTI PASS",
+   "public_key": "178f0b057dd1f632c597568b5a3d779a2ccfca0623be29bcf3b45bc73d10226c",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.753575,
+   "lon": -122.477491,
+   "name": "Sunset Heartbreak",
+   "public_key": "f00d1d18391a6bec5a8461d736cb7be82f76806d90223b80435ecf109daed4cd",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.019611,
+   "lon": -121.559738,
+   "name": "ESP5 Gilroy Repeater",
+   "public_key": "fb67ff731ce3c1f75442bfccbe4ea8c4ba453e318b2eac3ddaa4365f72b46eb6",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.22334,
+   "lon": -121.95095,
+   "name": "6LG-RPT1",
+   "public_key": "8d863e25f790cf64c271349b886fffea52aec382d00c7ff1eeb5e437dafba21a",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.312667,
+   "lon": -121.942837,
+   "name": "K6JRV-RWSR-1",
+   "public_key": "91ac0a2876ce6ac95f44432033aaa734f7be2c3bb0f986f9679afe9f3b51beff",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.387062,
+   "lon": -121.853052,
+   "name": "\ud83d\udefb Rptr-KC6ZKT",
+   "public_key": "fc8808eb9c60d051d614ed69b4b2c4f9db25af4338b98498ef56f5b308255ec3",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "The Ghost",
+   "public_key": "f18257deac6b2763c46f6dfe794689ab6e92c2304314c24ebf5488fedd5a53c5",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.70271,
+   "lon": -121.80023,
+   "name": "PL@G 1W RAK Repeater",
+   "public_key": "5b9839e58ae312ecc8624a8f374cf57a1b5b631fb00ec0124c9ab9de2be9f229",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.21658,
+   "lon": -121.921898,
+   "name": "LGS-SH-RPT-03",
+   "public_key": "6e3947ae53fd4abfefab92b7c862c6a35970db0c29e8b92b416836539387ee76",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.893334,
+   "lon": -122.010128,
+   "name": "SHL \ud83c\udf33",
+   "public_key": "33333333ab5d31112de8b847a4cbab05f5e8e60deb4e91b8a464b1b5e0357549",
+   "role": "repeater"
+  },
+  {
+   "lat": null,
+   "lon": null,
+   "name": "brian KD0CJT T-Deck",
+   "public_key": "53d75aee272a6a5cfb5d5a1ba7214a1e519d171e62d2aa85ada2e5170d2f9199",
+   "role": "companion"
+  },
+  {
+   "lat": 37.899368,
+   "lon": -122.495158,
+   "name": "TiburONaHill",
+   "public_key": "4261018c370d7675c292dbb0f9e19e64b63b32e03f2df99e0152c9dae9392e92",
+   "role": "companion"
+  },
+  {
+   "lat": 37.262627,
+   "lon": -121.923384,
+   "name": "SAW-RPTR01",
+   "public_key": "ed0d5ada2b79a359af2323ff8310248ef0ff3d81851ed4d1fa08f7b7c1f4bd9b",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.31468,
+   "lon": -121.8921,
+   "name": "Kpa Roof Solar",
+   "public_key": "c0dedad4208acb6cbe44b848943fc6d3c5d43cf38a21e48b43826a70862980e4",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.77672,
+   "lon": -122.17389,
+   "name": "Big Redwood Oakland",
+   "public_key": "d818045a4f9afb7d8dd89fd613de6da1aeca4e2b757990c4d4eeb80149f77a9a",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.041861,
+   "lon": -121.752265,
+   "name": "A3 \ud83c\udf32 MADONNA",
+   "public_key": "a3aeaa1af367e412b79c7154f42af6b3ed687555eddf5eba71ecaeea8fedd119",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.51963,
+   "lon": -122.309738,
+   "name": "KW Belmont Repeater",
+   "public_key": "3659bf94cf1a044d1e7b23688ce54715ccc374798ef0dc05178008279e9c37f9",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.0,
+   "lon": -122.12,
+   "name": "MRR1-R",
+   "public_key": "3d1ca0b56ef729c4f534fee8c75ee71728c0a19b104f0424bdf2b51c876be441",
+   "role": "room"
+  },
+  {
+   "lat": 37.13384,
+   "lon": -121.99985,
+   "name": "SczMntn \ud83c\udfd4\ufe0f Summit ",
+   "public_key": "c718d4805558b8a737e78c6751d95c513c694d6b508ef04a9a85868de12f4703",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.230148,
+   "lon": -121.76406,
+   "name": "AJ6HU Repeater",
+   "public_key": "649c3f424f7c711ac0915f3e3844b4e4cf3fb310da066a8c8150fe49856e5bba",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.66092,
+   "lon": -122.45024,
+   "name": "XMD Repeater",
+   "public_key": "e8c5563fbca316a6449855e1bcb8a2b7d07ca50270b0c33c34b53bc670967d68",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.610015,
+   "lon": -122.43226,
+   "name": "KN6KOO_SenseCap_Solar R",
+   "public_key": "de42718374ccbdd3527832f35d87afdb6c25826b375e6800d31efaeb4c4a7a26",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "C2000\ud83d\udca5MeshTower",
+   "public_key": "c200001020666cbae32a885778bdd0282a9eac4daeedaf4adf8227d15c1e4ea9",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.675774,
+   "lon": -121.850615,
+   "name": "IG-88 0ACF Rak",
+   "public_key": "0acf6908ebde404c67527cfa32eb9fff0973767981b8a50a5439c88718ab1788",
+   "role": "repeater"
+  },
+  {
+   "lat": 35.724569,
+   "lon": -120.565897,
+   "name": "KB6CIO Tower \ud83d\uddfc",
+   "public_key": "921ae2ac6e2f07999215a260b790cd70617ad01b7f5d9333d80cebe07916f12e",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": -121.908836,
+   "name": "KHV Solar RAK Repeater",
+   "public_key": "219da79d52f17f3f5087cd512038a5d79773ed778e622d9edea8aae664e90c6b",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.386458,
+   "lon": -122.090577,
+   "name": "N9DK Repeater Room Serv",
+   "public_key": "f5faa77d27c9240499ed9ad905b61f547e9c93fa281d601b40621c9c545069ac",
+   "role": "room"
+  },
+  {
+   "lat": 37.93634,
+   "lon": -122.56459,
+   "name": "Knob Hill Repeater",
+   "public_key": "e25c46094e3b1da0c6f1afc777c1e634e869fc0a7ca74c9dfca4a08a898db6d0",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.12514,
+   "lon": -121.94407,
+   "name": "Loma Prieta District Re",
+   "public_key": "281b214bc2274e2b0288153ed9ac6c04066dc2d1a1d4584ecec8dc9d2fd6c05a",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.0,
+   "lon": -122.1,
+   "name": "Metro-R",
+   "public_key": "b7f1c45f2ed5888335f79e27085d0de871a7c8ecb1ef5313435ebd0825bacdc1",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.49772,
+   "lon": -122.2759,
+   "name": "hrkG2Repeater",
+   "public_key": "1f1f0f9886d7b335e836e3b224905c8c51642c6033dff0dc038e9f147fbf621c",
+   "role": "repeater"
+  },
+  {
+   "lat": null,
+   "lon": null,
+   "name": "hrkCompanion",
+   "public_key": "9861d74eaf9a580d13aa2f17f8b70767761aa10aa6be8ce3f80c0fe9180f0908",
+   "role": "companion"
+  },
+  {
+   "lat": 37.88796,
+   "lon": -122.26789,
+   "name": "Berkeley Hill KN6PLV",
+   "public_key": "b56e9d4ea70895dd5d1fd24809ff46eaf465107c492a056888c25642f2c79b9e",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.48866,
+   "lon": -122.28089,
+   "name": "Melendy Jbs7",
+   "public_key": "7a7a368950f7a8287fc533f1324d6403ba7919cc7551a436194a4d0bbf6b2d6b",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.2063,
+   "lon": -121.86592,
+   "name": "KM6LHD Room",
+   "public_key": "b16c15f74878867d5e97115115a80c23bd31ce05f0a6d11dffe5ec872172d9da",
+   "role": "room"
+  },
+  {
+   "lat": 37.020778,
+   "lon": -121.593391,
+   "name": "ESP4 Gilroy Repeater",
+   "public_key": "fe664bbb1cc8c8898482843419653bb0e72c47281754d1921ae8038ccf44baea",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.80871,
+   "lon": -121.34575,
+   "name": "Hollister Room-Observer",
+   "public_key": "9dc3e069d1b336c4af33167d3838147ca6449e12c1e1bdaa92fdfc0ecfdd98bc",
+   "role": "room"
+  },
+  {
+   "lat": null,
+   "lon": null,
+   "name": "N6\ud83c\udf0eAAG",
+   "public_key": "3edb2806bcbec166e71a973b4c597e81f3c9398b4883061375d9d0694afa0313",
+   "role": "companion"
+  },
+  {
+   "lat": 37.02309,
+   "lon": -121.58592,
+   "name": "Gilroy Mesh Room",
+   "public_key": "a591a047381acddadb29323bf830e875a7b68951141eb7b94e9361a1834a4961",
+   "role": "room"
+  },
+  {
+   "lat": 37.923351,
+   "lon": -122.302192,
+   "name": "El Cerrito Hills",
+   "public_key": "2b85ba14fbdce0ebf899ce9f4db2067e0291e3ae59f7538da6fdbb9540a8ae68",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.401248,
+   "lon": -121.846786,
+   "name": "KO6GFV Repeater",
+   "public_key": "51002aa896d4e6de176372a39ed4cf7ebb76d33468daa0377e66c46fc8953be5",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.90584,
+   "lon": -122.54582,
+   "name": "The North Bay",
+   "public_key": "e037787a77b905e205bf40998434ddc7d4a293c6af59696bbd6a3f6b03a4916d",
+   "role": "room"
+  },
+  {
+   "lat": 37.25569,
+   "lon": -121.95593,
+   "name": "Taco Truck",
+   "public_key": "e93d8ab165a77424b38fd22f85bb859c5a6e6ec54e193806bcbf4a64c4327b52",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.328095,
+   "lon": -121.951929,
+   "name": "Uff da",
+   "public_key": "5eb0bd75143530509fddfeb195ac2ab58976508ce0c592ed365e18132d51769d",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.938209,
+   "lon": -121.823003,
+   "name": "f488 \ud83d\udc10 Goat",
+   "public_key": "f48830b06648dbf9f31161f633b1389b8fbdd5ead509ad82ae86b70b4e33961f",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.478194,
+   "lon": -122.188349,
+   "name": "Marsh Repeater II",
+   "public_key": "3aacc1f8da74eda755c49681dd3464f33c9ebcacff7db3ce45e7cb4853db2224",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.776,
+   "lon": -122.237,
+   "name": "Kennedy Repeater",
+   "public_key": "d5ef2ed77ceabcb22082f8794d5f9d89f2257e70533863e924debe6ebdda312a",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.685344,
+   "lon": -122.433151,
+   "name": "XMD Repeater 4",
+   "public_key": "7d1d3e1bdaf93de28bb991d9cde997ae9cab2f325cfc94a82b7b0807decd0e77",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.196523,
+   "lon": -121.923685,
+   "name": "KDY1\ud83c\udf33",
+   "public_key": "eeb75b1f886ef78a2986dd1948742819b74c3e3ab4f0911879aa484628bc20e4",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "95033 Status",
+   "public_key": "2d5d5b876443986e86a725515098b148be5995a9b70205a9f8091e0c50ae4ca3",
+   "role": "room"
+  },
+  {
+   "lat": 37.125988,
+   "lon": -121.9395,
+   "name": "95033 Test Room",
+   "public_key": "6ecb657bd6a07af22094ce7c87edce2bffe76f22de54ff3760b5e956b201ca23",
+   "role": "room"
+  },
+  {
+   "lat": 37.528417,
+   "lon": -121.983023,
+   "name": "R2-D2 7717 Xiao",
+   "public_key": "7717d886f3c1efbec367b859009ba1c51847987bc742eae81b9d8e2c8245f0f6",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "LAb7",
+   "public_key": "ebb4f9780c68af308b6ba794dcb86c9b3da0543d90483c2e051baa44d20b15e4",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.911944,
+   "lon": -122.567778,
+   "name": "Redwood Solar",
+   "public_key": "11fc8aebb598679e4ba44b111db7a5e0ae99fa217c32132512d8a5194e6c59d4",
+   "role": "repeater"
+  },
+  {
+   "lat": 35.67722,
+   "lon": -120.57405,
+   "name": "Paso Room Server",
+   "public_key": "ae4e2ba4d274bd40d35d765e368a0f00c4dfe7b4cfb82e0d96000cdddaca4db0",
+   "role": "room"
+  },
+  {
+   "lat": 37.919717,
+   "lon": -122.551162,
+   "name": "purplemonkey-pihat",
+   "public_key": "1735d953e6df26606df36ff3607aa431dfb76ef947220f6485981b32c8d3fbbf",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.95749,
+   "lon": -122.04918,
+   "name": "PB Rep 2",
+   "public_key": "12c2180e9bc4d78796a105f4dd63d261bf16f909222abe53904210c0c3ef1669",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.70874,
+   "lon": -121.912561,
+   "name": "DUBLIN Repeater",
+   "public_key": "cf05594777ce06f891f8135de22d15d72752a150e6747698069b35dc20154b88",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.821859,
+   "lon": -122.193354,
+   "name": "OHMC Repeater",
+   "public_key": "52f84bbd70b4d0061ac7cd77b9410d66660cae0937d8f322fd60791a419dbda1",
+   "role": "repeater"
+  },
+  {
+   "lat": null,
+   "lon": null,
+   "name": "DUBLIN Observer",
+   "public_key": "ee550de547d7b94848a952c98f585881fcf946a128e72905e95517475f83cfb1",
+   "role": "companion"
+  },
+  {
+   "lat": 37.285359,
+   "lon": -121.902549,
+   "name": "HAM CHAT | 73Mesh.com",
+   "public_key": "bd5cced5c5017c552eab080113e991391d5d722a35bdef7d066024bdce48088c",
+   "role": "room"
+  },
+  {
+   "lat": 37.84875,
+   "lon": -122.27144,
+   "name": "SURF RAK",
+   "public_key": "81bfa94595b4c2591a8e02151a355fc1cba17b8e25b91abe58cc250a131b3377",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.74341,
+   "lon": -122.4446,
+   "name": "mnbs_mc",
+   "public_key": "2d2c60301c07d5f22d4407f51930e4d7c02145287d3590a25dbdf3067f1d53d1",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.163634,
+   "lon": -121.919123,
+   "name": "1000\ud83d\udca5Repeater G2",
+   "public_key": "1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.284685,
+   "lon": -121.902252,
+   "name": "HEY YOU GUYS!!!",
+   "public_key": "cc24dbbcffa3cfb9f4da6d322b36e4595a225c9e2599230c52b816918c0d9412",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.285439,
+   "lon": -121.902363,
+   "name": "GOONIES",
+   "public_key": "d3e18e324db56f7be472dbbc267ecca54bc87892f42b2614977b069672a7ae61",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.312389,
+   "lon": -121.941688,
+   "name": "K6JRV-Local-Repeater-1",
+   "public_key": "d707b55fa04c014ff1f5f07de6e0437988836730c7919cf8f25f578e9f3ae121",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.369041,
+   "lon": -122.027453,
+   "name": "HP-HTR-1",
+   "public_key": "0f8f226278fe4ca9964750b78669628654861ebce21518720c6fcc027c8a4e2e",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.81724,
+   "lon": -122.37086,
+   "name": "Endor Station",
+   "public_key": "953575641aa4086b13f8572a7e832cfa455e753a2b2fcf4bf6bc7e97b0987809",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.28185,
+   "lon": -121.93572,
+   "name": "YNC-RPT01",
+   "public_key": "7b2d2064553b71409ae11168c9172e48ec8873aabe667cb5246fd0cb400a0e66",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.11593,
+   "lon": -121.93378,
+   "name": "MCO/SSJ Rd Repeater",
+   "public_key": "b41ebd269cff5e3c7bd2be1ea61740f1387c05609a3869efc48f9b7cd530ff68",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.399102,
+   "lon": -121.831048,
+   "name": "MRO-RPT02",
+   "public_key": "170f1ddbb010a3dfba01a759611095d3fdd0787429139c477534eba84cb9ecb0",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.61572,
+   "lon": -121.82369,
+   "name": "WoodRose",
+   "public_key": "0de7e8392c30917198044cdbb65061a15bdca8b23b73b5dd458a3d5441b71375",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.0,
+   "lon": -122.14,
+   "name": "Bonny Doon 1 ",
+   "public_key": "558a649e1442087ce8e8a7cab944ef246a704f212c9fd11f44c0be8bce0a1c46",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.224755,
+   "lon": -121.955963,
+   "name": "6LG-CMPN1",
+   "public_key": "d661f68f95ff779984ae72a49d4f1a650c4640b3450b98b612181ef24556049a",
+   "role": "companion"
+  },
+  {
+   "lat": 37.47809,
+   "lon": -122.18859,
+   "name": "Marsh RWC 1W Repeater",
+   "public_key": "39571fa2dd1920814b78fc9980c4d99fd6f943890cc7eb5be95e064c219f5b8f",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.466514,
+   "lon": -121.275772,
+   "name": "SV South-Stonewall Cyn",
+   "public_key": "2959fb09335883a0d283c4a55b73355067bb2db49381ea64879b1b4dfc600914",
+   "role": "repeater"
+  },
+  {
+   "lat": 35.4927,
+   "lon": -120.65569,
+   "name": "A-Town Repeater",
+   "public_key": "19bc07bf26b98886cef2720e0b8302ced6abd1e28cf16462ca98f87192bf45d5",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.27141,
+   "lon": -121.83668,
+   "name": "Port a Repeater",
+   "public_key": "acc5ca973474000f203f1ced4e554d2051166eea0ceacf1eb7fdedf56eb9d2f0",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.19833,
+   "lon": -121.98798,
+   "name": "MRO-MQTT01",
+   "public_key": "c6ffac8173cd53c894b32f68191db58a726c958c461c77037da9873b245f9b07",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.747297,
+   "lon": -122.440683,
+   "name": "Hugo Black",
+   "public_key": "a670f2ab7f8cb63475b6a66db7011da8f49fce0d00ed95f0e49de8242b3ef302",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.60474,
+   "lon": -122.19715,
+   "name": "FinPlatt",
+   "public_key": "c57cb88d377e4d1d461ff696f4995b928c07df16bb8305e71dd0beef4bbb1ffe",
+   "role": "room"
+  },
+  {
+   "lat": 37.365829,
+   "lon": -121.828048,
+   "name": "Bo_Rptr01",
+   "public_key": "aff10723f31c2ab856687c4caef191f3cfeb81af4829a9dbe413a2898239883b",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.97344,
+   "lon": -122.00901,
+   "name": "PB Rep 4",
+   "public_key": "049e3deef441fc7b6df6e6d71cb2cedb2660b2e77068e4b6fd33218fa6297d51",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.83435,
+   "lon": -122.26098,
+   "name": "sudoroom",
+   "public_key": "0e22760b1aac4e53821f1fca71c62d2f938a99a0bdddaddd2f844d53e13947f0",
+   "role": "room"
+  },
+  {
+   "lat": 36.9817,
+   "lon": -121.91878,
+   "name": "W.Seacliff DD",
+   "public_key": "ddc6b20c13b7b8f8072dea9c218cc8215c8fa7f3a7be69f2c4cd3baa960b6ab7",
+   "role": "repeater"
+  },
+  {
+   "lat": 38.005064,
+   "lon": -122.547386,
+   "name": "Impulsive Sky \ud83c\udf11",
+   "public_key": "63a1d8a1da5de814ac9c472d55ccf8a76800a5e4106778321b66e65ab8ae4d68",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.788808,
+   "lon": -122.418781,
+   "name": "EW-SFC-NODE06",
+   "public_key": "b6c65a5dde1e2c993bed38ef971772a1e9a3d76947566ca9b470d8ad74b97ff2",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "MC Room Server v4",
+   "public_key": "7a3e4095bc31c6d3411fc7a6ffcc165b8b293d7135dd3a98a3899b1647fc0ee0",
+   "role": "room"
+  },
+  {
+   "lat": 36.993213,
+   "lon": -121.996231,
+   "name": "4000\ud83d\udca5Repeater G2",
+   "public_key": "400000494367060bd255cd29217f535495676ee87b341850080b846476ba3a56",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.675148,
+   "lon": -121.635496,
+   "name": "xCAT.c27.z01.r01",
+   "public_key": "1686cf7ec8004993af3f314bd418b259e9bf8c516a6ec8c119207b40b6b95963",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.28,
+   "lon": -121.895,
+   "name": "N6UGX-RAK-Rpt1",
+   "public_key": "eacf3e854d6f153bac6c1b9c2325fefc1cbe1ea93ecfab36e3c0535ba80d4a5d",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.50385,
+   "lon": -122.2617,
+   "name": "JbsN-SanCarlos",
+   "public_key": "c9e969d8d10af2b5e5cc4937af20f30b9d0f8b92bae4f6bca987ba7c3e4468a6",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.24927,
+   "lon": -121.91614,
+   "name": "KB6NTW_ThePalms",
+   "public_key": "a925417bf713f85c84496b1a35893d6c7d8c64bc415b1a296ff68a17c4e5d38e",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "35D1 BayAreaMeshCore",
+   "public_key": "35d12820d9a06a5f76fb030694a99958c992172f4bdaac695d8621c70dc89c21",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.57743,
+   "lon": -122.31192,
+   "name": "SMShoresG2",
+   "public_key": "577c3c97b47f56682bef7b8dc10c7303400e1229b0edb4134d24aa6928f811ca",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.42579,
+   "lon": -121.97345,
+   "name": "Alviso Repeater",
+   "public_key": "88b0ccc171ae01d629fd0ab3523e1107846bbc178251978c0e820bd4aca4f1a5",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.119736,
+   "lon": -121.922808,
+   "name": "Adobe Orchard Repeater",
+   "public_key": "9cdeadfe0a71340cbe13aef9c059501538ac455330e8081fb920f6aeaf4058ad",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.8243,
+   "lon": -122.25011,
+   "name": "Piedmont Avenue",
+   "public_key": "617dd83e9e7d8025ca0ea5b8206afc0cc48ae7dddedcfdb3fdce5e2f04447a2c",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.29878,
+   "lon": -121.91635,
+   "name": "AI6EH Heltec Repeater",
+   "public_key": "fd24c8d3a8c57bbc4d820b5dd62f6a7464c555d5fe0262583b75754bc2dee8ca",
+   "role": "repeater"
+  },
+  {
+   "lat": 35.526161,
+   "lon": -120.727897,
+   "name": "Templeton Hills",
+   "public_key": "377b09eedea6409991a9be7482ca5020f1c27384a2fbfc6560af40fb2f78d44e",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.63723,
+   "lon": -121.80996,
+   "name": "Fort Ord Repeater",
+   "public_key": "427394a78cb23d3935a3125895b242b2802a6cdcfa41b6fb60a32d9c68ab4d24",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.35307,
+   "lon": -121.94076,
+   "name": "Bent/ECR temp rep",
+   "public_key": "2f37c0c68e8b8fce7e4b97349e387639e6d2e0de6881a3ba4bb63ad64eadd987",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.59124,
+   "lon": -122.03924,
+   "name": "EW-EBR-NODE02",
+   "public_key": "b1a1d7f5b2f06722e8af3b6919f3191e65359c0ed02f637bce08d4279a4390fd",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.3795,
+   "lon": -121.813,
+   "name": "FGH-RPTR",
+   "public_key": "ebf240c59a837d26d27dc7973fc52cadebf0dd13a40002cb6c0f4cef40fee0e4",
+   "role": "repeater"
+  },
+  {
+   "lat": null,
+   "lon": null,
+   "name": "Mibzzer15|Baymc.org Mobile",
+   "public_key": "08c33a8e7e0f2dde6e3beccec62bfc00675ca3f7d6c38d814c11209919837639",
+   "role": "companion"
+  },
+  {
+   "lat": 37.929164,
+   "lon": -122.389823,
+   "name": "Guru MC Repeater 2 \u2600",
+   "public_key": "633d54023232660363adf781de822d8ca62340d0d289bb6ac1742f3426b37ba4",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "POOL BOY",
+   "public_key": "f7c0dc497a3b6d97a542490bcbf9971f0158f634fca91cf99f199a1288a1f63b",
+   "role": "room"
+  },
+  {
+   "lat": 36.99759,
+   "lon": -122.03495,
+   "name": "Ocean\ud83c\udf0aSt.Repeater",
+   "public_key": "3f7fbf7c4136e9cc274a3aa6939feda206e358983ef74c72ce7c55dfdc0681ba",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.364575,
+   "lon": -122.245952,
+   "name": "N6NU R2",
+   "public_key": "34eaa38244e1ce7e65f4070044cfcf0573727ab38377aa2b8e7ecc70c9e881f9",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.749249,
+   "lon": -121.974629,
+   "name": "BRO\ud83c\udf33",
+   "public_key": "4bf81b06311dbd68004f8ee3d893add12d89fe320578017440ae693d87804ee7",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.76244,
+   "lon": -122.41848,
+   "name": "Noisebridge Room",
+   "public_key": "ab011b2522503be5504762949661a050f237c5bf0f2c1d8ddea3342c9055db7b",
+   "role": "room"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "ChanceFam Indoor",
+   "public_key": "2a98bc3a29f7499f81e516e2cbf07187b0cc6ed5e79f17e23f05135ba990e431",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.02568,
+   "lon": -121.59187,
+   "name": "GY889 Room",
+   "public_key": "a7264051a7ea453e501e4436c2e2c8d53fe8a05446fcc3e3bcf8eee045c91396",
+   "role": "room"
+  },
+  {
+   "lat": 37.826951,
+   "lon": -122.255473,
+   "name": "Snowball01",
+   "public_key": "64245a06e8cde5c343dfc9da46e6d1743edad0faa170b091c849445da1b1b04a",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.527306,
+   "lon": -122.30603,
+   "name": "KK6RWY Repeater",
+   "public_key": "a17a6e0c40a13a5c635b82060267168a7c9096570a2d75ba66b8c9bd943328ac",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.775197,
+   "lon": -122.220959,
+   "name": "St. Elizabeth Room",
+   "public_key": "bc8f6805643559c6a638500e117dc8ab2a051d36fdf3322e69b95a6d1abc9939",
+   "role": "room"
+  },
+  {
+   "lat": 36.81123,
+   "lon": -121.65602,
+   "name": "Dan's Local Repeater",
+   "public_key": "45ceb99aa9e7edc4e89bf63b9cac043d2f81b0a6c71f4e5d47a358da8de91c56",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.50402,
+   "lon": -122.2585,
+   "name": "The Plantation SC",
+   "public_key": "6e1e4b14c69b9af25f7e1a7c9669c0d460f16fdbf2a0c33acfabd496e45575e7",
+   "role": "room"
+  },
+  {
+   "lat": 37.81263,
+   "lon": -122.25604,
+   "name": "OAK-AP-Repeater",
+   "public_key": "8f8037f3678a971072eafe5dc84b58be1a6bd9234b4221883210f0c190e40ffb",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.99516,
+   "lon": -122.03187,
+   "name": "Ocean\ud83c\udf0aSt. Room",
+   "public_key": "acb1c39587eb81345863a682a5d0b4ebdf7b4abdf65b6f0dff6a663b657821ae",
+   "role": "room"
+  },
+  {
+   "lat": 37.730138,
+   "lon": -122.426087,
+   "name": "EW-SFC-DR01",
+   "public_key": "b8714384b6a361392a99eb5521839de35662571595e550d8bd8c6b773d51f42b",
+   "role": "room"
+  },
+  {
+   "lat": 36.67318,
+   "lon": -121.66502,
+   "name": "fox xaio Salinas",
+   "public_key": "e5840d454ebec86882f2640b7863584190b5fee33c4dcdc0775c09972f2a7bc6",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.79851,
+   "lon": -122.40382,
+   "name": "EW-SFC-NODE01",
+   "public_key": "df409ff5ba37602fa5d210125c36a5b8dc3a172e69a8ad09243713fd8a7b8397",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.37384,
+   "lon": -121.87302,
+   "name": "SieveNet",
+   "public_key": "fb99710de3bcb2ba0969f4c62e7793fb5f483c2529fce9da47fb7b8a277f3f3e",
+   "role": "room"
+  },
+  {
+   "lat": 37.721679,
+   "lon": -122.145486,
+   "name": "Dro Rooftop Repeater",
+   "public_key": "38b8df9b3099f8320b70aa9caad88e15e8d8caa54b523fdaa720c2039c22e9f4",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.062862,
+   "lon": -122.005844,
+   "name": "5000\ud83d\udca5Scotts Valley R",
+   "public_key": "5000da8c47abaf4f3b6c7a5912dae7cb3921370c32983ff43592eb85cd70e593",
+   "role": "room"
+  },
+  {
+   "lat": 37.08,
+   "lon": -122.141,
+   "name": "Bonny Doon 2",
+   "public_key": "79c8e76631cf766465f3b75e2d1c586fcbdf1938a88034acf2737a83ddb6e82b",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.66078,
+   "lon": -122.42685,
+   "name": "CobraCommander",
+   "public_key": "5e902a544a5c49a64a443fedb5522569808d2ca0ac0f37543b802050c328bf1c",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.98186,
+   "lon": -121.909719,
+   "name": "94eb Goat \ud83d\udc10",
+   "public_key": "94feb4581fc5e7c5b752bbb053d997c7d27e9d20569d5cfa734b44d05f3fd552",
+   "role": "repeater"
+  },
+  {
+   "lat": null,
+   "lon": null,
+   "name": "86\ud83e\udda6Toyotoro",
+   "public_key": "860050fa859ceaac2e1c012c5c561e9fc87f4164bf430314fd3f95a35270e570",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "xCAT.z01.r02",
+   "public_key": "9a416b4e8bddec1e2e3198347d9e9c2802a6d47441a307b209719f68376c6b22",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.55397,
+   "lon": -121.57323,
+   "name": "87\ud83e\udda6",
+   "public_key": "8700b4cadf424f7fc5946cb0a91cdec9ba73faf64a4ca9ba6472918d3fa10105",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.12368,
+   "lon": -121.99005,
+   "name": "Treehouse Repeater",
+   "public_key": "9f7a8b21b88353180c500810f87147fb9a1866bfb285631951268696d76b2951",
+   "role": "repeater"
+  },
+  {
+   "lat": 35.63321,
+   "lon": -120.67962,
+   "name": "PRBROOF",
+   "public_key": "5ad2b360f2932b93b381ee73c657954d02a989f579e637a49f537c1b60f27b08",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.790407,
+   "lon": -122.390358,
+   "name": "Tom C. Clark",
+   "public_key": "c7d3a25389bc02c2981a83ee7aa4975cfe7b305fb739f57b3e337edfe01445df",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.3518,
+   "lon": -121.88413,
+   "name": "SJNCERT D3 RPTR/OMNI",
+   "public_key": "cdc11897425a8dd33dc958e748241b4dc4927a92ee7e76e1390c9f295c2fa3fd",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.451518,
+   "lon": -122.221635,
+   "name": "N6AMQ-4",
+   "public_key": "9074c7143cc8ac420e9e0039c077050c9f8c3a620caac5cd48c30d9c1de2f046",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "KingFinch",
+   "public_key": "bc4968952766e21c88361e462dbc8b47cc7b2bee7d19b99aba772f171982bb37",
+   "role": "companion"
+  },
+  {
+   "lat": 37.257095,
+   "lon": -121.830916,
+   "name": "Rocky Repeater",
+   "public_key": "bf915f8e258b7ab075a993cc085bcf50ac5341fc6193337009740465436f4704",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.77556,
+   "lon": -122.48927,
+   "name": "C0ffee SF",
+   "public_key": "c0ffeec7289eb294d6ed2c54feb4d9d15e4e7d3715214b8473ae65ee126a9a27",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.932015,
+   "lon": -122.559843,
+   "name": "Mill Valley Repeater - ",
+   "public_key": "59b19d324dcd9957b43b4f494d944abf8df287e2e09a273c671dace6ccadffdb",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.50984,
+   "lon": -122.27499,
+   "name": "Belmont Hill JbsD",
+   "public_key": "eadb462379e14e4234f88674f838c21bcc5723d35875e39a81f5e532e229f7a5",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "Morrison Remick Waite",
+   "public_key": "bf3e9c6ef65480e0a6459d6a7246822d5d2eb33baecdcfc5135f0206176cfe9b",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.87989,
+   "lon": -121.641132,
+   "name": "AA \ud83e\udea8 AROMAS",
+   "public_key": "aaf052d6c3d9ea5ff52ff9a8ee0ba783dc5f167a5a3f9b7262715e4b2c1a58d4",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.745861,
+   "lon": -122.436861,
+   "name": "Duncan/Newburg",
+   "public_key": "c8d818430437fce7aceaa82148962525d21eb837c9b1c8351c45c28d6bd5289e",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.730979,
+   "lon": -122.421005,
+   "name": "XMD Repeater 3",
+   "public_key": "7f7b32f1e62259cf4d0ef46a3a39be925151e624c652a04941fcb6276c9b88a3",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.955,
+   "lon": -121.972,
+   "name": "841\ud83e\udda6",
+   "public_key": "84141418450d983ce54a116f0803e56cfecba28c472bdd0b39f623543c60f9c5",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.65029,
+   "lon": -122.0841,
+   "name": "BB-8 0EA3 Rak 1W",
+   "public_key": "0ea31493d2ebabfa472eeac745923afb241869038bb048e432c3bde7f4cc2c0e",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.775249,
+   "lon": -122.220802,
+   "name": "St. Elizabeth Repeater",
+   "public_key": "1545d8d6a8c5191db2c357ad5461cfb8fde017c977d8d6f33e114e5c5ead749c",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.386533,
+   "lon": -121.852085,
+   "name": "f9-Rptr SJ-Penitencia",
+   "public_key": "f9f9f9ca3f476a824ab2655db8b32f68b44a11c307399f6dea376e72750c38fe",
+   "role": "repeater"
+  },
+  {
+   "lat": 0.0,
+   "lon": 0.0,
+   "name": "KK6IK-Skarlet-Repeater-",
+   "public_key": "43944d54578c2613eed771d30ded1e993b905cea45acee2108db2f4b148e3457",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.210725,
+   "lon": -121.836841,
+   "name": "SJ-Ghoul-r2",
+   "public_key": "8068de3e200785c694fac28ec4863ba0c9812681dd9b33c1cb1e4afe327afafa",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.23034,
+   "lon": -121.77856,
+   "name": "EW-SBC-NODE06",
+   "public_key": "bb4706f82228f92da1a3afddc2512792397867b589cae25ff975bcd24bebb00b",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.367468,
+   "lon": -122.11035,
+   "name": "RLA 1 - SenseCap_Solar ",
+   "public_key": "9cd1bc7f838a30f228355131709178a16414adce3c49fd9620223b7dc6d99fbc",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.802446,
+   "lon": -122.226512,
+   "name": "t4 oakland hills",
+   "public_key": "2dd2d5226f59371f092b203c93a9b76d23d32b1b4122896a89c4eebf66b0821f",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.28998,
+   "lon": -122.00509,
+   "name": "ChanceFam \ufffd\"t\ufffd",
+   "public_key": "0c207676a1227ccef15c6f3461ecd480b5bb4eb03ef76e63d39ab16ed74111dc",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.528743,
+   "lon": -122.256512,
+   "name": "RWS RAK Repeater",
+   "public_key": "6540dfd41759953a4a9092a0e1ad07a8167af98ba0149ae3790207ce637ec132",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.37486,
+   "lon": -122.099517,
+   "name": "JH-roof",
+   "public_key": "963d993e0b575543b83a587914ccfe1327e0f653d979cb4e17c30391caba934b",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.22264,
+   "lon": -121.82211,
+   "name": "NMC1\ud83c\udf33",
+   "public_key": "22ebe59e32003bcfaad01d1b759b6522571e75cd840fdd5d312002b4530cffa1",
+   "role": "repeater"
+  },
+  {
+   "lat": 36.687002,
+   "lon": -121.795755,
+   "name": "DntnMarina Rptr mrymesh",
+   "public_key": "45968b2ef0766c448f9f2af59d796a0b3249dae9b3731c7bb379d2a992535373",
+   "role": "repeater"
+  },
+  {
+   "lat": 37.501442,
+   "lon": -122.283905,
+   "name": "BM Repeater",
+   "public_key": "976588cefcb05abd2a50fbaef3789f6f581675f39233277332b94ead3b333e6b",
+   "role": "repeater"
+  }
+ ],
+ "observations": [
+  {
+   "id": 71,
+   "observer_id": "C449BA85475D8EBB4AEFE3A9F0A7042516EAA1279D6BC52A85D61914DF0D7DB1",
+   "packet": "a5db22b1ade09a7e",
+   "path_json": "[\"06\",\"E7\",\"10\",\"27\",\"10\",\"E2\",\"59\",\"F1\",\"95\",\"2B\",\"63\",\"23\",\"97\",\"7A\",\"EE\",\"20\",\"10\",\"70\",\"3F\"]",
+   "resolved_path": "[null,null,\"1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74\",\"27d7e95231632b41b8c63a6bcdd16afed5a19c5516cf728cde15756262f89adb\",\"1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74\",\"e25c46094e3b1da0c6f1afc777c1e634e869fc0a7ca74c9dfca4a08a898db6d0\",\"59b19d324dcd9957b43b4f494d944abf8df287e2e09a273c671dace6ccadffdb\",\"f13bb9481d8949d5c62ad81d484810c01a2a2a79265c1ffb7cdea380739d083e\",\"953575641aa4086b13f8572a7e832cfa455e753a2b2fcf4bf6bc7e97b0987809\",\"2b85ba14fbdce0ebf899ce9f4db2067e0291e3ae59f7538da6fdbb9540a8ae68\",\"633d54023232660363adf781de822d8ca62340d0d289bb6ac1742f3426b37ba4\",null,\"976588cefcb05abd2a50fbaef3789f6f581675f39233277332b94ead3b333e6b\",\"7a7a368950f7a8287fc533f1324d6403ba7919cc7551a436194a4d0bbf6b2d6b\",\"eeb75b1f886ef78a2986dd1948742819b74c3e3ab4f0911879aa484628bc20e4\",\"20aaa863297b2a97372c8ef877d35ee46aa6b5ff4a68ea8bdec3a0dc77cfa54b\",\"1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74\",null,\"3f7fbf7c4136e9cc274a3aa6939feda206e358983ef74c72ce7c55dfdc0681ba\"]"
+  },
+  {
+   "id": 147,
+   "observer_id": "45968B2EF0766C448F9F2AF59D796A0B3249DAE9B3731C7BB379D2A992535373",
+   "packet": "57224a4a01c9c682",
+   "path_json": "[\"37\",\"BB\",\"29\",\"87\",\"10\",\"9F\",\"F5\",\"78\",\"70\",\"10\",\"2D\",\"D6\",\"47\",\"C0\",\"6B\",\"E2\",\"D6\",\"EE\",\"20\",\"10\",\"04\",\"5B\"]",
+   "resolved_path": "[\"37cf083223a222353d7617b0aec121a822a4924431577b08215706e787621577\",\"bb4706f82228f92da1a3afddc2512792397867b589cae25ff975bcd24bebb00b\",\"2959fb09335883a0d283c4a55b73355067bb2db49381ea64879b1b4dfc600914\",\"8700b4cadf424f7fc5946cb0a91cdec9ba73faf64a4ca9ba6472918d3fa10105\",\"1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74\",\"9f7a8b21b88353180c500810f87147fb9a1866bfb285631951268696d76b2951\",\"f5faa77d27c9240499ed9ad905b61f547e9c93fa281d601b40621c9c545069ac\",\"78af7025644e3b17abf64729ed04bfcc7c1b41c53eb3a4eba3f3a379a8bbc932\",null,\"1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74\",\"2dd2d5226f59371f092b203c93a9b76d23d32b1b4122896a89c4eebf66b0821f\",null,null,\"c0dedad4208acb6cbe44b848943fc6d3c5d43cf38a21e48b43826a70862980e4\",\"6b9c219ce5063c91244403216dd02de1ae13cd40ebd90a3d13f20d04e7ee7327\",\"e25c46094e3b1da0c6f1afc777c1e634e869fc0a7ca74c9dfca4a08a898db6d0\",null,\"eeb75b1f886ef78a2986dd1948742819b74c3e3ab4f0911879aa484628bc20e4\",\"20aaa863297b2a97372c8ef877d35ee46aa6b5ff4a68ea8bdec3a0dc77cfa54b\",\"1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74\",\"049e3deef441fc7b6df6e6d71cb2cedb2660b2e77068e4b6fd33218fa6297d51\",\"5b9839e58ae312ecc8624a8f374cf57a1b5b631fb00ec0124c9ab9de2be9f229\"]"
+  },
+  {
+   "id": 181,
+   "observer_id": "FEEDBEEF424FA7EB4B816B35DB231E5A4FD83140B13280A44D5E0C639B4B53C1",
+   "packet": "d9027dcf09033634",
+   "path_json": "[\"5B\",\"38\",\"C3\",\"BD\",\"25\",\"4C\",\"BA\",\"64\",\"9C\",\"B9\",\"9D\",\"2B\",\"61\",\"6C\",\"EF\",\"F5\",\"59\",\"19\",\"EA\",\"97\",\"3A\",\"15\"]",
+   "resolved_path": "[\"5b9839e58ae312ecc8624a8f374cf57a1b5b631fb00ec0124c9ab9de2be9f229\",\"38b8df9b3099f8320b70aa9caad88e15e8d8caa54b523fdaa720c2039c22e9f4\",null,\"bd5cced5c5017c552eab080113e991391d5d722a35bdef7d066024bdce48088c\",null,\"4ca3dcec6fdfe37fee1215f4e3ac36ec4af75ec3c81572d6568e8fdac96fe367\",null,\"649c3f424f7c711ac0915f3e3844b4e4cf3fb310da066a8c8150fe49856e5bba\",\"9cdeadfe0a71340cbe13aef9c059501538ac455330e8081fb920f6aeaf4058ad\",\"b9c1fd6537fb74e4b99618276ac36f54f4bbe8356b0b78c65cd31ac9d951588b\",\"9dc3e069d1b336c4af33167d3838147ca6449e12c1e1bdaa92fdfc0ecfdd98bc\",\"2b85ba14fbdce0ebf899ce9f4db2067e0291e3ae59f7538da6fdbb9540a8ae68\",\"617dd83e9e7d8025ca0ea5b8206afc0cc48ae7dddedcfdb3fdce5e2f04447a2c\",null,null,\"f509fda5e8f6107db3fe93dbda0f5ec4e7ff7ba578903fd0a93d033bedc42484\",\"59b19d324dcd9957b43b4f494d944abf8df287e2e09a273c671dace6ccadffdb\",\"19bc07bf26b98886cef2720e0b8302ced6abd1e28cf16462ca98f87192bf45d5\",\"eacf3e854d6f153bac6c1b9c2325fefc1cbe1ea93ecfab36e3c0535ba80d4a5d\",\"976588cefcb05abd2a50fbaef3789f6f581675f39233277332b94ead3b333e6b\",\"3aacc1f8da74eda755c49681dd3464f33c9ebcacff7db3ce45e7cb4853db2224\",\"1545d8d6a8c5191db2c357ad5461cfb8fde017c977d8d6f33e114e5c5ead749c\"]"
+  },
+  {
+   "id": 200,
+   "observer_id": "C6FFAC8173CD53C894B32F68191DB58A726C958C461C77037DA9873B245F9B07",
+   "packet": "6dc0207e7b90662c",
+   "path_json": "[\"55\",\"A8\",\"10\",\"59\",\"DF\",\"C0\",\"6B\",\"E2\",\"2D\",\"DA\",\"22\",\"21\",\"A9\",\"EE\",\"5E\",\"10\",\"70\",\"28\",\"9C\"]",
+   "resolved_path": "[\"557a098aa8c38a01274a5fc943f44f8e4b058e03a13a4d3d366de1aa7018cc60\",null,\"1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74\",\"59b19d324dcd9957b43b4f494d944abf8df287e2e09a273c671dace6ccadffdb\",\"df409ff5ba37602fa5d210125c36a5b8dc3a172e69a8ad09243713fd8a7b8397\",\"c0dedad4208acb6cbe44b848943fc6d3c5d43cf38a21e48b43826a70862980e4\",\"6b9c219ce5063c91244403216dd02de1ae13cd40ebd90a3d13f20d04e7ee7327\",\"e25c46094e3b1da0c6f1afc777c1e634e869fc0a7ca74c9dfca4a08a898db6d0\",\"2d2c60301c07d5f22d4407f51930e4d7c02145287d3590a25dbdf3067f1d53d1\",\"da2a5f66ddb5a5a688797f9ef62d2e38f45557497fa58a9e0503819de40c77aa\",\"22ebe59e32003bcfaad01d1b759b6522571e75cd840fdd5d312002b4530cffa1\",\"219da79d52f17f3f5087cd512038a5d79773ed778e622d9edea8aae664e90c6b\",\"a925417bf713f85c84496b1a35893d6c7d8c64bc415b1a296ff68a17c4e5d38e\",\"eeb75b1f886ef78a2986dd1948742819b74c3e3ab4f0911879aa484628bc20e4\",\"5eb0bd75143530509fddfeb195ac2ab58976508ce0c592ed365e18132d51769d\",\"1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74\",null,\"281b214bc2274e2b0288153ed9ac6c04066dc2d1a1d4584ecec8dc9d2fd6c05a\",\"9cdeadfe0a71340cbe13aef9c059501538ac455330e8081fb920f6aeaf4058ad\"]"
+  },
+  {
+   "id": 452,
+   "observer_id": "2301ACD8E9DCEDE58C80E3F510F1DE6AF313FA189AB6AF4A8C35F209963F6E4A",
+   "packet": "8d73fddc566c829f",
+   "path_json": "[\"C9\",\"1F\",\"D8\",\"A6\",\"C0\",\"4F\",\"19\",\"EE\",\"64\",\"22\",\"DA\",\"07\",\"82\",\"97\",\"C9\",\"EF\",\"4A\",\"26\",\"4F\",\"DF\"]",
+   "resolved_path": "[\"c9e969d8d10af2b5e5cc4937af20f30b9d0f8b92bae4f6bca987ba7c3e4468a6\",\"1f1f0f9886d7b335e836e3b224905c8c51642c6033dff0dc038e9f147fbf621c\",\"d818045a4f9afb7d8dd89fd613de6da1aeca4e2b757990c4d4eeb80149f77a9a\",\"a670f2ab7f8cb63475b6a66db7011da8f49fce0d00ed95f0e49de8242b3ef302\",\"c0ffeec7289eb294d6ed2c54feb4d9d15e4e7d3715214b8473ae65ee126a9a27\",null,\"19bc07bf26b98886cef2720e0b8302ced6abd1e28cf16462ca98f87192bf45d5\",\"eeb75b1f886ef78a2986dd1948742819b74c3e3ab4f0911879aa484628bc20e4\",\"649c3f424f7c711ac0915f3e3844b4e4cf3fb310da066a8c8150fe49856e5bba\",\"22ebe59e32003bcfaad01d1b759b6522571e75cd840fdd5d312002b4530cffa1\",\"da2a5f66ddb5a5a688797f9ef62d2e38f45557497fa58a9e0503819de40c77aa\",null,null,\"976588cefcb05abd2a50fbaef3789f6f581675f39233277332b94ead3b333e6b\",\"c9e969d8d10af2b5e5cc4937af20f30b9d0f8b92bae4f6bca987ba7c3e4468a6\",null,\"4a85687d988114c16609cd52407b501d0446040f1e638d1766cc1eae88565bbc\",null,null,\"df409ff5ba37602fa5d210125c36a5b8dc3a172e69a8ad09243713fd8a7b8397\"]"
+  }
+ ],
+ "observers": [
+  {
+   "iata": "OAK",
+   "id": "D5EF2ED77CEABCB22082F8794D5F9D89F2257E70533863E924DEBE6EBDDA312A"
+  },
+  {
+   "iata": "SJC",
+   "id": "1E598D0F11783A33C04D701FF3151FD8D8C0A96686D88267DF70993F59EF760C"
+  },
+  {
+   "iata": "OAK",
+   "id": "EE550DE547D7B94848A952C98F585881FCF946A128E72905E95517475F83CFB1"
+  },
+  {
+   "iata": "MRY",
+   "id": "45968B2EF0766C448F9F2AF59D796A0B3249DAE9B3731C7BB379D2A992535373"
+  },
+  {
+   "iata": "SJC",
+   "id": "B9CFE9A1BB07D65132366C1B50C8E0FF838F0C34961809958DEC8492290971E6"
+  },
+  {
+   "iata": "MRY",
+   "id": "EC3433BB3ADF1ACAEE0CE117600B0CA473705486EC666137379A1E8CBB7E75F4"
+  },
+  {
+   "iata": "OAK",
+   "id": "0D3B3F382173A49EB0E3BB01AB2EA9B28601D9039E4BD52C55B91A8000CC092D"
+  },
+  {
+   "iata": "MRY",
+   "id": "5B9839E58AE312ECC8624A8F374CF57A1B5B631FB00EC0124C9AB9DE2BE9F229"
+  },
+  {
+   "iata": "OAK",
+   "id": "1F445B75F5EB65EEC244A17A1E8660812A2529727A2329DDA37C44684D8841EA"
+  },
+  {
+   "iata": "SJC",
+   "id": "62934319A2303738F3DD49B87047DE3777134979C7F08B9B5C350CA31770D166"
+  },
+  {
+   "iata": "SJC",
+   "id": "9DC3E069D1B336C4AF33167D3838147CA6449E12C1E1BDAA92FDFC0ECFDD98BC"
+  },
+  {
+   "iata": "OAK",
+   "id": "0EA31493D2EBABFA472EEAC745923AFB241869038BB048E432C3BDE7F4CC2C0E"
+  },
+  {
+   "iata": "SFO",
+   "id": "C0FFEEC7289EB294D6ED2C54FEB4D9D15E4E7D3715214B8473AE65EE126A9A27"
+  },
+  {
+   "iata": "OAK",
+   "id": "2301ACD8E9DCEDE58C80E3F510F1DE6AF313FA189AB6AF4A8C35F209963F6E4A"
+  },
+  {
+   "iata": "SJC",
+   "id": "EB1C65BFA5C3D74E023EE3E5CC16FF963CB14E3193CB50138B8F17D1D27AF600"
+  },
+  {
+   "iata": "OAK",
+   "id": "1F255B677183FEEABB109CE7422BC4B319929BA814E41C483F3FA94D5E3E9B63"
+  },
+  {
+   "iata": "OAK",
+   "id": "55D4CFEE3B826AFFE22BD480611A9BA6ECE9CBB03AA89EE6F414416285DE50DB"
+  },
+  {
+   "iata": "SJC",
+   "id": "C449BA85475D8EBB4AEFE3A9F0A7042516EAA1279D6BC52A85D61914DF0D7DB1"
+  },
+  {
+   "iata": "OAK",
+   "id": "E466CFB5F03E38997D210B14280C651A4D65A15F8724605E2FC71AD0CC0C6B3D"
+  },
+  {
+   "iata": "SFO",
+   "id": "67A5142E49EA8D197297B05FB056F5B6E64A4E1CF1714D82AAF1C74433941611"
+  },
+  {
+   "iata": "SFO",
+   "id": "B8714384B6A361392A99EB5521839DE35662571595E550D8BD8C6B773D51F42B"
+  },
+  {
+   "iata": "SJC",
+   "id": "FEEDBEEF424FA7EB4B816B35DB231E5A4FD83140B13280A44D5E0C639B4B53C1"
+  },
+  {
+   "iata": "SJC",
+   "id": "B0A1E4B5CDB122E7E47A57E0251D5EE466D291B9820442380B80752EC553D727"
+  },
+  {
+   "iata": "SJC",
+   "id": "C6FFAC8173CD53C894B32F68191DB58A726C958C461C77037DA9873B245F9B07"
+  },
+  {
+   "iata": "SJC",
+   "id": "485248BDBF3DB4EF221E087527501C1ED05DF848462BFC93F466FAAA6287A771"
+  },
+  {
+   "iata": "SFO",
+   "id": "255BDF7E2A04FA76D77E8388C3A7D8F7277C7BC826A7CC9514C6A89D9C3EACE9"
+  },
+  {
+   "iata": "SFO",
+   "id": "2D2C60301C07D5F22D4407F51930E4D7C02145287D3590A25DBDF3067F1D53D1"
+  },
+  {
+   "iata": "OAK",
+   "id": "4CE50A13E52CBC86A305923993E9AF54D5107F29D0A69E6EFFD6D8D34FFC674C"
+  },
+  {
+   "iata": "SJC",
+   "id": "424419FDF9DD9D206A5A917979E56E843DE78E890359C70B9F59B7E2CF2CE392"
+  },
+  {
+   "iata": "SJC",
+   "id": "kpabap"
+  },
+  {
+   "iata": "SJC",
+   "id": "C2FDA6FBF346BF1CB44EC7BF0FA291390857EDBBB88DB41FDAB4DD8AA3A864D1"
+  }
+ ]
+}

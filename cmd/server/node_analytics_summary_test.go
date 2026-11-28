@@ -12,7 +12,7 @@ import (
 const nodeAnalyticsSummaryTestPK = "aabbccdd11223344" // seeded by seedTestData
 
 // TestNodeAnalyticsSummary_OnlyTimeRangeAndComputedStats asserts the wire
-// JSON has exactly two top-level keys — no node, no clockSkew, none of the
+// JSON has exactly three top-level keys — no node, no clockSkew, none of the
 // heavy display arrays the full /analytics endpoint carries.
 func TestNodeAnalyticsSummary_OnlyTimeRangeAndComputedStats(t *testing.T) {
 	_, router := setupTestServer(t)
@@ -28,18 +28,21 @@ func TestNodeAnalyticsSummary_OnlyTimeRangeAndComputedStats(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if len(raw) != 2 {
+	if len(raw) != 3 {
 		gotKeys := make([]string, 0, len(raw))
 		for k := range raw {
 			gotKeys = append(gotKeys, k)
 		}
-		t.Fatalf("expected exactly 2 top-level keys, got %d: %v", len(raw), gotKeys)
+		t.Fatalf("expected exactly 3 top-level keys, got %d: %v", len(raw), gotKeys)
 	}
 	if _, ok := raw["timeRange"]; !ok {
 		t.Error("missing timeRange")
 	}
 	if _, ok := raw["computedStats"]; !ok {
 		t.Error("missing computedStats")
+	}
+	if _, ok := raw["coverage"]; !ok {
+		t.Error("missing coverage")
 	}
 }
 

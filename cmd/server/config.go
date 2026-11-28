@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"math"
 	"os"
@@ -10,10 +13,15 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"github.com/meshcore-analyzer/channelregistry"
+	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
+	"github.com/meshcore-analyzer/configkey"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
+	regionutil "github.com/meshcore-analyzer/regions"
 )
 
 // AreaEntry defines a geographic area by polygon or bounding box.
@@ -148,12 +156,52 @@ type Config struct {
 	DBPath     string            `json:"dbPath"`
 	ListLimits *ListLimitsConfig `json:"listLimits"`
 
+	// EstimatedPositions is an operator-side startup policy. Missing means
+	// enabled for compatibility; changes require a server restart.
+	EstimatedPositions *EstimatedPositionsConfig `json:"estimatedPositions,omitempty"`
+
+	// Dagi switches the #740 DAGI filters (kommune, landsdel, region,
+	// postnummer) and their endpoints. Missing means on: the asset is
+	// embedded. Read from the canonical key dagi.enabled only.
+	Dagi *DagiConfig `json:"dagi,omitempty"`
+
+	// ChannelProposals configures publicly suggested hashtag channels
+	// (internal/channelregistry). Submissions open only when enabled AND a
+	// strong apiKey is set; the same block is read by the ingestor.
+	ChannelProposals *channelregistry.Config `json:"channelProposals,omitempty"`
+
+	// AntennaClaims configures owner antenna-height claims (#789 M2a,
+	// internal/channelregistry/antennaclaim). Public claims open only when
+	// enabled AND a strong apiKey is set; the ingestor reads the same block.
+	AntennaClaims *antennaclaim.Config `json:"antennaClaims,omitempty"`
+
 	// HashRegions mirrors the ingestor's region-scope config (same
 	// config.json key). The server never derives HMAC keys from it — it
 	// only needs the configured *names* to report which regions have
 	// never matched any observed transmission (region-utilization
 	// analytics, /api/scope-stats "unusedRegions").
+	//
+	// This is the INLINE half of the configured set. Read
+	// EffectiveHashRegions() instead, which adds HashRegionsPath.
 	HashRegions []string `json:"hashRegions,omitempty"`
+
+	// HashRegionsPath optionally points at a JSON array of region-scope
+	// names merged with the inline HashRegions list (#360). Same key, same
+	// env override (HASH_REGIONS_PATH) and same relative-path rule as the
+	// ingestor, which reads it through the same loader
+	// (internal/regions.Load) — the two processes must never disagree
+	// about which scopes are configured, or the server would report a
+	// file-configured scope as "unknown" while the ingestor matches it.
+	// This is a file READ; the server stays read-only.
+	HashRegionsPath string `json:"hashRegionsPath,omitempty"`
+
+	// hashRegionsFile caches the raw entries read from HashRegionsPath at
+	// config load. The server never reloads its config, so one read at
+	// startup is the whole story here (the ingestor's SIGHUP path is what
+	// re-reads the file). Kept raw rather than merged so
+	// EffectiveHashRegions stays correct for tests that assign
+	// HashRegions directly after load.
+	hashRegionsFile []string
 
 	// NodeBlacklist is a list of public keys to exclude from all API responses.
 	// Blacklisted nodes are hidden from node lists, search, detail, map, and stats.
@@ -217,6 +265,24 @@ type Config struct {
 
 	Regions map[string]string `json:"regions"`
 
+	// RegionGroups are operator-named quick picks over the observer-region
+	// codes the region filter offers (#416). Optional: an absent or empty
+	// list means the filter behaves exactly as it did before the feature
+	// existed. Normalized once at load by normalizeRegionGroups (see the
+	// caps and the drop/normalize rule there) and filtered per request
+	// against the served region map by regionGroupsForRegions, so a group
+	// never offers a code no observer reports.
+	//
+	// These are convenience labels over region codes, not verified
+	// geographic boundaries: "Bay Area" means "the codes the operator
+	// listed", nothing more.
+	RegionGroups []RegionGroup `json:"regionGroups,omitempty"`
+
+	// RegionPlacement selects the rule behind /api/nodes?region= (#488 M2).
+	// Optional: absent keeps today's rule ("heard"). Read once at startup;
+	// see RegionPlacementSettings for the defaults and bounds.
+	RegionPlacement *RegionPlacementConfig `json:"regionPlacement,omitempty"`
+
 	Roles            map[string]interface{} `json:"roles"`
 	HealthThresholds *HealthThresholds      `json:"healthThresholds"`
 	Map              map[string]interface{} `json:"map"`
@@ -229,6 +295,37 @@ type Config struct {
 	WsReconnectMs    *int                   `json:"wsReconnectMs"`
 	CacheInvalidMs   *int                   `json:"cacheInvalidateMs"`
 	ExternalUrls     map[string]interface{} `json:"externalUrls"`
+
+	// Share is the top-level share block (#811): link previews that need
+	// no upstream call. Server-only, like map.dhm.
+	Share ShareConfig `json:"share"`
+
+	// DHM is map.dhm, lifted out of Map by extractDHMConfig so the token
+	// never rides along when Map is shipped to the browser (#680).
+	DHM DHMConfig `json:"-"`
+
+	// Heritage is map.heritage (#723), lifted out of Map the same way so
+	// the browser receives only the fixed `heritage` client block.
+	Heritage HeritageConfig `json:"-"`
+
+	// Masts is map.masts (#724), lifted out of Map the same way; the
+	// browser receives only the fixed `masts` client block.
+	Masts MastsConfig `json:"-"`
+
+	// Skraafoto is map.skraafoto (#737), lifted out of Map the same way;
+	// the browser receives only the fixed `skraafoto` client block.
+	Skraafoto SkraafotoConfig `json:"-"`
+
+	// Coverage is map.coverage (#941), the predicted reach, lifted out of
+	// Map the same way; the browser receives only the `coverage` block.
+	Coverage CoverageConfig `json:"-"`
+
+	// keys reads the loaded file by exact-case keys (#884); nil for a
+	// Config that did not come from LoadConfig.
+	keys *configkey.Doc
+
+	// Radio holds the link-physics defaults of the terrain profile (#681).
+	Radio *RadioConfig `json:"radio,omitempty"`
 
 	LiveMap struct {
 		PropagationBufferMs int `json:"propagationBufferMs"`
@@ -279,6 +376,10 @@ type Config struct {
 	// so browsers enforce same-origin policy. Set to ["*"] to allow all origins.
 	CORSAllowedOrigins []string `json:"corsAllowedOrigins,omitempty"`
 
+	// WebSocket carries the /ws transport limits from #1794. Omitted entirely
+	// means: rate limit at its default, connection cap off, no deny list.
+	WebSocket *WebSocketConfig `json:"webSocket,omitempty"`
+
 	DebugAffinity bool `json:"debugAffinity,omitempty"`
 
 	// MapDarkTileProvider selects the default dark-mode basemap provider for
@@ -301,6 +402,18 @@ type Config struct {
 	// ⇒ off; see ClientRxCoverageEnabled.
 	ClientRxCoverage *ClientRxCoverageConfig `json:"clientRxCoverage,omitempty"`
 
+	// Moments configures the #881 live moments detector (moments.go).
+	// Absent/nil ⇒ off; see MomentsConfig.
+	Moments *MomentsConfig `json:"moments,omitempty"`
+
+	// Kiosk is the #968 operator kiosk preset (kiosk_config.go), read by
+	// canonical keys only in applyCanonicalKeys. nil ⇒ no preset.
+	Kiosk *KioskConfig `json:"-"`
+
+	// ClientRegions gates GET /api/nodes/{pubkey}/declared-regions (#126). The
+	// same config.json entry gates the ingestor's write path; absent ⇒ off.
+	ClientRegions *ClientRegionsConfig `json:"clientRegions,omitempty"`
+
 	ResolvedPath  *ResolvedPathConfig  `json:"resolvedPath,omitempty"`
 	NeighborGraph *NeighborGraphConfig `json:"neighborGraph,omitempty"`
 
@@ -312,6 +425,10 @@ type Config struct {
 
 	// BatteryThresholds: voltage cutoffs for low/critical alerts (#663).
 	BatteryThresholds *BatteryThresholdsConfig `json:"batteryThresholds,omitempty"`
+
+	// DutyCycleWarnPct: rolling 1 h TX airtime share (percent) at which the
+	// RF Health view and observer list warn. 0/missing => 10 (EU g3, #479).
+	DutyCycleWarnPct float64 `json:"dutyCycleWarnPct,omitempty"`
 
 	// Customizer controls operator-side knobs for the in-app customizer modal
 	// (theme/branding/etc.). See CustomizerConfig and issue #1508.
@@ -418,6 +535,155 @@ func (c *Config) ClientRxCoverageEnabled() bool {
 	return c != nil && c.ClientRxCoverage != nil && c.ClientRxCoverage.Enabled
 }
 
+// RegionGroup is one named quick pick over observer-region codes (#416).
+type RegionGroup struct {
+	Name  string   `json:"name"`
+	Codes []string `json:"codes"`
+}
+
+// Bounds on the `regionGroups` config (#416). The quick picks render as one
+// wrapped row of buttons next to the region control, so the group count is
+// what keeps that row readable on a 390 px screen rather than a scroll trap;
+// 12 is roughly two rows there and well past what an operator curates by
+// hand. regionGroupCodesMax covers a large metro cluster (a dozen observers
+// per city) while keeping one pick's `region=` parameter short. The name cap
+// is what fits a button without wrapping mid-word at that width.
+const (
+	regionGroupsMax     = 12
+	regionGroupCodesMax = 24
+	regionGroupNameMax  = 40
+)
+
+// normalizeRegionGroups returns the usable groups from the raw `regionGroups`
+// config, in configured order, and reports every entry it drops through warn.
+//
+// A structural violation drops the whole entry: no name, a name longer than
+// regionGroupNameMax runes, no codes, more than regionGroupCodesMax distinct
+// codes, a name already used by an earlier kept group, or more than
+// regionGroupsMax groups. Silently filtering by a subset of a too-long code
+// list, or labelling a group with a truncated name, would mislabel the filter
+// the operator asked for, so it is refused instead.
+//
+// Trimming and case-insensitive de-duplication are normalization, not
+// violations: they are applied and never warned about. Codes are kept in
+// their first configured spelling — the served spelling is decided per
+// request by regionGroupsForRegions, because the region map includes observer
+// codes that only exist in the database.
+//
+// An absent or empty list returns nothing and warns about nothing, so a
+// deployment without the option is silent at startup as before.
+func normalizeRegionGroups(in []RegionGroup, warn func(string, ...interface{})) []RegionGroup {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]RegionGroup, 0, len(in))
+	seenName := make(map[string]bool, len(in))
+	overflow := 0
+	for _, g := range in {
+		name := strings.TrimSpace(g.Name)
+		if name == "" {
+			warn("[region-groups] dropping a group with no name")
+			continue
+		}
+		if len([]rune(name)) > regionGroupNameMax {
+			warn("[region-groups] dropping group %q: name is %d characters, the maximum is %d",
+				name, len([]rune(name)), regionGroupNameMax)
+			continue
+		}
+		codes := make([]string, 0, len(g.Codes))
+		seenCode := make(map[string]bool, len(g.Codes))
+		for _, c := range g.Codes {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			key := strings.ToUpper(c)
+			if seenCode[key] {
+				continue
+			}
+			seenCode[key] = true
+			codes = append(codes, c)
+		}
+		if len(codes) == 0 {
+			warn("[region-groups] dropping group %q: it lists no region code", name)
+			continue
+		}
+		if len(codes) > regionGroupCodesMax {
+			warn("[region-groups] dropping group %q: %d region codes, the maximum is %d",
+				name, len(codes), regionGroupCodesMax)
+			continue
+		}
+		if seenName[strings.ToUpper(name)] {
+			warn("[region-groups] dropping a repeated group name %q: the first one stands", name)
+			continue
+		}
+		if len(out) >= regionGroupsMax {
+			overflow++
+			continue
+		}
+		seenName[strings.ToUpper(name)] = true
+		out = append(out, RegionGroup{Name: name, Codes: codes})
+	}
+	if overflow > 0 {
+		warn("[region-groups] dropping %d group(s) past the maximum of %d", overflow, regionGroupsMax)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// regionGroupsForRegions filters normalized groups down to what a client can
+// actually select: the codes present in `regions` (the same effective map
+// GET /api/config/regions serves, config entries plus every observer IATA in
+// the database), matched case-insensitively and returned in that map's
+// spelling so a quick pick's codes compare equal to the region control's own.
+//
+// Codes no observer reports are dropped, because the region list is partly
+// dynamic — an operator may configure a group for an observer that is not up
+// yet, and a code that matches nothing would be an unselectable pill. A group
+// left with no code at all is omitted rather than rendered as a no-op.
+//
+// Always returns a non-nil slice, so the endpoint serves [] and not null.
+func regionGroupsForRegions(groups []RegionGroup, regions map[string]string) []RegionGroup {
+	out := make([]RegionGroup, 0, len(groups))
+	if len(groups) == 0 || len(regions) == 0 {
+		return out
+	}
+	byUpper := make(map[string]string, len(regions))
+	for code := range regions {
+		byUpper[strings.ToUpper(code)] = code
+	}
+	for _, g := range groups {
+		codes := make([]string, 0, len(g.Codes))
+		seen := make(map[string]bool, len(g.Codes))
+		for _, c := range g.Codes {
+			served, ok := byUpper[strings.ToUpper(strings.TrimSpace(c))]
+			if !ok || seen[served] {
+				continue
+			}
+			seen[served] = true
+			codes = append(codes, served)
+		}
+		if len(codes) == 0 {
+			continue
+		}
+		out = append(out, RegionGroup{Name: g.Name, Codes: codes})
+	}
+	return out
+}
+
+// ClientRegionsConfig gates the opt-in declared-region reports (#126).
+type ClientRegionsConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+// ClientRegionsEnabled reports whether the declared-regions endpoint is on.
+// Nil config or absent section ⇒ off.
+func (c *Config) ClientRegionsEnabled() bool {
+	return c != nil && c.ClientRegions != nil && c.ClientRegions.Enabled
+}
+
 // WSCompressionEnabled returns true when WebSocket permessage-deflate is explicitly enabled.
 func (c *Config) WSCompressionEnabled() bool {
 	return c.Compression != nil && c.Compression.Websocket
@@ -434,9 +700,15 @@ type NeighborGraphConfig struct {
 	MaxEdgeKm  float64 `json:"maxEdgeKm"`  // geo-implausibility threshold (km); 0 = default 500; negative disables (#1228)
 
 	// CacheRecomputeIntervalSeconds: cadence for the background
-	// recomputer that rebuilds the default-shape neighbor-graph
-	// response (#1481 P0-1). 0/missing = default 300 (5 min).
-	// Lower = fresher data, more CPU per minute. #1483.
+	// recomputer that refreshes the cached default-shape neighbor-graph
+	// responses (#1481 P0-1). The graph itself is rebuilt at most once per
+	// neighborGraphTTL (5 min), so a shorter interval refreshes the cached
+	// responses more often without adding graph-build CPU, while a longer one
+	// makes the graph older: at most roughly one TTL plus one interval, since
+	// a non-divisor interval rebuilds every ceil(TTL/interval) ticks (90 s
+	// gives a 360 s rebuild period). Requests keep the published graph until
+	// the next build finishes. 0/missing = default 300 (5 min).
+	// #1483, #545.
 	CacheRecomputeIntervalSeconds int `json:"cacheRecomputeIntervalSeconds,omitempty"`
 }
 
@@ -576,6 +848,30 @@ type HealthThresholds struct {
 }
 
 // ThemeFile mirrors theme.json overlay.
+// ShareConfig is config.json `share` (#811).
+type ShareConfig struct {
+	// Nodes is the node share card: /p?node=<pubkey> and
+	// GET /api/nodes/{pubkey}/card.png.
+	Nodes ShareNodesConfig `json:"nodes"`
+	// Packets is the packet share card (#812): /p?packet=<hash> and
+	// GET /api/packets/{hash}/card.png.
+	Packets SharePacketsConfig `json:"packets"`
+}
+
+// SharePacketsConfig is config.json `share.packets` (#812 M2). Off unless
+// Enabled (owner decision Q1). The card's theme and names setting are
+// map.dhm.profile.card's, shared with the terrain and node cards.
+type SharePacketsConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+// ShareNodesConfig is config.json `share.nodes` (#811 M3). Off unless
+// Enabled (owner decision Q2). The card's theme and names setting are
+// map.dhm.profile.card's, shared with the terrain card.
+type ShareNodesConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
 type ThemeFile struct {
 	Branding   map[string]interface{} `json:"branding"`
 	Theme      map[string]interface{} `json:"theme"`
@@ -585,6 +881,34 @@ type ThemeFile struct {
 	Home       map[string]interface{} `json:"home"`
 	// #1488 — marker stroke overlay from theme.json.
 	MarkerStroke map[string]interface{} `json:"markerStroke,omitempty"`
+}
+
+// newDefaultConfig is the starting point of every config candidate: the
+// shipped defaults, before any file is decoded on top of them. Port is the
+// only field that cannot be defaulted after the decode, because an operator
+// setting it to 3000 explicitly is indistinguishable from leaving it out.
+func newDefaultConfig() *Config { return &Config{Port: 3000} }
+
+// describeConfigDecodeError summarizes why a candidate file failed to
+// decode. It reports the error *category* and where in the file it sits --
+// never the file's content: the rejected file is exactly the one that may
+// carry map.dhm's token (#694). Field names are part of the schema, not of
+// the data, so naming the offending key is safe and is what makes the line
+// actionable.
+func describeConfigDecodeError(err error) string {
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return fmt.Sprintf("invalid JSON at byte offset %d", syntaxErr.Offset)
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		field := typeErr.Field
+		if field == "" {
+			field = "(document root)"
+		}
+		return fmt.Sprintf("wrong JSON type for field %s at byte offset %d", field, typeErr.Offset)
+	}
+	return "it could not be decoded as JSON"
 }
 
 func LoadConfig(baseDirs ...string) (*Config, error) {
@@ -597,26 +921,218 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		paths = append(paths, filepath.Join(d, "data", "config.json"))
 	}
 
-	cfg := &Config{Port: 3000}
+	cfg := newDefaultConfig()
 	for _, p := range paths {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		if err := json.Unmarshal(data, cfg); err != nil {
+		if err := validateEstimatedPositionsConfig(data); err != nil {
+			return nil, fmt.Errorf("config %s: %w", p, err)
+		}
+		// #694: every candidate decodes into its OWN Config, and the loop
+		// commits it only once the decode succeeded. encoding/json fills
+		// fields as it walks the document and keeps going past a type
+		// error, so a candidate decoded into the shared struct left its
+		// fields -- and its maps, which the next decode merges into rather
+		// than replaces -- behind for whichever file was accepted next.
+		// With map.dhm that was a rejected file switching the terrain
+		// overlay and the profile proxy on, with its own token, under a
+		// config that has no map.dhm at all.
+		candidate := newDefaultConfig()
+		if err := json.Unmarshal(data, candidate); err != nil {
+			log.Printf("[config] %s ignored: %s", p, describeConfigDecodeError(err))
+			continue
+		}
+		// Committed: everything below runs on the accepted candidate only.
+		cfg = candidate
+		if err := cfg.applyCanonicalKeys(configkey.New(data, log.Printf)); err != nil {
+			log.Printf("[config] %s ignored: %v", p, err)
+			cfg = newDefaultConfig()
 			continue
 		}
 		cfg.NormalizeTimestampConfig()
 		cfg.migrateDeprecatedConfig()
+		cfg.warnGatedTileDefaults(log.Printf)
+		cfg.extractTypedMapBlocks()
 		cfg.applyListLimitsDefaults()
+		cfg.normalizeMoments()
+		cfg.RegionGroups = normalizeRegionGroups(cfg.RegionGroups, log.Printf)
 		applyCORSEnv(cfg)
+		cfg.loadHashRegionsFile(p)
 		return cfg, nil
 	}
 	cfg.NormalizeTimestampConfig()
 	cfg.migrateDeprecatedConfig()
+	// No candidate was committed, so Map is whatever newDefaultConfig left
+	// it: nil. extractTypedMapBlocks stays on this path as a no-op guard --
+	// the contract is that no path out of LoadConfig may hand back a Config
+	// whose client-visible Map still holds map.dhm (#680, #694) or
+	// map.heritage (#723) or map.masts (#724).
+	cfg.extractTypedMapBlocks()
 	cfg.applyListLimitsDefaults()
 	applyCORSEnv(cfg)
+	// No config.json anywhere: HASH_REGIONS_PATH alone can still name a
+	// file, and with no config file a relative path has nothing to anchor
+	// at but the working directory.
+	cfg.loadHashRegionsFile("")
 	return cfg, nil // defaults
+}
+
+// loadHashRegionsFile reads the optional hashRegionsPath file once, during
+// config load, and caches its raw entries. A missing or malformed file is
+// logged by the shared loader and leaves the cache empty, so
+// EffectiveHashRegions falls back to the inline list rather than reporting
+// every configured region as unconfigured.
+func (c *Config) loadHashRegionsFile(configPath string) {
+	res, err := regionutil.Load(c.HashRegions, c.HashRegionsPath, configPath, log.Printf)
+	if err != nil {
+		c.hashRegionsFile = nil
+		return
+	}
+	c.hashRegionsFile = res.FileNames
+}
+
+// EffectiveHashRegions returns the configured region-scope names: the
+// normalized, deduplicated union of the inline hashRegions list and the
+// hashRegionsPath file, computed by the same rule the ingestor derives its
+// HMAC keys with (regionutil.Merge).
+//
+// EVERY reader of the configured set must go through this. Reading
+// cfg.HashRegions directly misses the file, which is how the server ends
+// up calling a working scope "unknown" in Observer Neighbors, or dropping
+// it from /api/scope-stats' configured/unused counts.
+//
+// The union is recomputed per call rather than cached, so a caller that
+// assigns HashRegions after load still gets a correct answer. It is a
+// normalize over ~1100 short strings on two low-traffic analytics
+// endpoints, one of which is already response-cached.
+func (c *Config) EffectiveHashRegions() []string {
+	if c == nil {
+		return nil
+	}
+	return regionutil.Merge(c.HashRegions, c.hashRegionsFile)
+}
+
+// WebSocketConfig holds the /ws transport limits (#1794). These sit behind
+// the CheckOrigin allowlist (#1793) and catch non-browser clients, which can
+// omit or forge Origin.
+type WebSocketConfig struct {
+	// MaxClients is the GLOBAL ceiling on concurrent /ws clients (#369).
+	// DEFAULT 512, on. A pointer distinguishes "not configured" from an
+	// explicit 0, which turns the ceiling off.
+	//
+	// Why a global ceiling exists at all: every limit below is conditional on
+	// telling clients apart, and in the shipped Docker topology (bundled
+	// Caddy → localhost:3000, trustedProxies empty) they are all skipped.
+	// This one counts connections, so it holds regardless.
+	//
+	// Why 512, measured rather than guessed:
+	//   - the frontend opens exactly ONE socket per tab (public/app.js), and
+	//     a reconnect replaces it, so concurrent clients ≈ open tabs. A
+	//     regional mesh instance peaks in the tens; 512 is far above that.
+	//   - each accepted client costs ~12 KB of server heap (measured: 200
+	//     real handshakes cost ~25 KB per in-process dialer/server pair), two
+	//     goroutines and one file descriptor. At 512 that is ~6 MB and ~1024
+	//     goroutines — a rounding error next to the packet store.
+	//   - the ceiling's real job is the 256-message send queue each client
+	//     owns: at ~1 KB per broadcast frame, a backed-up client can hold a
+	//     quarter of a megabyte. 512 bounds that worst case at ~130 MB
+	//     instead of "as much as the attacker opens".
+	//   - 512 descriptors is half of the 1024 soft RLIMIT_NOFILE that is
+	//     still the common default, leaving the other half for SQLite, MQTT
+	//     and HTTP.
+	// Operators serving more than a few hundred simultaneous tabs should
+	// raise it; /api/stats reports websocket.clients and
+	// websocket.rejectedGlobalCap, which is the signal to do so.
+	MaxClients *int `json:"maxClients,omitempty"`
+
+	// MaxConnsPerIP caps concurrent /ws connections from one client address.
+	// DEFAULT 0, meaning OFF, and that is a deliberate departure from the
+	// value floated on #1794.
+	//
+	// A cap of 5 is safe only when one address means one household. It does
+	// not on mobile: carrier-grade NAT puts thousands of unrelated subscribers
+	// behind a single public IPv4, so a low cap would refuse real visitors on
+	// phones while barely inconveniencing a scraper that can rent more
+	// addresses. Operators who know their audience can set it; we must not
+	// pick it for them.
+	MaxConnsPerIP int `json:"maxConnsPerIP,omitempty"`
+
+	// UpgradesPerMinPerIP caps handshakes per minute from one client address.
+	// DEFAULT 30, on. Unlike the connection cap this is safe under CGNAT: a
+	// real client upgrades a handful of times per minute even while
+	// reconnecting, so 30 leaves ordinary traffic untouched while flattening
+	// the reconnect loop that makes scrapers expensive.
+	UpgradesPerMinPerIP *int `json:"upgradesPerMinPerIP,omitempty"`
+
+	// TrustedProxies lists the addresses or CIDRs of reverse proxies whose
+	// X-Forwarded-For may be believed. REQUIRED for the limits to do anything
+	// behind nginx/Caddy/Traefik/ingress: without it every visitor shares the
+	// proxy's address, so the limits are skipped and a warning is logged.
+	// X-Forwarded-For is walked from the right, skipping these addresses;
+	// the first untrusted entry is the client (#691), so a proxy may append
+	// to the header or replace it. Never list an address you do not control;
+	// anyone reaching the server from a trusted address can name any client
+	// IP they like.
+	TrustedProxies []string `json:"trustedProxies,omitempty"`
+
+	// Deny blocks addresses outright at the upgrade, before the handshake.
+	// Accepts both bare addresses ("1.2.3.4") and CIDRs ("1.2.3.0/24").
+	// Applies even when clients cannot be told apart, because it is an
+	// explicit instruction rather than an inference.
+	Deny []string `json:"deny,omitempty"`
+}
+
+// WSMaxClients returns the global concurrent-client ceiling (#369),
+// defaulting to wsDefaultMaxClients when unset. An explicit 0 turns it off; a
+// negative value is a typo rather than an intention, so it keeps the default
+// instead of silently removing the ceiling.
+func (c *Config) WSMaxClients() int {
+	if c == nil || c.WebSocket == nil || c.WebSocket.MaxClients == nil {
+		return wsDefaultMaxClients
+	}
+	if v := *c.WebSocket.MaxClients; v >= 0 {
+		return v
+	}
+	return wsDefaultMaxClients
+}
+
+// WSMaxConnsPerIP returns the configured concurrent-connection cap, 0 = off.
+func (c *Config) WSMaxConnsPerIP() int {
+	if c.WebSocket == nil || c.WebSocket.MaxConnsPerIP < 0 {
+		return 0
+	}
+	return c.WebSocket.MaxConnsPerIP
+}
+
+// WSUpgradesPerMinPerIP returns the upgrade-rate cap, defaulting to 30 when
+// unset. A pointer distinguishes "not configured" (use the default) from an
+// explicit 0, which an operator uses to turn the limit off.
+func (c *Config) WSUpgradesPerMinPerIP() int {
+	if c.WebSocket == nil || c.WebSocket.UpgradesPerMinPerIP == nil {
+		return 30
+	}
+	if v := *c.WebSocket.UpgradesPerMinPerIP; v > 0 {
+		return v
+	}
+	return 0
+}
+
+// WSTrustedProxies returns the configured reverse-proxy addresses, if any.
+func (c *Config) WSTrustedProxies() []string {
+	if c.WebSocket == nil {
+		return nil
+	}
+	return c.WebSocket.TrustedProxies
+}
+
+// WSDeny returns the configured deny entries, if any.
+func (c *Config) WSDeny() []string {
+	if c.WebSocket == nil {
+		return nil
+	}
+	return c.WebSocket.Deny
 }
 
 func (c *Config) applyListLimitsDefaults() {
@@ -660,15 +1176,274 @@ func (c *Config) migrateDeprecatedConfig() {
 		migrated = true
 	}
 	if len(c.Tiles) > 0 {
+		// A copy, not the legacy block itself: the two are shipped side by
+		// side, and dropUngatedTileTokens drops the gated tokens from the
+		// legacy one only.
 		for k, v := range c.Tiles {
 			if tilesMap[k] == nil {
-				tilesMap[k] = v
+				tilesMap[k] = cloneJSON(v)
 			}
 		}
 		migrated = true
 	}
 	if migrated {
 		fmt.Fprintf(os.Stderr, "[deprecated] Top-level 'mapDarkTileProvider' and 'tiles' keys in config.json are deprecated and will be ignored in v3.5.0 (see #1165). Please move them into 'map': { 'tiles': { ... } }.\n")
+	}
+}
+
+// applyCanonicalKeys re-reads what encoding/json matched case-insensitively
+// but must only take its canonical, exact-case key (#884): the free-form
+// top-level map and legacy tiles blocks, which /api/config/client ships
+// (a top-level `Map` could publish the base-map token past a canonical
+// gate that is off), and the share and antennaClaims gates. The gates of
+// the lifted map blocks are read the same way by liftMapBlock, through
+// c.keys. Every ignored spelling logs one warning. Runs once, at load,
+// right after the decode.
+func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
+	c.keys = keys
+	// The whole document already decoded, so an exact member decodes too.
+	c.Map, c.Tiles = nil, nil
+	for _, b := range []struct {
+		key string
+		dst *jsonObject
+	}{{"map", &c.Map}, {"tiles", &c.Tiles}} {
+		if raw := keys.Get(b.key); raw != nil {
+			if err := json.Unmarshal(raw, b.dst); err != nil {
+				return err
+			}
+		}
+	}
+	c.applyMaxHopDist(keys, log.Printf)
+	c.Share.Nodes.Enabled = keys.On("share", "nodes", "enabled")
+	c.Share.Packets.Enabled = keys.On("share", "packets", "enabled")
+	c.AntennaClaims.ApplyGates(keys.On)
+	c.ChannelProposals.ApplyGates(keys.On)
+	if c.Privacy != nil {
+		c.Privacy.Enabled = keys.On("privacy", "enabled")
+	}
+	if c.ClientRegions != nil {
+		c.ClientRegions.Enabled = keys.On("clientRegions", "enabled")
+	}
+	if c.ClientRxCoverage != nil {
+		c.ClientRxCoverage.Enabled = keys.On("clientRxCoverage", "enabled")
+	}
+	if c.Moments != nil {
+		c.Moments.Enabled = keys.On("moments", "enabled")
+		c.Moments.Display = readMomentsDisplay(keys, log.Printf)
+	}
+	if c.Dagi != nil {
+		// On by default: only a canonical boolean switches DAGI off (#740).
+		c.Dagi.Enabled = keys.Bool("dagi", "enabled")
+	}
+	c.applyTimestampKeys(keys)
+	c.Kiosk = readKioskConfig(keys, log.Printf)
+	if c.Compression != nil {
+		c.Compression.GZip = keys.On("compression", "gzip")
+		c.Compression.Websocket = keys.On("compression", "websocket")
+	}
+	// On by default: only a canonical boolean decides, a missing key keeps
+	// the default.
+	if c.EstimatedPositions != nil {
+		before := keys.Ignored()
+		c.EstimatedPositions.Enabled = keys.Bool("estimatedPositions", "enabled")
+		if c.EstimatedPositions.Enabled == nil && keys.Ignored() > before {
+			// A variant used to switch this default-on feature off; now it
+			// is ignored, so say that the feature stays on.
+			log.Printf("[config] estimatedPositions: no canonical boolean \"estimatedPositions.enabled\" found, the ignored key above has no effect and estimated positions stay ON; set \"estimatedPositions\": {\"enabled\": false} to turn them off")
+		}
+	}
+	return nil
+}
+
+// maxHopDistLimit is the largest maxHopDist (degrees) accepted; ~10 deg is
+// over 1000 km, far beyond any LoRa hop.
+const maxHopDistLimit = 10.0
+
+// applyMaxHopDist (#912 M3) takes maxHopDist from the exact-case key only
+// (#884) and keeps it only when it is a number the client can use: above 0 and
+// at most maxHopDistLimit degrees. Otherwise it logs one warning and leaves it
+// unset, so the client keeps its default of 1.8 (~200 km).
+func (c *Config) applyMaxHopDist(keys *configkey.Doc, logf func(string, ...interface{})) {
+	c.MaxHopDist = nil
+	raw := keys.Get("maxHopDist")
+	if raw == nil {
+		return
+	}
+	// A non-number never gets here: the struct decode rejects the whole file.
+	var v float64
+	if json.Unmarshal(raw, &v) != nil {
+		return
+	}
+	if !(v > 0 && v <= maxHopDistLimit) { // NaN fails too
+		logf("[config] maxHopDist is out of range (want >0 and <=%v degrees); using the default", maxHopDistLimit)
+		return
+	}
+	c.MaxHopDist = &v
+}
+
+// jsonObject is a JSON object as encoding/json decodes it into
+// interface{}. It is an alias, not a defined type: a decoded object's
+// dynamic type is the unnamed map type, and a type assertion to a defined
+// type would never match it.
+type jsonObject = map[string]interface{}
+
+// jsonObjectAt follows path through nested JSON objects as encoding/json
+// decodes them into interface{}, by exact-case key, and returns the object
+// at its end. Anything that is not an object on the way, or at the end,
+// gives a nil map, which reads as empty.
+func jsonObjectAt(v interface{}, path ...string) (m jsonObject) {
+	for i := 0; ; i++ {
+		m, _ = v.(jsonObject)
+		if i == len(path) {
+			return m
+		}
+		v = m[path[i]]
+	}
+}
+
+// cloneJSON deep-copies a value decoded by encoding/json into interface{}.
+func cloneJSON(v interface{}) interface{} {
+	switch t := v.(type) {
+	case jsonObject:
+		m := make(jsonObject, len(t))
+		for k, e := range t {
+			m[k] = cloneJSON(e)
+		}
+		return m
+	case []interface{}:
+		a := make([]interface{}, len(t))
+		for i, e := range t {
+			a[i] = cloneJSON(e)
+		}
+		return a
+	}
+	return v
+}
+
+// gatedTileProvider is an opt-in tile provider as map-tile-providers.js
+// gates it: its styles share an id prefix, and the provider block must
+// have enabled === true, and with needsToken a non-blank string token.
+type gatedTileProvider struct {
+	key, prefix, warning string
+	needsToken           bool
+}
+
+var gatedTileProviders = []gatedTileProvider{
+	{key: "esri", prefix: "esri-",
+		warning: "Esri styles are opt-in since #728 and map.tiles.providers.esri.enabled is not true: browsers will skip it and show the fallback base map. Set map.tiles.providers.esri.enabled to true to keep it."},
+	{key: "dataforsyningen", prefix: "dataforsyningen-", needsToken: true,
+		warning: "the Dataforsyningen styles are opt-in (#741) and need map.tiles.providers.dataforsyningen.enabled set to true and a non-empty map.tiles.providers.dataforsyningen.token: browsers will skip it and show the fallback base map."},
+}
+
+// on reports whether block switches g on, read as map-tile-providers.js
+// reads it: exact-case keys, enabled the JSON boolean true, and with
+// needsToken a string token that is not blank.
+func (g gatedTileProvider) on(block jsonObject) bool {
+	enabled, _ := block["enabled"].(bool)
+	token, _ := block["token"].(string)
+	return enabled && (!g.needsToken || strings.TrimSpace(token) != "")
+}
+
+// dropUngatedTileTokens keeps a gated provider's token out of
+// /api/config/client unless the browser would use it. The Dataforsyningen
+// base-map token (#741) is client-visible on purpose, but only while
+// map.tiles.providers.dataforsyningen is switched on: an operator who
+// answers misuse with enabled false must stop publishing it. The browser
+// reads that one exact-case path and nothing else, so in every block named
+// like map.tiles, its providers or the provider, in any spelling, and in
+// the legacy top-level tiles, which the browser never reads (what it needs
+// was copied into map.tiles by migrateDeprecatedConfig), every token key
+// of any spelling is deleted; the one exception is the exact-case token at
+// the exact-case path while that block is on. A block on the way that is
+// not an object holds no gate the browser can read, so it is deleted
+// whole. A non-blank value dropped is logged by key, never by value. Runs
+// once, at load, after migrateDeprecatedConfig.
+func (c *Config) dropUngatedTileTokens() {
+	var dropped []string
+	for k, v := range c.Map {
+		if !strings.EqualFold(k, "tiles") {
+			continue
+		}
+		tiles := jsonObjectAt(v)
+		if tiles == nil {
+			delete(c.Map, k)
+			dropped = append(dropped, "map."+k)
+			continue
+		}
+		dropUngatedTokensIn(tiles, "map."+k, k == "tiles", &dropped)
+	}
+	dropUngatedTokensIn(c.Tiles, "tiles", false, &dropped)
+	for _, p := range dropped {
+		log.Printf("[config] %s was removed from the client config: the Dataforsyningen base-map token is shipped to browsers only as map.tiles.providers.dataforsyningen.token, and only while that block's enabled is true and its token is non-empty", p)
+	}
+}
+
+// dropUngatedTokensIn drops the gated tokens from tiles, a map.tiles-like
+// block at path; readable says whether the browser reads that block.
+func dropUngatedTokensIn(tiles jsonObject, path string, readable bool, dropped *[]string) {
+	for pk, p := range tiles {
+		if !strings.EqualFold(pk, "providers") {
+			continue
+		}
+		providers := jsonObjectAt(p)
+		if providers == nil {
+			delete(tiles, pk)
+			*dropped = append(*dropped, path+"."+pk)
+			continue
+		}
+		for k, v := range providers {
+			for _, g := range gatedTileProviders {
+				if !g.needsToken || !strings.EqualFold(k, g.key) {
+					continue
+				}
+				block := jsonObjectAt(v)
+				if block == nil {
+					delete(providers, k)
+					*dropped = append(*dropped, path+"."+pk+"."+k)
+					continue
+				}
+				keep := readable && pk == "providers" && k == g.key && g.on(block)
+				for bk, bv := range block {
+					if !strings.EqualFold(bk, "token") || (keep && bk == "token") {
+						continue
+					}
+					delete(block, bk)
+					if str, isStr := bv.(string); !isStr || strings.TrimSpace(str) != "" {
+						*dropped = append(*dropped, path+"."+pk+"."+k+"."+bk)
+					}
+				}
+			}
+		}
+	}
+}
+
+// warnGatedTileDefaults logs when map.tiles.darkDefault or lightDefault
+// names a style of a gated provider that is not switched on: an Esri style
+// while map.tiles.providers.esri.enabled is not true (#728), or a
+// Dataforsyningen style without enabled true and a token (#741). The
+// browser then skips that default and shows the fallback base map; an
+// operator who upgraded with Esri Dark Gray as the dark default should find
+// out from the server log, not from a changed map. It runs after
+// migrateDeprecatedConfig, so a legacy top-level mapDarkTileProvider is
+// checked too. It only looks (dropUngatedTileTokens edits, later), and
+// reads the keys exactly as map-tile-providers.js does: exact-case keys
+// (encoding/json would match them case-insensitively), only the JSON
+// boolean true enables a provider, and a default that is not a string is
+// ignored without hiding the other one.
+func (c *Config) warnGatedTileDefaults(logf func(string, ...interface{})) {
+	if c == nil {
+		return
+	}
+	tiles := jsonObjectAt(c.Map, "tiles")
+	for _, g := range gatedTileProviders {
+		if g.on(jsonObjectAt(tiles, "providers", g.key)) {
+			continue
+		}
+		for _, key := range []string{"darkDefault", "lightDefault"} {
+			if id, _ := tiles[key].(string); strings.HasPrefix(id, g.prefix) {
+				logf("[config] map.tiles.%s is %q, but "+g.warning, key, id)
+			}
+		}
 	}
 }
 
@@ -808,6 +1583,27 @@ func (c *Config) NormalizeTimestampConfig() {
 	}
 }
 
+// applyTimestampKeys (#969) re-reads the timestamps block by its exact keys
+// (#884): since #969 the browser uses it, and allowCustomFormat is the
+// operator's gate for a free-form format string, so a case variant must
+// neither open it nor override a canonical value. A variant logs one
+// warning; a block found only under a variant key is no block.
+func (c *Config) applyTimestampKeys(keys *configkey.Doc) {
+	if raw := keys.Get("timestamps"); raw == nil || string(raw) == "null" {
+		c.Timestamps = nil
+		return
+	}
+	ts := TimestampConfig{AllowCustomFormat: keys.On("timestamps", "allowCustomFormat")}
+	for _, f := range []struct {
+		key string
+		dst *string
+	}{{"defaultMode", &ts.DefaultMode}, {"timezone", &ts.Timezone}, {"formatPreset", &ts.FormatPreset}, {"customFormat", &ts.CustomFormat}} {
+		// The struct decode already rejected a non-string value.
+		_ = json.Unmarshal(keys.Get("timestamps", f.key), f.dst)
+	}
+	c.Timestamps = &ts
+}
+
 func (c *Config) GetTimestampConfig() TimestampConfig {
 	if c == nil || c.Timestamps == nil {
 		return defaultTimestampConfig()
@@ -896,13 +1692,29 @@ func (c *Config) BlacklistGeneration() uint64 {
 // lazily on first read from c.NodeBlacklist (covering the JSON-load path
 // where the setter was never called).
 func (c *Config) IsBlacklisted(pubkey string) bool {
-	if c == nil {
+	set := c.blacklistSet()
+	if len(set) == 0 {
 		return false
+	}
+	return set[strings.ToLower(strings.TrimSpace(pubkey))]
+}
+
+// HasNodeBlacklist reports whether at least one (non-blank) pubkey is
+// blacklisted. It reads the same atomic set as IsBlacklisted, so unlike
+// len(c.NodeBlacklist) it is safe against a concurrent SetNodeBlacklist.
+func (c *Config) HasNodeBlacklist() bool {
+	return len(c.blacklistSet()) > 0
+}
+
+// blacklistSet returns the active normalised blacklist set (shared,
+// read-only), materialising it lazily from the JSON-loaded slice on first
+// read. CAS-style: if another goroutine wins the race, ours is dropped.
+func (c *Config) blacklistSet() map[string]bool {
+	if c == nil {
+		return nil
 	}
 	mp := c.blacklistSetPtr.Load()
 	if mp == nil {
-		// Lazy first-read materialisation from the JSON-loaded slice.
-		// CAS-style: if another goroutine wins the race, drop ours.
 		built := buildBlacklistSet(c.NodeBlacklist)
 		if c.blacklistSetPtr.CompareAndSwap(nil, &built) {
 			mp = &built
@@ -910,10 +1722,10 @@ func (c *Config) IsBlacklisted(pubkey string) bool {
 			mp = c.blacklistSetPtr.Load()
 		}
 	}
-	if mp == nil || len(*mp) == 0 {
-		return false
+	if mp == nil {
+		return nil
 	}
-	return (*mp)[strings.ToLower(strings.TrimSpace(pubkey))]
+	return *mp
 }
 
 // IsNameHidden returns true if the given node name starts with any of the
@@ -928,25 +1740,7 @@ func (c *Config) IsBlacklisted(pubkey string) bool {
 // IsBlacklisted's CAS-style lazy first-read materialisation for the
 // JSON-load path where SetHiddenNamePrefixes was never called.
 func (c *Config) IsNameHidden(name string) bool {
-	if c == nil {
-		return false
-	}
-	pp := c.hiddenPrefixesPtr.Load()
-	if pp == nil {
-		// Lazy first-read materialisation from the JSON-loaded slice.
-		// CAS-style: if another goroutine wins the race, drop ours.
-		built := make([]string, len(c.HiddenNamePrefixes))
-		copy(built, c.HiddenNamePrefixes)
-		if c.hiddenPrefixesPtr.CompareAndSwap(nil, &built) {
-			pp = &built
-		} else {
-			pp = c.hiddenPrefixesPtr.Load()
-		}
-	}
-	if pp == nil || len(*pp) == 0 {
-		return false
-	}
-	for _, p := range *pp {
+	for _, p := range c.hiddenPrefixes() {
 		if p == "" {
 			continue
 		}
@@ -955,6 +1749,43 @@ func (c *Config) IsNameHidden(name string) bool {
 		}
 	}
 	return false
+}
+
+// hiddenPrefixes returns the active hide-prefix slice (shared, read-only),
+// materialising it lazily from the JSON-loaded HiddenNamePrefixes on first
+// read. CAS-style: if another goroutine wins the race, ours is dropped.
+func (c *Config) hiddenPrefixes() []string {
+	if c == nil {
+		return nil
+	}
+	pp := c.hiddenPrefixesPtr.Load()
+	if pp == nil {
+		built := make([]string, len(c.HiddenNamePrefixes))
+		copy(built, c.HiddenNamePrefixes)
+		if c.hiddenPrefixesPtr.CompareAndSwap(nil, &built) {
+			pp = &built
+		} else {
+			pp = c.hiddenPrefixesPtr.Load()
+		}
+	}
+	if pp == nil {
+		return nil
+	}
+	return *pp
+}
+
+// EnforcedHiddenNamePrefixes returns (a copy of) exactly the prefixes
+// IsNameHidden enforces — every non-empty entry, a whitespace-only one
+// included — or nil when none is active, so callers can skip name lookups
+// safely and match the same prefixes elsewhere (e.g. in SQL).
+func (c *Config) EnforcedHiddenNamePrefixes() []string {
+	var out []string
+	for _, p := range c.hiddenPrefixes() {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ActiveHiddenNamePrefixes returns a copy of the hide prefixes IsNameHidden
@@ -967,24 +1798,12 @@ func (c *Config) IsNameHidden(name string) bool {
 // instead of hardcoding one. An empty result means the deployment offers no
 // prefix-based hiding, and the page must not claim it does.
 func (c *Config) ActiveHiddenNamePrefixes() []string {
-	if c == nil {
+	prefixes := c.hiddenPrefixes()
+	if prefixes == nil {
 		return nil
 	}
-	pp := c.hiddenPrefixesPtr.Load()
-	if pp == nil {
-		built := make([]string, len(c.HiddenNamePrefixes))
-		copy(built, c.HiddenNamePrefixes)
-		if c.hiddenPrefixesPtr.CompareAndSwap(nil, &built) {
-			pp = &built
-		} else {
-			pp = c.hiddenPrefixesPtr.Load()
-		}
-	}
-	if pp == nil {
-		return nil
-	}
-	out := make([]string, 0, len(*pp))
-	for _, p := range *pp {
+	out := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
@@ -1022,9 +1841,70 @@ func (c *Config) HiddenNamePrefixesGeneration() uint64 {
 	return c.hiddenPrefixesGen.Load()
 }
 
+// Test seams for the atomic config replacement in SaveGeoFilter (#340).
+// Production always uses the os functions; tests swap them to provoke
+// metadata, write and rename failures, which no portable filesystem setup can
+// trigger reliably.
+var (
+	configCreateTemp = os.CreateTemp
+	configRename     = os.Rename
+	configStatFile   = func(f *os.File) (os.FileInfo, error) { return f.Stat() }
+)
+
+// ErrConfigReadOnly marks a SaveGeoFilter failure caused by the deployment
+// arrangement rather than by the data: config.json or its directory cannot be
+// written by this process — a read-only mount, or the server running as a
+// non-root user without write access (#339). Callers report it as such
+// instead of as a generic save failure.
+var ErrConfigReadOnly = errors.New("config.json is read-only for the server")
+
+// configWritesDisabled reports whether the deployment forbids the server to
+// write config.json at all: the container's opt-in non-root mode (#339),
+// which the entrypoint passes on to the services. There config.json belongs
+// to the host or root, and the refusal must not depend on which directory a
+// save would happen to resolve to (#339 review, finding 2; #422).
+func configWritesDisabled() bool {
+	switch os.Getenv("CORESCOPE_RUN_AS_NONROOT") {
+	case "1", "true":
+		return true
+	}
+	return false
+}
+
+// configReadOnlyErr wraps a create/rename failure in ErrConfigReadOnly when
+// its cause is a permission or read-only-filesystem error.
+func configReadOnlyErr(op string, err error) error {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS) {
+		return fmt.Errorf("%w: %s: %w", ErrConfigReadOnly, op, err)
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
 // SaveGeoFilter writes the geo_filter section back to config.json on disk.
 // Pass gf=nil to remove the filter. The rest of config.json is preserved as-is.
+//
+// The replacement is atomic and permission-preserving (#340). config.json can
+// hold broker credentials, so a file deliberately restricted to 0600 must not
+// come back 0644 just because the geo filter was edited in the UI — and a
+// deliberately group-readable 0644 must not silently tighten either. Three
+// properties carry that:
+//
+//   - The mode is read from the same descriptor the contents are read from, so
+//     the bits written back belong to the bytes that were parsed. If that
+//     metadata is unavailable the save fails instead of guessing a default.
+//   - The replacement file is created under a unique name in the destination
+//     directory via os.CreateTemp (O_EXCL), so a pre-existing config.json.tmp
+//     — stale file, planted symlink or hard link to somewhere else — is never
+//     opened, never written through and never removed by this function.
+//   - The preserved mode is applied with an explicit chmod on our own
+//     descriptor, which makes the result independent of the process umask.
+//     Copying upstream's WriteFile mode argument would not do either: the mode
+//     argument is ignored for a file that already exists, and it is masked by
+//     the umask for one that does not.
 func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
+	if configWritesDisabled() {
+		return fmt.Errorf("%w: CORESCOPE_RUN_AS_NONROOT is on", ErrConfigReadOnly)
+	}
 	var configPath string
 	for _, p := range []string{
 		filepath.Join(configDir, "config.json"),
@@ -1038,8 +1918,31 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	if configPath == "" {
 		return fmt.Errorf("config.json not found in %s", configDir)
 	}
+	// Resolve the selected file before creating its replacement. Containers
+	// can link config.json into a persistent data directory: renaming over
+	// that link would save only in the container layer and leave the mounted
+	// config unchanged. Using the effective path also keeps temp + rename
+	// together on the target filesystem, including relative/chained links.
+	resolvedPath, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		return fmt.Errorf("resolve config: %w", err)
+	}
+	configPath = resolvedPath
 
-	data, err := os.ReadFile(configPath)
+	src, err := os.Open(configPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	info, err := configStatFile(src)
+	if err != nil {
+		src.Close()
+		return fmt.Errorf("stat config: %w", err)
+	}
+	mode := info.Mode().Perm()
+	data, err := io.ReadAll(src)
+	if cerr := src.Close(); err == nil {
+		err = cerr
+	}
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
 	}
@@ -1066,16 +1969,67 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	}
 	out = append(out, '\n')
 
-	// Atomic write: temp file + rename.
-	tmp := configPath + ".tmp"
-	if err := os.WriteFile(tmp, out, 0644); err != nil {
+	// Atomic write: unique temp file in the destination directory + rename.
+	tmpFile, err := configCreateTemp(filepath.Dir(configPath), filepath.Base(configPath)+".*.tmp")
+	if err != nil {
+		return configReadOnlyErr("create temp config", err)
+	}
+	tmpName := tmpFile.Name()
+	renamed := false
+	defer func() {
+		if renamed {
+			return
+		}
+		// Only ever our own uniquely named file; a pre-existing
+		// config.json.tmp is left alone.
+		tmpFile.Close()
+		os.Remove(tmpName)
+	}()
+
+	if err := tmpFile.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod temp config: %w", err)
+	}
+	preserveConfigOwner(tmpFile, info)
+	if _, err := tmpFile.Write(out); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
-	if err := os.Rename(tmp, configPath); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename config: %w", err)
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("sync config: %w", err)
 	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	if err := configRename(tmpName, configPath); err != nil {
+		return configReadOnlyErr("rename config", err)
+	}
+	renamed = true
 	return nil
+}
+
+// preserveConfigOwner best-effort carries the replaced file's uid/gid over to
+// its replacement. It is a no-op in the normal case, where the saving process
+// already owns the file it is rewriting — the only arrangement in which it can
+// write at all once the server runs as a non-root container user (#339).
+//
+// It matters only for a privileged process rewriting a bind-mounted config
+// owned by a host user: without the chown the file would silently become
+// root-owned and the host user could no longer edit it. An unprivileged
+// process cannot chown to a foreign uid, so the failure is ignored rather than
+// aborting a save whose security-relevant part — the permission bits — already
+// succeeded.
+func preserveConfigOwner(f *os.File, want os.FileInfo) {
+	wantUID, wantGID, ok := configFileOwnerIDs(want)
+	if !ok {
+		return
+	}
+	cur, err := configStatFile(f)
+	if err != nil {
+		return
+	}
+	if curUID, curGID, ok := configFileOwnerIDs(cur); ok && curUID == wantUID && curGID == wantGID {
+		return
+	}
+	_ = f.Chown(wantUID, wantGID)
 }
 
 // obsBlacklistSet lazily builds and caches the observerBlacklist as a set for O(1) lookups.
@@ -1115,10 +2069,18 @@ func (c *Config) IsObserverBlacklisted(id string) bool {
 //
 // RecomputeIntervalSeconds keys (all optional):
 //
-//	topology, rf, distance, channels, hashCollisions, hashSizes, roles, observersClockSkew, nodesClockSkew
+//	topology, rf, distance, channels, hashCollisions, hashSizes, roles, observersClockSkew, nodesClockSkew,
+//	advertIntervals (#245 M2)
 type AnalyticsConfig struct {
 	DefaultIntervalSeconds   int            `json:"defaultIntervalSeconds,omitempty"`
 	RecomputeIntervalSeconds map[string]int `json:"recomputeIntervalSeconds,omitempty"`
+	// PauseWhenIdle (#492) skips a scheduled recompute when nothing read
+	// that endpoint's default snapshot since the previous recompute. The
+	// first read after a pause is served the existing snapshot at once
+	// (it can be older than the interval and is marked stale in the
+	// X-Analytics-Snapshot header) and wakes one refresh. Off by default:
+	// every endpoint recomputes on its interval whether read or not.
+	PauseWhenIdle bool `json:"pauseWhenIdle,omitempty"`
 	// LoRaPreset is the assumed PHY preset used by the relay-airtime-share
 	// metric to compute true Time-on-Air (issue #1768). Defaults to the
 	// EU MeshCore deployment: 869.6 MHz / BW 62.5 kHz / SF 8 / CR 4/5.
@@ -1145,11 +2107,17 @@ func (c *Config) AnalyticsDefaultRecomputeInterval() time.Duration {
 	return 5 * time.Minute
 }
 
+// AnalyticsPauseWhenIdle reports whether idle analytics recomputes are
+// skipped (#492). False for a nil config or an absent analytics block.
+func (c *Config) AnalyticsPauseWhenIdle() bool {
+	return c != nil && c.Analytics != nil && c.Analytics.PauseWhenIdle
+}
+
 // AnalyticsRecomputeIntervals returns the per-endpoint override map.
 // Returns the zero value (all defaults) if the analytics block is
 // absent or empty.
 func (c *Config) AnalyticsRecomputeIntervals() AnalyticsRecomputeIntervals {
-	out := AnalyticsRecomputeIntervals{}
+	out := AnalyticsRecomputeIntervals{PauseWhenIdle: c.AnalyticsPauseWhenIdle()}
 	if c == nil || c.Analytics == nil || c.Analytics.RecomputeIntervalSeconds == nil {
 		return out
 	}
@@ -1169,5 +2137,133 @@ func (c *Config) AnalyticsRecomputeIntervals() AnalyticsRecomputeIntervals {
 	out.Roles = get("roles")
 	out.ObserversClockSkew = get("observersClockSkew")
 	out.NodesClockSkew = get("nodesClockSkew")
+	out.AdvertIntervals = get("advertIntervals")
 	return out
+}
+
+// RegionPlacementConfig is the optional regionPlacement block (#488 M2).
+// Every field defaults to today's behaviour; the values are meant for the
+// customizer in a later milestone (AGENTS.md rule 8).
+type RegionPlacementConfig struct {
+	// Mode is "heard" (default: a node is in every region whose observers
+	// heard any of its adverts) or "placed" (direct evidence first, then
+	// the capped fewest-hops fallback, else no region).
+	Mode string `json:"mode,omitempty"`
+	// MaxHops caps the fewest-hops fallback. Default 3, bounded to
+	// 0..regionPlacementHopSlots-1.
+	MaxHops *int `json:"maxHops,omitempty"`
+	// LifetimeDays is the evidence window, anchored at the node's own
+	// newest hearing. Default 30; 0 = no window (all retained history).
+	LifetimeDays *int `json:"lifetimeDays,omitempty"`
+	// PersistSpanHours turns on the transient-region rule: direct regions
+	// whose evidence spans less than this are dropped when another direct
+	// region's evidence spans at least this. Default 0 = off (deferred).
+	PersistSpanHours *int `json:"persistSpanHours,omitempty"`
+}
+
+// Upper bounds that keep time.Duration from overflowing (it holds about
+// 106,751 days): 100 years of lifetime, and the same span in hours.
+const (
+	regionPlacementMaxLifetimeDays     = 36500
+	regionPlacementMaxPersistSpanHours = regionPlacementMaxLifetimeDays * 24
+)
+
+// RegionPlacementSettings resolves the regionPlacement block, logging and
+// replacing values it cannot use.
+func (c *Config) RegionPlacementSettings() regionPlacementSettings {
+	out := regionPlacementSettings{Mode: regionModeHeard, Params: defaultRegionPlacementParams}
+	rp := c.RegionPlacement
+	if rp == nil {
+		return out
+	}
+	switch mode := strings.ToLower(strings.TrimSpace(rp.Mode)); mode {
+	case "", regionModeHeard:
+	case regionModePlaced:
+		out.Mode = regionModePlaced
+	default:
+		log.Printf("[config] regionPlacement.mode %q is not heard or placed; using heard", rp.Mode)
+	}
+	if rp.MaxHops != nil {
+		out.Params.MaxHops = min(max(*rp.MaxHops, 0), regionPlacementHopSlots-1)
+		if out.Params.MaxHops != *rp.MaxHops {
+			log.Printf("[config] regionPlacement.maxHops %d is outside 0..%d; using %d",
+				*rp.MaxHops, regionPlacementHopSlots-1, out.Params.MaxHops)
+		}
+	}
+	if rp.LifetimeDays != nil {
+		if *rp.LifetimeDays >= 0 {
+			days := min(*rp.LifetimeDays, regionPlacementMaxLifetimeDays)
+			if days != *rp.LifetimeDays {
+				log.Printf("[config] regionPlacement.lifetimeDays %d is above %d; using %d",
+					*rp.LifetimeDays, regionPlacementMaxLifetimeDays, days)
+			}
+			out.Params.Lifetime = time.Duration(days) * 24 * time.Hour
+		} else {
+			log.Printf("[config] regionPlacement.lifetimeDays %d is negative; using the default", *rp.LifetimeDays)
+		}
+	}
+	if rp.PersistSpanHours != nil {
+		if *rp.PersistSpanHours >= 0 {
+			hours := min(*rp.PersistSpanHours, regionPlacementMaxPersistSpanHours)
+			if hours != *rp.PersistSpanHours {
+				log.Printf("[config] regionPlacement.persistSpanHours %d is above %d; using %d",
+					*rp.PersistSpanHours, regionPlacementMaxPersistSpanHours, hours)
+			}
+			out.Params.PersistSpan = time.Duration(hours) * time.Hour
+		} else {
+			log.Printf("[config] regionPlacement.persistSpanHours %d is negative; using the default", *rp.PersistSpanHours)
+		}
+	}
+	return out
+}
+
+// liftMapBlock moves c.Map[key] into *dst and deletes it from c.Map, which
+// /api/config/client ships verbatim. The raw block is deleted even when it
+// is malformed; *dst is then left zero (feature off) with a warning.
+//
+// Key lookup in c.Map is case-sensitive. A case variant (`DHM`, `Dhm`, …)
+// is removed too, with a warning, but it does not fill *dst: only the
+// documented spelling does, so the result never depends on which of several
+// spellings map iteration meets first.
+//
+// gate, when not nil, returns *dst's enabled switch: once the block is
+// decoded, it is set from map.<key>.enabled read by its exact-case key
+// (#884), so `Enabled` cannot switch the feature on. A Config that did not
+// come from LoadConfig has no c.keys and keeps the decoded value.
+func liftMapBlock[T any](c *Config, key, feature string, dst *T, gate func(*T) *bool) bool {
+	m := c.Map
+	if m == nil {
+		return false
+	}
+	for k := range m {
+		if k != key && strings.EqualFold(k, key) {
+			delete(m, k)
+			log.Printf("[%s] config map.%s ignored and removed from the client config; the key must be spelled map.%s", key, k, key)
+			// One line per ignored key: the exact-key reader must not
+			// report the same spelling again (#888).
+			if c.keys != nil {
+				c.keys.Reported("map", k)
+			}
+		}
+	}
+	raw, ok := m[key]
+	if !ok {
+		return false
+	}
+	delete(m, key)
+	var zero T
+	*dst = zero
+	b, err := json.Marshal(raw)
+	if err == nil {
+		err = json.Unmarshal(b, dst)
+	}
+	if err != nil {
+		*dst = zero
+		log.Printf("[%s] config map.%s is malformed; %s disabled", key, key, feature)
+		return false
+	}
+	if gate != nil && c.keys != nil {
+		*gate(dst) = c.keys.On("map", key, "enabled")
+	}
+	return true
 }

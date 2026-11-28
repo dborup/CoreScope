@@ -70,11 +70,34 @@ const ALLOW_SUBSTRINGS = [
   '// userAdded so the',
 ];
 
+// Exact, file-specific exceptions. Each text must occur exactly once in its
+// file; only that occurrence is cut out before the scan, so any other emoji on
+// the same line, a second copy, or the same text in another file still fails.
+const ALLOW_EXACT = {
+  'channels.js': [
+    // Ping bot (2026-07-23, after the M3 sweep). The 🏓 is message *content*
+    // (the text of the CoreScopeBot reply), not UI chrome.
+    "text: '🏓 pong! '",
+    // Ping-bot message avatar: still the 🤖 glyph because the sprite has no
+    // robot symbol yet. TODO: add ph-robot to phosphor-sprite.svg, swap the
+    // avatar and drop this entry.
+    '<div class="ch-avatar" aria-hidden="true" style="background:var(--text-muted)">🤖</div>',
+  ],
+};
+
 function scanFile(rel) {
   const abs = path.join(ROOT, rel);
-  const txt = fs.readFileSync(abs, 'utf8');
-  const lines = txt.split('\n');
+  let txt = fs.readFileSync(abs, 'utf8');
   const hits = [];
+  for (const exact of ALLOW_EXACT[rel] || []) {
+    const n = txt.split(exact).length - 1;
+    if (n !== 1) {
+      hits.push({ file: rel, line: 0, kind: 'allow', text: `exception must occur exactly once, found ${n}: ${exact}` });
+      continue;
+    }
+    txt = txt.replace(exact, '');
+  }
+  const lines = txt.split('\n');
   lines.forEach((line, idx) => {
     if (ALLOW_SUBSTRINGS.some(s => line.includes(s))) return;
     const e = EMOJI.test(line);

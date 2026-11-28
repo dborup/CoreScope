@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/meshcore-analyzer/regions"
 )
 
 // routeMeta holds metadata for a single API route.
@@ -22,13 +24,35 @@ type routeMeta struct {
 	// generic {"type":"object"} placeholder. Use schemaRef(...) to point
 	// at a named entry in components/schemas (see componentSchemas).
 	Response map[string]interface{} `json:"-"`
+	// Errors documents the non-200 status codes a route answers with, on top
+	// of the 400/404/405 the whole API shares (see info.description). Bodies
+	// are always the ApiError shape writeError produces (#266).
+	Errors []routeError `json:"-"`
+}
+
+// routeError is one documented non-200 response of a route (#334).
+type routeError struct {
+	Status      string // HTTP status code, e.g. "413"
+	Description string
 }
 
 type paramMeta struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Required    bool   `json:"required,omitempty"`
-	Type        string `json:"type"` // "string", "integer", "boolean"
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Required    bool     `json:"required,omitempty"`
+	Type        string   `json:"type"`           // "string", "integer", "boolean"
+	Enum        []string `json:"enum,omitempty"` // the only accepted values, if fixed
+}
+
+// dagiParamMetas documents the #740 DAGI params of an endpoint; what says
+// what a code does there.
+func dagiParamMetas(what string) []paramMeta {
+	return []paramMeta{
+		{Name: "kommune", Description: "DAGI kommunekode (e.g. 0751, GET /api/config/dagi). " + what, Type: "string"},
+		{Name: "landsdel", Description: "DAGI landsdel id_lokalid (e.g. 218546), as kommune.", Type: "string"},
+		{Name: "dkregion", Description: "DAGI regionskode (e.g. 1082), as kommune. Not region, the observer IATA filter.", Type: "string"},
+		{Name: "postnr", Description: "Postnummer (e.g. 8000), as kommune; a node at sea matches none, and a street postcode selects its group.", Type: "string"},
+	}
 }
 
 // routeDescriptions returns metadata for all known API routes.
@@ -36,18 +60,164 @@ type paramMeta struct {
 func routeDescriptions() map[string]routeMeta {
 	return map[string]routeMeta{
 		// Config
-		"GET /api/config/cache":      {Summary: "Get cache configuration", Tag: "config"},
-		"GET /api/config/client":     {Summary: "Get client configuration", Tag: "config"},
-		"GET /api/config/regions":    {Summary: "Get configured regions", Tag: "config"},
+		"GET /api/config/cache":          {Summary: "Get cache configuration", Tag: "config"},
+		"GET /api/config/client":         {Summary: "Client-visible operator configuration", Description: "Includes estimatedPositions: {enabled: boolean}, the effective server-startup policy for neighbor-derived position estimates. Missing server configuration defaults to enabled; explicit false suppresses these estimates in node detail, live and archived paths, and estimate-dependent analytics. Reported GPS and independent IATA/name-match observer positioning are unchanged. Restart the server to change the policy.", Tag: "config"},
+		"GET /api/config/regions":        {Summary: "Get configured regions", Tag: "config"},
+		"GET /api/config/regions/groups": {Summary: "Get configured region quick-pick groups", Tag: "config"},
+
+		// DAGI (#740 M2)
+		"GET /api/config/dagi": {Summary: "DAGI filter values (kommune, landsdel, region, postnummer)", Description: "#740 M2: what the DAGI filters accept, from Klimadatastyrelsen's administrative boundaries (DAGI, embedded). {enabled, credit, source: {owner, dataset, datasetUrl, license, licenseUrl, termsUrl, generation, downloaded}, layers: [{layer, param, areas: [{code, name, outsideKommune?, codes?}]}]}. Layers in order kommune (param kommune, kommunekode), landsdel (param landsdel, the DAGI id_lokalid: the asset has no NUTS code), region (param dkregion, regionskode; region is the observer IATA filter) and postnummer (param postnr). Entries are sorted by code; names are for the client to sort. Street postcodes are not listed one by one: every postnummer named like a street postcode (København K, København V, Frederiksberg C) is one entry, coded by the group's lowest code, with every member in codes; each member code selects the group. The credit must be shown with anything drawn from the data. With dagi.enabled false: {enabled: false, layers: []}. The params filter GET /api/nodes, GET /api/packets (by the ADVERT sender) and every endpoint that takes area, by the node's own position, ANDed with area, region and each other; nodes without a usable position match none.", Tag: "config"},
+		"GET /api/config/dagi/polygons": {Summary: "DAGI boundaries to draw", Description: "#740 M2: the simplified DAGI polygons of one layer, or of one code: {layer, param, credit, quantum, encoding, features: [{code, name, group?, rings}]}. rings are the asset's own encoding: [lon0, lat0, dlon, dlat, ...] in quantum degrees, the closing vertex implicit, even-odd. group is set on the members of a postnummer group, and a member code returns the whole group. Cache-Control public, max-age=86400, and an ETag (If-None-Match, compared weakly and as a list, gives 304). About 310 KB (137 KB gzipped) for the whole kommune layer.", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "layer", Description: "The layer.", Type: "string", Required: true, Enum: []string{"kommune", "landsdel", "region", "postnummer"}},
+				{Name: "code", Description: "Only this code's feature (a postnummer group: every member). Omitted: the whole layer.", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "No or an unknown layer, or an empty code."},
+				{Status: "404", Description: "An unknown code, or DAGI is off (dagi.enabled false)."},
+			}},
+
+		"GET /api/regions/observed": {Summary: "Observed scoped relay positions", Description: "Bulk Regions map snapshot with selectable 1h, 24h or 7d window. Includes unpositioned scoped relays, current identity visibility filters, conservative retained-history coverage and explicit node/scope truncation flags. Reported positions are self-reported coordinates; neighbor estimates are excluded. Window bounds end at generatedAt, the shared relay snapshot time (normally refreshed every five minutes).", Tag: "analytics", Response: schemaRef("RegionsObservedResponse"),
+			QueryParams: []paramMeta{{Name: "window", Description: "1h, 24h (default), or 7d", Type: "string"}},
+			Errors:      []routeError{{Status: "400", Description: "Invalid window."}, {Status: "500", Description: "Current identity or node metadata could not be read."}, {Status: "503", Description: "Relay snapshot is unavailable or warming up."}}},
 		"GET /api/config/theme":      {Summary: "Get theme configuration", Description: "Returns color maps, CSS variables, and theme defaults.", Tag: "config"},
 		"GET /api/config/map":        {Summary: "Get map configuration", Tag: "config"},
 		"GET /api/config/geo-filter": {Summary: "Get geo-filter configuration", Tag: "config"},
+		"GET /api/map/dhm/wms": {Summary: "DHM overlay tile: hillshade, surface hillshade, contours or colour by elevation (WMS proxy; hillshade exaggerated by default, terrain fallback)", Description: "Read-only proxy for one 256x256 EPSG:3857 tile of a Danmarks Hojdemodel overlay from Dataforsyningen; the server adds its access token. layers=terrain, surface, contours or elevation names the overlay, and the server maps it to the upstream layer; no upstream layer name is accepted (#734). elevation is not an upstream layer: the server renders it from one dhm_wcs_DAF GetCoverage of the DTM (dhm_terraen) per tile, zoom 9-13, as a 256x256 paletted PNG coloured by height on a fixed ramp tuned to Danish land (stops 0-175 m, dhm.overlays[].legendM), transparent at 0 m (sea and outside Denmark) and nodata (#792, #860); its styles is the ramp id dhm.overlays[].style, so a new ramp is a new tile URL. terrain is the hillshade described below; surface is dhm_overflade_skyggekort from dhm_DAF, zoom 7-19; contours is dhm_kurve_traditionel from dhm_DAF, zoom 14-19 (2.5 m contour lines). surface, contours and elevation have no fallback: a failed tile is unavailable. layers=dhm_terraen_skyggekort, the #680 value, is an alias of terrain for one release. Accepts exactly service=WMS, request=GetMap, version=1.3.0, one layers value as above, styles=, format=image/png, transparent=true, width=256, height=256, crs=EPSG:3857 and a bbox that is one web-mercator tile at a zoom inside the overlay's range; anything else is 400. map.dhm.layer picks the terrain upstream: exaggerated (default; quickDHM_skyggekort_terraen_overdrevet from wms/dhm_temp, falling back per tile to dhm_terraen_skyggekort when it answers non-200, a wrong content type or an invalid PNG, or the connection fails; not on a timeout or a full upstream budget) or terrain (dhm_terraen_skyggekort only). The X-CoreScope-Tile header says: hit / miss = the overlay's layer from the cache / from upstream; fallback = the exaggerated attempt failed and the terrain tile was fetched upstream; fallback-hit = the exaggerated attempt still went upstream and failed, and the terrain tile came from the cache; outside = outside DHM coverage, no upstream call; unavailable = no tile (transparent, no-store); busy = refused without an upstream call because map tiles are already being fetched server-wide (transparent, no-store, not charged to the per-client budget; #744). Fallback tiles are browser-cached for 10 minutes, other tiles for 24 hours (#687). Tiles outside DHM coverage and upstream failures return a transparent PNG. 404 unless map.dhm is enabled with a token. (#680)", Tag: "config",
+			QueryParams: dhmTileQueryParams(),
+			Errors:      []routeError{{Status: "429", Description: "Per-client budget of tiles not in the server cache exceeded (map.dhm.tileRateLimitPerMin, default " + strconv.Itoa(dhmTileRateLimitDefault) + "/min; cached and outside-coverage tiles are not counted). Retry-After gives the seconds to wait."}}},
+		"GET " + dhmOrthoRoute: {Summary: "Danish orthophoto tile (WMTS proxy)", Description: "Read-only proxy for one 256x256 EPSG:3857 JPEG tile of the GeoDanmark spring orthophoto (Ortofoto foraar) from Dataforsyningen's WMTS orto_foraar_webm_DAF, layer orto_foraar_webm, tile matrix set DFD_GoogleMapsCompatible; the server adds its access token. z, x and y are plain decimal tile coordinates on the usual web-mercator grid at zoom 7-20; any other value, or any query string, is 400. The X-CoreScope-Tile header says: hit / miss = from the cache / from upstream (image/jpeg, browser-cached for 24 hours); outside = outside DHM coverage, no upstream call; unavailable = no tile (upstream failure or a body that is not a complete 256x256 JPEG); busy = refused without an upstream call because map tiles are already being fetched server-wide (#744). outside, unavailable and busy return a transparent PNG; unavailable and busy are no-store, and busy is not charged to the per-client budget. Ortho tiles share the hillshade's per-client budget and server-wide upstream limits, and are cached apart from it for 7 days. 404 unless map.dhm is enabled with a token and map.dhm.ortho.enabled. (#728)", Tag: "config",
+			Errors: []routeError{{Status: "429", Description: "Per-client budget of tiles not in the server cache exceeded; shared with GET /api/map/dhm/wms (map.dhm.tileRateLimitPerMin, default " + strconv.Itoa(dhmTileRateLimitDefault) + "/min; cached and outside-coverage tiles are not counted). Retry-After gives the seconds to wait."}}},
+		"GET /api/terrain/profile": {Summary: "Terrain profile with line of sight and Fresnel zone (DHM, Denmark)", Description: "Elevation between two nodes or map points from the Danmarks Hojdemodel WCS, sampled every 10-25 m (at most 3200 samples, at most 1024 returned; the worst points are always included, and data gaps stay visible: the edges of every gap while they fit, otherwise missing samples spread over all gaps, so neighbouring gaps can merge and no evenly spaced sample may be left), with the first Fresnel zone and earth curvature (k-factor). The terrain model (DTM) decides verdict.state: clear = the whole first Fresnel zone is clear; fresnel100 = obstructed, but at least 60 % of it is clear (the usual criterion holds); fresnel60 = line of sight clear, less than 60 %; blocked = the line of sight is obstructed; unknown = any sample lacks data. The surface model (DSM: trees, buildings) is assessed in verdict.surface for information only; a surface above the antenna at an endpoint makes verdict.surface.state blocked with verdict.surface.reason = antennaBelowSurface and verdict.surface.endpoint = A, B or both (both fields are absent otherwise; the antenna height is likely too low, e.g. a node on a roof); the worst point is then the worst interior obstruction of the line of sight if there is one, else that endpoint (the deeper one if both), with a null worstF1Fraction (the zone has no radius there); verdict.surface.state is also forced to unknown, with null clearance numbers, whenever coverage.state is not full, even though the DSM can be a separate, complete coverage from the DTM. Outside Denmark the profile is partial or none and the verdict unknown; a path entirely outside makes no upstream call. Antenna heights default by role (repeater 10 m, room 5 m, companion and sensor 2 m, map point 2 m) unless set in the request or in config radio.antennaHeightsM; assumed heights are flagged. The frequency is the request's, else config radio.defaultFreqMHz, else the most common observer radio frequency of the last 7 days, else the firmware default 869.618 MHz. Elevations are cached per path (24 h); antenna heights, k and frequency do not affect the cache, and X-CoreScope-Cache says hit, miss or none. With map.dhm.profile.buildings.enabled (off by default) a model=both answer also tells buildings from trees where the surface stands more than 2.5 m above the terrain, from INSPIRE building footprints (#730): classification.state is full (every such sample classified), partial (some are not, e.g. classification.truncated: a stretch had more buildings than one page) or unavailable (none: the footprint service failed, or coverage is not full); each such sample gets cls b (building) or v (trees or other) when classified; verdict.surface.cause says what stands where the surface verdict is decided (building, vegetation, or unknown when some of it is unclassified; absent for a clear or unknown surface, or where the terrain alone decides); and attribution then also credits the footprints. The verdicts themselves never change, the classification is fetched within the same request budget, and a failure leaves the answer 200, unclassified. 404 unless map.dhm is enabled with a token and map.dhm.profile.enabled. (#681)", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "a", Description: "endpoint A: a node's 64-hex public key or lat,lon in decimal degrees", Type: "string", Required: true},
+				{Name: "b", Description: "endpoint B, as a", Type: "string", Required: true},
+				{Name: "model", Description: "both (default: DTM and DSM) or dtm (terrain only, half the upstream calls)", Type: "string"},
+				{Name: "ha", Description: "antenna height above ground at A, 0-100 m", Type: "number"},
+				{Name: "hb", Description: "antenna height above ground at B, 0-100 m", Type: "number"},
+				{Name: "k", Description: "effective earth factor, 0.5-10 (default config radio.kFactor or 4/3)", Type: "number"},
+				{Name: "freq", Description: "frequency in MHz, 150-2500", Type: "number"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Invalid or unknown parameter, identical endpoints, or path longer than map.dhm.profile.maxPathKm (default 80 km; no upstream call). A path that is too long answers {\"error\":\"path too long\",\"maxPathKm\":<limit>}."},
+				{Status: "404", Description: "Profile disabled, or a public key that is unknown, hidden or has no position."},
+				{Status: "429", Description: "Per-client budget of profiles not in the cache exceeded (map.dhm.profile.rateLimitPerMin, default 10/min). Retry-After gives the seconds to wait."},
+				{Status: "502", Description: "The elevation service failed; no upstream detail is returned."},
+				{Status: "503", Description: "map.dhm.profile.maxInFlight uncached profiles (default 4) are already being fetched, server-wide; no upstream call. Requests for a profile already being fetched share that fetch and take no slot; a refused request starts no fetch, so there is nothing to join. A refusal is not charged to the per-client budget. Retry-After gives the seconds to wait."},
+				{Status: "504", Description: "The elevation service timed out (per raster, or 25 s for the whole profile)."},
+			}},
+		"GET " + coverageRoute: {Summary: "Predicted reach of a radio at a node or a map point (terrain-aware coverage)", Description: "The area within a radius where a receiver is predicted to hear a transmitter at the centre: free-space loss plus ITU-R P.526 Bullington diffraction over the terrain with the earth bulge, along one radial per 100 m raster pixel at the edge, sampled every map.coverage.resolutionM (default 30 m), with a receiver every 100 m. Terrain is the DHM terrain model (DTM) where DHM covers, and with map.dhm.profile.foreignFill.enabled Copernicus DEM GLO-30 elsewhere (a surface model); sources and attribution say which were used. The answer describes a raster of path loss in dB (raster.encoding loss-u8: one byte per pixel, row 0 north, value v is raster.lossBaseDb + v * raster.lossStepDb dB, raster.noData outside the radius or where the terrain has a gap) on Web Mercator bounds, fetched from raster.url. Power, antenna gains, cable loss and sensitivity are not parameters: the margin is power + gains - loss - cable loss - sensitivity - environment loss, which the browser computes from the loss with the operator's defaults (/api/config/client coverage.radio, and coverage.environmentLossDb for the buildings, trees and other clutter the terrain does not include: map.coverage.environmentLossDb, default 25 dB, #962) or the viewer's own. The model is model=bullington (P.526 section 4.5.1) or model=delta (the complete method of section 4.5.2, delta-Bullington), default map.coverage.model (delta); params.model names it with its version. Results are cached per centre (snapped to 4 decimals), radius, antenna heights (0.5 m steps), frequency, k, model, resolution and sources (map.coverage.cacheEntries, default 32, 24 h); X-CoreScope-Cache says hit or miss. The transmitter height follows the terrain profile's rules (request, config radio.antennaHeightsM, owner height, cached surface estimate, role default; a map point 2 m); the receiver is 2 m unless hr is given. reach lists the nodes in reach (#941 M2): every repeater and room with a valid position inside the radius (not the centre node), evaluated point to point with the same model over the same elevation grid (no extra upstream call) and its own antenna height (config radio.antennaHeightsM, approved owner height, role default), lowest loss first, at most 1000 (omitted counts the rest), as {roles, budgetDb, counts: {good, marginal, weak, none}, nodes: [{pubkey, name, role, distanceKm, heightM, heightSource, lossDb}], omitted, noTerrain}. counts are at the operator's link budget budgetDb (config radio, without the environment loss); the margin of a node is the budget minus lossDb. A hidden identity (blacklists, hidden name prefixes, observer aliases) is never named and is in no count (counts, omitted, noTerrain): the response is the one it would be without that node, decided on every response, cached or not. reach is null when the node snapshot was not ready (that result is kept 5 minutes) or when node visibility could not be checked. 404 unless map.coverage.enabled with DHM active or the foreign fill on. (#941)", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "at", Description: "the transmitter: a node's 64-hex public key or lat,lon in decimal degrees", Type: "string", Required: true},
+				{Name: "ha", Description: "transmitter antenna height above ground, 0-100 m (default by the terrain profile's rules)", Type: "number"},
+				{Name: "hr", Description: "receiver antenna height above ground, 0-100 m (default 2 m)", Type: "number"},
+				{Name: "r", Description: "radius in km, from 1 to map.coverage.maxRadiusKm (default 40, or the maximum if lower)", Type: "number"},
+				{Name: "freq", Description: "frequency in MHz, 150-2500 (default as the terrain profile: config, observers, firmware)", Type: "number"},
+				{Name: "model", Description: "propagation model: bullington or delta (default map.coverage.model, delta)", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Invalid or unknown parameter; a radius over map.coverage.maxRadiusKm ({\"error\":\"radius too large\",\"maxRadiusKm\":<limit>}); or a centre no terrain source covers ({\"error\":\"point not covered\"}). No upstream call."},
+				{Status: "404", Description: "Predicted reach disabled, or a public key that is unknown, hidden or has no position."},
+				{Status: "429", Description: "Per-client budget of computations not in the cache exceeded (map.coverage.rateLimitPerMin, default 2/min; hits are not counted). Retry-After gives the seconds to wait."},
+				{Status: "502", Description: "The elevation service failed; no upstream detail is returned."},
+				{Status: "503", Description: "map.coverage.maxInFlight computations (default 1) are already running server-wide, or the server-wide budget of DHM rasters (map.coverage.upstreamPerMin, default 240/min) cannot pay a cold computation; no upstream call, not charged to the per-client budget. Requests for a computation already running share it. Retry-After gives the seconds to wait."},
+				{Status: "504", Description: "The elevation service timed out (10 s per raster, 30 s for the whole computation). Tiles that arrived are cached, so a retry is faster."},
+			}},
+		"GET " + coverageRasterRoute: {Summary: "Loss raster of a predicted reach", Description: "The raster GET /api/terrain/coverage described: width x height bytes, application/octet-stream, gzip Content-Encoding when the client accepts it. Served from the result cache only: a key that is not cached (or expired) is 404, and never causes a computation. (#941)", Tag: "config",
+			QueryParams: []paramMeta{{Name: "key", Description: "the 32-hex key of a coverage response", Type: "string", Required: true}},
+			Errors:      []routeError{{Status: "400", Description: "Missing, malformed or extra parameter."}, {Status: "404", Description: "Not cached, or predicted reach disabled."}}},
+		"GET /api/terrain/profile.png": {Summary: "Share card of a terrain profile (1200x630 PNG, the og:image of /p)", Description: "The link-preview card of the same profile GET /api/terrain/profile computes: both endpoints (node names only for nodes that endpoint would serve; hidden, unknown and unpositioned nodes are the same 404), the chart, the verdict in the panel's words, the antenna heights and the DHM CC BY 4.0 credit. Same parameters, plus v, a cache-bust that is accepted and ignored. 404 unless map.dhm.profile.share.enabled. Cards are cached (map.dhm.profile.card.cacheEntries, default 64, bounded by bytes too, 24 h); a cached card is not charged. A card not in the cache is charged to the per-client budget (map.dhm.profile.rateLimitPerMin). When its elevations are not cached either, fetching them spends the server-wide share budget map.dhm.profile.share.upstreamPerMin (shareUpstreamPerMin, default 2/min, 0: never) and a maxInFlight slot, shared with GET /api/terrain/profile; a spent budget, an upstream failure or an upstream slower than 10 s gives a degraded card instead (200, no verdict, Cache-Control max-age=60). A complete card is Cache-Control public, max-age=86400, immutable. X-CoreScope-Card says hit, miss, degraded or refused. (#727)", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "a", Description: "endpoint A: a node's 64-hex public key or lat,lon in decimal degrees", Type: "string", Required: true},
+				{Name: "b", Description: "endpoint B, as a", Type: "string", Required: true},
+				{Name: "model", Description: "both (default) or dtm", Type: "string"},
+				{Name: "ha", Description: "antenna height above ground at A, 0-100 m", Type: "number"},
+				{Name: "hb", Description: "antenna height above ground at B, 0-100 m", Type: "number"},
+				{Name: "k", Description: "effective earth factor, 0.5-10", Type: "number"},
+				{Name: "freq", Description: "frequency in MHz, 150-2500", Type: "number"},
+				{Name: "v", Description: "preview cache-bust, at most 64 bytes; ignored", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Invalid or unknown parameter, identical endpoints, or path longer than map.dhm.profile.maxPathKm; no upstream call."},
+				{Status: "404", Description: "Sharing disabled, or a public key that is unknown, hidden or has no position."},
+				{Status: "429", Description: "Per-client budget of cards not in the cache exceeded (map.dhm.profile.rateLimitPerMin). Retry-After gives the seconds to wait."},
+				{Status: "503", Description: "map.dhm.profile.maxInFlight uncached profiles are already being fetched, or the server is drawing as many cards as it draws at once; nothing was done, and neither the per-client charge nor the share budget is spent. Retry-After gives the seconds to wait."},
+			}},
+		"GET /api/nodes/{pubkey}/card.png": {Summary: "Share card of a node (1200x630 PNG, the og:image of /p?node=)", Description: "The link-preview card of a repeater, room or sensor (#811): name and role, the configured area the node is in when it is in one, when it was last heard, for repeaters and rooms the relays in the last 24 h and 1 h and the seen airtime (a lower bound), the neighbour count, an as-of time and the site name. No position, map or packet content. An absent value drops its clause. The key is exactly 64 hex characters (no short prefixes). Hidden nodes (node or observer blacklist, hidden name prefixes), unknown and inactive nodes and companions are the same 404. The only query key is v, a cache-bust of at most 64 bytes that is accepted and ignored. Values come from the in-memory node, relay and neighbour snapshots, never from a per-request scan. Cards are cached (64 entries, 10 min) by the values they show; a cached card is not charged. A card not in the cache is charged to the per-client budget map.dhm.profile.rateLimitPerMin and drawn in the render slots of the terrain share card. Cache-Control public, max-age=600. X-CoreScope-Card says hit, miss or refused. The card's theme and names setting are map.dhm.profile.card's. 404 unless share.nodes.enabled. (#811)", Tag: "nodes",
+			QueryParams: []paramMeta{
+				{Name: "v", Description: "preview cache-bust, at most 64 bytes; ignored", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "A key that is not exactly 64 hex characters, or a query key other than one v."},
+				{Status: "404", Description: "Node sharing disabled, or a node that is unknown, hidden, inactive or a companion."},
+				{Status: "429", Description: "Per-client budget of cards not in the cache exceeded (map.dhm.profile.rateLimitPerMin, shared with the terrain share card). Retry-After gives the seconds to wait."},
+				{Status: "503", Description: "The server is drawing as many cards as it draws at once; nothing was done and the per-client charge is given back. Retry-After gives the seconds to wait."},
+			}},
+		"GET /api/masts": {Summary: "Antenna sites of one grid cell (Mastedatabasen, Denmark)", Description: "Existing antenna positions from Mastedatabasen (Digitaliseringsstyrelsen, CC0) inside one fixed 2 km x 2 km EPSG:25832 grid cell: cell E,N spans easting [E*2000, (E+1)*2000) and northing [N*2000, (N+1)*2000). Rows at identical coordinates are grouped into one site. Response: {cell: {e, n}, truncated, sites: [{lat, lon, street?, houseNumber?, postcode?, city?, stations[], entries: [{technology, bandMHz?, service?, commissioned?, interference}], interference, likelyMast}]}. interference is set when an entry is in the 700, 800 or 900 MHz band or is GSM-R; likelyMast is a heuristic (a broadcast technology), not a fact from the source. truncated is set when upstream returned its 500-row page limit, so the cell may be missing sites. Only published fields appear: no operator, height or structure type. The server fetches a cell from the Mastedatabasen WFS only when it is requested and not cached (7 days); it never prefetches or walks the grid. X-CoreScope-Cache says hit or miss; responses may be browser-cached for 24 hours. Stale-if-error (#872): when Mastedatabasen times out, fails to connect or answers 5xx, or the circuit breaker is open, a cell cached within map.masts.maxStaleDays (default 90) is answered 200 from that copy with X-CoreScope-Cache: stale, X-CoreScope-Masts-Stale: 1 and Cache-Control: no-store; an older cell gets the error below. At most map.masts.upstreamSlots (default 16) requests are open towards Mastedatabasen at once. 404 unless map.masts.enabled. (#724)", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "cell", Description: "E,N grid cell indexes as plain decimal integers, E 219-462 and N 3017-3209 (the Danish extent); the only accepted key", Type: "string", Required: true},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Missing, malformed or out-of-extent cell, or any other query key; no upstream call and no charge."},
+				{Status: "404", Description: "map.masts is not enabled."},
+				{Status: "429", Description: "Per-client budget of cells not in the cache exceeded (map.masts.cellRateLimitPerMin, default 120/min; cached cells are not counted). Retry-After gives the seconds to wait."},
+				{Status: "502", Description: "Mastedatabasen failed or returned something other than a well-formed feature collection; no upstream detail is returned and nothing is cached."},
+				{Status: "503", Description: "map.masts.maxInFlight uncached cells (default 16) are already being fetched, server-wide; no upstream call and no charge. Requests for a cell already being fetched share that fetch. Retry-After gives the seconds to wait. With header X-CoreScope-Masts-Source: down and body error \"antenna data source unavailable\" it is the circuit breaker instead (#872): after map.masts.breakerFailures consecutive upstream timeouts, connection errors or 5xx (default 3) no uncached cell goes upstream for map.masts.breakerCooldownSec (default 300); Retry-After is the remaining cool-down. Cached cells are still served, and stale ones within map.masts.maxStaleDays are answered 200 instead; no charge."},
+				{Status: "504", Description: "Mastedatabasen timed out."},
+			}},
+		"GET /api/terrain/heritage": {Summary: "Protected ancient monument at a map point (Denmark)", Description: "What the Slots- og Kulturstyrelsen register of protected ancient monuments (Fund og Fortidsminder) says about one point: the protection zone (layer fundogfortidsminder_areal_beskyttelse) holding it, or else the nearest one whose edge lies within map.heritage.radiusM (default 100 m). nearest carries the dataset's own anlaegstype (type), datering (dating), fred_status (status), frednr (protectionNumber) and systemnr (systemNumber), the distance to the zone's edge in whole metres (0 inside) and insideZone; it is null when no zone qualifies. count is the zones holding the point or within the radius; truncated means the area held more zones than one upstream page. Nothing from the request is echoed. The server asks the agency's public WFS for one fixed 250 m EPSG:25832 cell grown by the radius and computes the answer locally; cells are cached (default 168 h) and X-CoreScope-Cache says hit, miss or none (outside the layers' extent: answered empty with no upstream call). Credit: (c) Slots- og Kulturstyrelsen. 404 unless map.heritage.enabled. (#723 M2)", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "lat", Description: "latitude in decimal degrees, plain decimal", Type: "number", Required: true},
+				{Name: "lon", Description: "longitude in decimal degrees, plain decimal", Type: "number", Required: true},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Missing, repeated, malformed or unknown parameter (no upstream call)."},
+				{Status: "404", Description: "map.heritage is not enabled."},
+				{Status: "429", Description: "Per-client budget of lookups not in the cache exceeded (map.heritage.rateLimitPerMin, default 20/min). Retry-After gives the seconds to wait."},
+				{Status: "502", Description: "The register's service failed or answered something unexpected; no upstream detail is returned."},
+				{Status: "503", Description: "map.heritage.maxInFlight upstream lookups (default 4) are already running, server-wide; no upstream call, not charged to the per-client budget. Retry-After: 5."},
+				{Status: "504", Description: "The register's service timed out (map.heritage.upstreamTimeoutMs)."},
+			}},
+		"GET /api/skraafoto/search": {Summary: "Oblique aerial photos of a map point (Skråfoto, Denmark)", Description: "The Skråfoto oblique aerial photos (Klimadatastyrelsen) of one point: at most one photo per direction, in the order north, east, south, west, nadir; a direction without a photo is absent. Response: {collection, year, years[], photos: [{id, collection, direction, datetime, viewerUrl, previewUrl?, frame?: {width, height}, point?: {x, y}, inFrame, path?: [{x, y}], beam?: {x, y}, approx}], credit: {attribution, owner, datasetName, datasetUrl, licenseName, licenseUrl}}. Of up to 5 candidates per direction the photo shown is the one whose image centre is nearest the point (#737 M3a). point is the point on the ground, projected with the photo's camera model into its preview (frame: the preview's size in pixels, x right and y down from the top-left corner); it may lie outside the frame, which inFrame says; frame and point are absent when the photo has no usable camera model. The ground height is the DHM terrain model at the point, fetched like a terrain profile's (map.dhm.profile limits); without it each photo's footprint height is used and approx is true. With path, path is the line of sight between the two antennas, 32 points where it is in the frame, and beam the line's point above the point (nearest it, at the line's height there), for a point within 25 m of the line: point is on the ground, the line at antenna height, so in an oblique photo they are apart (#839). The answers are cached by the point, the path and the antenna heights. years are the years offered, newest first (2017 is not); without year the newest is searched. viewerUrl opens the photo at full resolution in the official viewer; previewUrl is GET /api/skraafoto/preview. No upstream URL and no token is ever returned. The server asks the Dataforsyningen STAC API with the operator's map.dhm token, one fixed query per direction, for the point snapped to a 10 m EPSG:25832 grid; answers are cached 24 h and X-CoreScope-Cache says hit (no upstream, neither STAC nor DHM, was asked), miss or none (outside Denmark: answered empty with no upstream call). Credit: Klimadatastyrelsen, Skråfotos, CC BY 4.0. 404 unless map.skraafoto.enabled and map.dhm has a token. (#737 M1)", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "lat", Description: "latitude in decimal degrees, plain decimal", Type: "number", Required: true},
+				{Name: "lon", Description: "longitude in decimal degrees, plain decimal", Type: "number", Required: true},
+				{Name: "year", Description: "the collection's year, one of years; 2019 or later", Type: "integer"},
+				{Name: "path", Description: "a line of sight to project: latA,lonA,latB,lonB, plain decimals, at least 1 m and at most map.dhm.profile.maxPathKm (default 80 km) long (#737 M3a)", Type: "string"},
+				{Name: "ha", Description: "antenna height above the ground at A in metres, 0–100; only with path; default the profile's point height", Type: "number"},
+				{Name: "hb", Description: "antenna height above the ground at B in metres, 0–100; only with path; default the profile's point height", Type: "number"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Missing, repeated, malformed or unknown parameter, ha or hb without path, a path out of bounds, or a year the API does not have (no upstream call once the year list is cached)."},
+				{Status: "404", Description: "map.skraafoto is not enabled, or map.dhm has no token."},
+				{Status: "429", Description: "Per-client budget of searches not in the cache exceeded (map.skraafoto.searchRateLimitPerMin, default 30/min). Retry-After gives the seconds to wait."},
+				{Status: "502", Description: "The STAC API failed or answered something unexpected; no upstream detail is returned and nothing is cached."},
+				{Status: "503", Description: "The server-wide budget of uncached searches and previews per UTC day is spent (map.skraafoto.dailyCap, default 2000; Retry-After: until 00:00 UTC), or map.skraafoto.maxInFlight upstream calls (default 8) are already running (Retry-After: 5). No upstream call, not charged to the per-client budget."},
+				{Status: "504", Description: "The STAC API timed out."},
+			}},
+		"GET /api/skraafoto/preview/{collection}/{item}": {Summary: "Reduced preview of one Skråfoto photo (JPEG)", Description: "One photo of GET /api/skraafoto/search as an image/jpeg of at most 1024 px on the long edge. The server reads only the tiles of one overview of the photo's Cloud-Optimized GeoTIFF on the Skråfoto CDN, by HTTP range requests, and re-encodes them; the CDN is never sent the token. collection is skraafotos<year> (2019 or later) and item a photo id of that year; the only query string is a zoom's. A photo no search has cached is looked up in the STAC API first. Previews are cached 7 days (map.skraafoto.cacheMB, default 64), served with Cache-Control: public, max-age=604800, and X-CoreScope-Cache says hit or miss. With zoom=1, x and y (#737 M3b) the image is a crop of at most 1024 px on the long edge around point (x, y) of the preview (the pixels of the search's point and path), cut 1:1 from a finer overview: the smallest at least four times the preview's (IFD2 of a real photo, about 0.3 m/px against the preview's 1.1). Only the tiles under the crop are read, at most 9, within the preview's byte budget. Near the photo's border the crop is moved inside it, so the point is off centre. X-CoreScope-Skraafoto-Marker is the point in the crop's pixels (x,y) and X-CoreScope-Skraafoto-Crop the crop in the preview's pixels (x0,y0,x1,y1), both to two decimals. Crops are cached with the previews, by the photo, the overview and the crop's box, whose origin is snapped to half a tile, so nearby points share one; they count against the same budgets. Credit: Klimadatastyrelsen, Skråfotos, CC BY 4.0. 404 unless map.skraafoto.enabled and map.dhm has a token. (#737 M1, M3b)", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "zoom", Description: "1: a zoomed crop around (x, y) instead of the preview (#737 M3b); only with x and y", Type: "string", Enum: []string{"1"}},
+				{Name: "x", Description: "the point's x in the preview's pixels, a plain decimal 0–1024 inside the preview; only with zoom", Type: "number"},
+				{Name: "y", Description: "the point's y in the preview's pixels, a plain decimal 0–1024 inside the preview; only with zoom", Type: "number"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Malformed collection or photo id, a query string other than zoom=1&x=&y= with each once, or a zoom point outside the photo's preview (no upstream call once the photo's frame is cached)."},
+				{Status: "404", Description: "map.skraafoto is not enabled, or the photo does not exist."},
+				{Status: "429", Description: "Per-client budget of previews not in the cache exceeded (map.skraafoto.previewRateLimitPerMin, default 120/min). Retry-After gives the seconds to wait."},
+				{Status: "502", Description: "The STAC API or the CDN failed, or the photo is not a COG the preview (or the crop) can read within its bounds; nothing is cached."},
+				{Status: "503", Description: "The daily budget (map.skraafoto.dailyCap) is spent or map.skraafoto.maxInFlight upstream calls are running, as for the search."},
+				{Status: "504", Description: "The STAC API or the CDN timed out."},
+			}},
 
 		// Admin / system
-		"GET /api/health":      {Summary: "Health check", Description: "Returns server health, uptime, and memory stats.", Tag: "admin"},
-		"GET /api/stats":       {Summary: "Network statistics", Description: "Returns aggregate stats (node counts, packet counts, observer counts). Cached for 10s.", Tag: "admin"},
-		"GET /api/perf":        {Summary: "Performance statistics", Description: "Returns per-endpoint request timing and slow query log.", Tag: "admin"},
-		"GET /api/mqtt/status": {Summary: "MQTT source status", Description: "Returns per-MQTT-source connection state and counters (lastConnectUnix, lastPacketUnix, packetsTotal, etc.). Broker URL passwords are masked. Sourced from the ingestor stats file; empty list when unavailable. (#1043)", Tag: "admin"},
+		"GET /api/health": {Summary: "Health check", Description: "Returns server health, uptime, and memory stats.", Tag: "admin"},
+		"GET /api/stats":  {Summary: "Network statistics", Description: "Returns aggregate stats (node counts, packet counts, observer counts). Cached for 10s.", Tag: "admin"},
+		"GET /api/perf": {Summary: "Performance statistics", Description: "Returns per-endpoint request timing and slow query log. mem=1 adds the store memory breakdown, a full store walk: one scan at a time per server plus a 5 s cooldown after it, otherwise 429 with Retry-After.", Tag: "admin",
+			QueryParams: []paramMeta{{Name: "mem", Description: "1 = include memoryBreakdown (rate-limited, see description)", Type: "string"}}},
+		"GET /api/mqtt/status": {Summary: "MQTT source status", Description: "Returns per-MQTT-source connection state and counters (lastConnectUnix, lastPacketUnix, packetsTotal, etc.). Broker URL credentials (user-info, query, fragment) are masked in broker and lastError, and in a name that is a raw broker URL. Sourced from the ingestor stats file; empty list when unavailable. stale is true when the file's sampleAt is older than the /api/perf/io freshness threshold (5s) or unreadable, i.e. the rows are frozen; sampleAgeSec gives its age. (#1043, #160)", Tag: "admin"},
+		"GET /api/perf/ws-clients": {Summary: "WebSocket client history", Description: "Returns open WebSocket connection counts, oldest first. range accepts 24h (default), 7d or 30d; other values return 400. Samples are one minute for 24h, five minutes for 7d and fifteen minutes for 30d, with the last clients count and maximum peak in each bucket. gapBefore marks interrupted sampling; missing periods are not zero-filled. persistence.enabled and persistence.healthy indicate whether the separate history journal is saving successfully. At most 30 days are retained; history survives server/container replacement when its data directory is retained and writable. No packet database writes.", Tag: "admin",
+			QueryParams: []paramMeta{{Name: "range", Description: "24h (default), 7d or 30d", Type: "string"}}},
 		"POST /api/perf/reset": {Summary: "Reset performance stats", Tag: "admin", Auth: true},
 		// "POST /api/admin/prune" removed in #1283 (ingestor owns prune).
 		"GET /api/debug/affinity": {Summary: "Debug neighbor affinity scores", Tag: "admin", Auth: true},
@@ -55,53 +225,73 @@ func routeDescriptions() map[string]routeMeta {
 
 		// Packets
 		"GET /api/packets": {Summary: "List packets", Description: "Returns decoded packets with filtering, sorting, and pagination.", Tag: "packets",
-			QueryParams: []paramMeta{
+			QueryParams: append([]paramMeta{
 				{Name: "limit", Description: "Max packets to return", Type: "integer"},
 				{Name: "offset", Description: "Pagination offset", Type: "integer"},
 				{Name: "sort", Description: "Sort field", Type: "string"},
 				{Name: "order", Description: "Sort order (asc/desc)", Type: "string"},
 				{Name: "type", Description: "Filter by packet type", Type: "string"},
+				{Name: "excludeTypes", Description: "Comma-separated numeric payload types 0-15 excluded before pagination and total counting (raw and grouped). At most 16 entries and 64 characters; duplicates collapse. Empty means no exclusions; NULL payload types remain. Intersects with type; exclusion wins on overlap. Invalid/repeated parameters or combination with nodes return 400; single node is supported.", Type: "string"},
 				{Name: "observer", Description: "Filter by observer ID", Type: "string"},
 				{Name: "timeRange", Description: "Time range filter (e.g. 1h, 24h, 7d)", Type: "string"},
 				{Name: "search", Description: "Full-text search", Type: "string"},
 				{Name: "groupByHash", Description: "Group duplicate packets by hash", Type: "boolean"},
+				{Name: "nodes", Description: "Comma-separated public keys or node names (multi-node filter; exact, case-sensitive match). Entries are trimmed, empty entries are dropped and duplicates collapse. At most 50 distinct entries, 100 comma-separated entries and 4096 characters (#335); over any bound is 400 before any lookup. An all-empty list returns no packets.", Type: "string"},
+			}, dagiParamMetas("Only ADVERT packets whose sender is in it; an unknown code is ignored, as an unknown area is. With a DAGI filter the response carries dagi.unpositionedHidden.")...),
+			Errors: []routeError{
+				{Status: "400", Description: "Invalid filter: malformed or repeated excludeTypes, excludeTypes combined with nodes, or a nodes list over its bounds (50 distinct entries, 100 comma-separated entries, 4096 characters; #335)."},
 			}},
-		"POST /api/packets":              {Summary: "Ingest a packet", Description: "Submit a raw packet for decoding and storage.", Tag: "packets", Auth: true},
-		"GET /api/packets/{id}":          {Summary: "Get packet detail", Tag: "packets"},
-		"GET /api/packets/timestamps":    {Summary: "Get packet timestamp ranges", Tag: "packets"},
-		"POST /api/packets/observations": {Summary: "Batch submit observations", Description: "Submit multiple observer sightings for existing packets.", Tag: "packets"},
+		"GET /api/packets/{id}":       {Summary: "Get packet detail", Tag: "packets"},
+		"GET /api/packets/timestamps": {Summary: "Get packet timestamp ranges", Tag: "packets"},
+		"POST /api/packets/observations": {Summary: "Get observations for several packets", Description: "Returns the stored observations for up to 200 content hashes in one call: {\"hashes\": [...]} in, {\"results\": {\"<hash>\": [...]}} out. More than 200 hashes is 400. The request body is capped at 65536 bytes before it is parsed (#334) — a larger body is 413 regardless of its shape or of whether it declares a Content-Length, and the byte cap leaves roughly 17x headroom over a full 200-hash request, so the 200-hash limit is what a client actually meets first.", Tag: "packets",
+			Errors: []routeError{
+				{Status: "413", Description: "Request body over 65536 bytes (#334). Enforced before parsing, on bytes received, so it also applies to a chunked request with no Content-Length."},
+			}},
 
 		// Decode
-		"POST /api/decode": {Summary: "Decode a raw packet", Description: "Decodes a hex-encoded packet without storing it.", Tag: "packets"},
+		"POST /api/decode": {Summary: "Decode a raw packet", Description: "Decodes a hex-encoded packet without storing it. The request body is capped at 4096 bytes before it is parsed (#334) — a larger body is 413 regardless of its shape or of whether it declares a Content-Length. The largest frame the decoder can accept (header + transport codes + MAX_PATH_SIZE path bytes + MAX_PACKET_PAYLOAD payload bytes) is a ~520-byte body, so the cap leaves roughly 7x headroom.", Tag: "packets",
+			Errors: []routeError{
+				{Status: "413", Description: "Request body over 4096 bytes (#334). Enforced before parsing, on bytes received, so it also applies to a chunked request with no Content-Length."},
+			}},
 
 		// Nodes
 		"GET /api/nodes": {Summary: "List nodes", Description: "Returns all known mesh nodes with status and metadata. Repeater/room rows carry the issue #672 usefulness metrics (traffic_share_score, bridge_score, coverage_score, redundancy_score), the composite usefulness_score + usefulness_grade, and relay-activity counters. See the Node schema.", Tag: "nodes",
 			Response: schemaRef("NodeListResponse"),
-			QueryParams: []paramMeta{
+			QueryParams: append([]paramMeta{
 				{Name: "role", Description: "Filter by node role", Type: "string"},
 				{Name: "status", Description: "Filter by status (active/stale/offline)", Type: "string"},
 				{Name: "geoFilter", Description: "Overrides the deployment's geo_filter node-list default for this one request: \"1\"/\"true\" excludes nodes outside the configured geo_filter (unless foreign_advert-tagged), \"0\"/\"false\" returns every node regardless. Any other value (including omitting it) uses the deployment default — geo_filter applies to the node list unless config.json sets geoFilterExemptNodeList=true.", Type: "string"},
 				{Name: "hasScope", Description: "Issue #1862. \"true\" keeps only nodes that have ever transported at least one region-scoped (TRANSPORT_FLOOD/DIRECT) packet; \"false\" keeps only nodes that never have. Backed by the same relay-activity signal as the Scopes tab's \"Repeaters Never Relaying Any Scope\" section — pair with role=repeater to match its exact semantics.", Type: "string"},
 				{Name: "hashRegion", Description: "Issue #1862. Comma-separated region scope name(s) (e.g. \"eu,be\"; leading \"#\" optional, case-insensitive) — keeps only nodes that have transported at least one of them. Combines with hasScope as AND, not OR.", Type: "string"},
-			}},
+			}, dagiParamMetas("Only nodes whose position is in it; an unknown code matches nothing, as an unknown area does. With a DAGI param the response carries dagi.unpositionedHidden: the visible nodes without a usable position, which no DAGI filter matches (the whole list, not narrowed by the other filters).")...)},
 		"GET /api/nodes/search":         {Summary: "Search nodes", Description: "Search nodes by name or public key prefix.", Tag: "nodes", QueryParams: []paramMeta{{Name: "q", Description: "Search query", Type: "string", Required: true}}},
-		"GET /api/nodes/bulk-health":    {Summary: "Bulk node health", Description: "Returns health status for all nodes in one call.", Tag: "nodes"},
+		"GET /api/nodes/bulk-health":    {Summary: "Bulk node health", Description: "Returns health status for up to limit nodes in one call, each with its Heard By lists (directObservers / relayObservers, see HeardDirectObserver) and stats.avgSnr over direct receptions only.", Tag: "nodes", Response: schemaRef("BulkHealthResponse")},
 		"GET /api/nodes/network-status": {Summary: "Network status summary", Description: "Returns counts of active, stale, and offline nodes.", Tag: "nodes"},
-		"GET /api/nodes/{pubkey}":       {Summary: "Get node detail", Description: "Returns full detail for a single node by public key. For repeater/room nodes this includes the issue #672 usefulness axes + composite score/grade (see the Node schema).", Tag: "nodes", Response: schemaRef("NodeDetailResponse")},
+		"GET /api/nodes/{pubkey}": {Summary: "Get node detail", Description: "Returns full detail for a single node by public key. For repeater/room nodes this includes the issue #672 usefulness axes + composite score/grade (see the Node schema). recentAdverts is the chronological list; with include=advertRoutes, recentAdvertsByRoute and advertCounts (#2073) split the node's adverts into flood / zero_hop / mixed, advertIntervals (#245) estimates the flood and zero-hop advert intervals, and the ADVERT rows of recentAdverts carry route_class. A 404 for a key with no nodes row (#199) is {error, inactive_node?, observer?}: inactive_node {public_key, name, role, last_seen, first_seen} is the inactive_nodes row when retention retired the node (no advert in retention.nodeDays; last_seen is the last advert), observer {id, name, last_seen} is the observers row when the key uploads as an observer. Both are omitted for an unknown key and for a blacklisted or hidden identity.", Tag: "nodes", Response: schemaRef("NodeDetailResponse"),
+			QueryParams: []paramMeta{
+				{Name: "include", Description: "Opt-in extras, comma-separated (the parameter may also repeat). advertRoutes (#2073): adds recentAdvertsByRoute, advertCounts, advertIntervals (#245) and route_class on the recentAdverts ADVERT rows. That costs a scan of all the node's ADVERT rows (cached per node for up to 30 s), so only the node page asks for it; without it the response has neither field and no route_class. Unknown values are ignored. Hidden identities never get the extras.", Type: "string"},
+			}},
 		"GET /api/nodes/{pubkey}/clock-skew": {Summary: "Get node clock skew", Description: "Per-node clock-skew analysis derived from ADVERT advert-timestamps vs observation times, calibrated per observer (see ClockSkewEngine). samples is the full per-advert time series in chronological order (sparkline data) by default. Fase 5.2b's sample_limit trims that array before it's sent to the client — it only reduces JSON serialization/payload/client-decoding cost, not the server-side computation or allocation that already produced the full samples slice.", Tag: "nodes",
 			QueryParams: []paramMeta{
 				{Name: "sample_limit", Description: "Trims samples to at most the N most-recent entries, chronological order preserved. Omitted, non-numeric, or negative: unchanged, every sample returned (legacy default). 0: samples is omitted from the response entirely. N at or above the current sample count: unchanged, every sample returned. sampleCount and every other field are unaffected regardless of sample_limit.", Type: "integer"},
 			}},
-		"GET /api/nodes/{pubkey}/health":    {Summary: "Get node health", Tag: "nodes"},
+		"GET /api/nodes/{pubkey}/health":    {Summary: "Get node health", Description: "Health of one node: stats, recent packets, the rolling 24 h activity and its Heard By lists. directObservers received the node's own transmission; relayObservers saw only other evidence (see HeardDirectObserver). Both lists describe observed routing evidence, not radio range.", Tag: "nodes", Response: schemaRef("NodeHealthResponse")},
 		"GET /api/nodes/{pubkey}/paths":     {Summary: "Get node routing paths", Tag: "nodes"},
-		"GET /api/nodes/{pubkey}/analytics": {Summary: "Get node analytics", Description: "Per-node packet counts, timing, and RF stats.", Tag: "nodes"},
-		"GET /api/nodes/{pubkey}/analytics/summary": {Summary: "Get node analytics summary", Description: "Fase 5.2a: light sibling of /analytics — timeRange + computedStats only (availabilityPct, longestSilenceMs/Start, signalGrade, snrMean/snrStdDev, relayPct, totalPackets, uniqueObservers, uniquePeers, avgPacketsPerDay). No node object, no clockSkew, and none of the heavy display arrays (activityTimeline/snrTrend/packetTypeBreakdown/observerCoverage/hopDistribution/peerInteractions/uptimeHeatmap) — for callers that only need the summary numbers, not the full endpoint's per-packet detail. Shares its per-packet computation with /analytics, so computedStats is identical between the two for the same pubkey/days.", Tag: "nodes",
+		"GET /api/nodes/{pubkey}/analytics": {Summary: "Get node analytics", Description: "Per-node packet counts, timing, and RF stats. timeRange is the requested range; coverage describes the effective UTC retained-history interval, partial/loading status and reason (late_evicted_observations counts observations of evicted transmissions heard more than 1 h after their first_seen, which never move coverage.from). Rates and packet arrays use that interval; zero supported duration yields zero rates. This is not radio uptime.", Tag: "nodes"},
+		"GET /api/nodes/{pubkey}/analytics/summary": {Summary: "Get node analytics summary", Description: "Light sibling of /analytics: requested timeRange, effective UTC retained-history coverage, and computedStats. No node object, clockSkew, or heavy display arrays. Shares coverage, packet membership and computed statistics with the full endpoint for the same pubkey/days/instant. Partial/loading/unknown history is explicit; rates use coverage.seconds, not the requested days. Zero supported duration yields zero rates. This is available store data, not measured radio uptime.", Tag: "nodes",
 			QueryParams: []paramMeta{
 				{Name: "days", Description: "Time window in days, 1-365. Default 7.", Type: "integer"},
 			}},
 		"GET /api/nodes/{pubkey}/hop_analytics": {Summary: "Get node hop-count analytics", Description: "Issue #1812. For each recent transmission that passed through this node as a relay, its hop-count AT THIS NODE — the node's own 0-based index within the packet's resolved relay path, i.e. the number MeshCore firmware compares against flood_max/flood_max_advert/flood_max_unscoped in allowPacketForward. Deliberately not the same number as /analytics' hopDistribution field, which is path length to whichever observer reported the packet (a different, unrelated distance). Only transmissions with a resolved relay path are included.", Tag: "nodes", Response: schemaRef("NodeHopAnalyticsResponse"),
 			QueryParams: []paramMeta{
 				{Name: "days", Description: "Time window in days, 1-365.", Type: "integer"},
+			}},
+		"GET /api/nodes/{pubkey}/declared-regions": {Summary: "Declared-region reports for a node", Description: "Issue #126. The regions this repeater told mobile collectors it lets flood, one report per answer, newest reported_at first, at most 100 (truncated=true when older reports exist). Each report: collector (an opaque number valid only within this response; collector keys and positions are never served), regions ([] = the repeater answered and floods nothing, with empty=true), truncated (the app's hint), reported_at (collector clock), ingested_at (ingest clock), repeater_clock (the repeater's RTC seconds as reported, or null), has_position. Reports are the collectors' claims, not authoritative. 404 unless clientRegions.enabled; 400 for a key that is not 64 hex; 404 for a blacklisted or hidden node. See docs/client-regions.md.", Tag: "nodes"},
+		"GET /api/reach-rank": {Summary: "Reach leaderboard", Description: "Nodes ranked by all-time neighbour count: distinct neighbours over valid neighbor_edges rows (both endpoints 64-hex pubkeys, not equal; within the ingestor's edge retention) — a historical count, not a measure of radio quality, range or traffic. Only nodes with a Reach page (node row, or named observer row) that are not blacklisted or hidden are ranked. Rank is competition ranking (1, 1, 3) with ties listed in pubkey order; a search or page never renumbers. Served from a shared snapshot (60s TTL, refreshed in the background) that also backs the Rank on /api/nodes/{pubkey}/reach; snapshot_at is when it was read.", Tag: "nodes",
+			QueryParams: []paramMeta{
+				{Name: "q", Description: "Case-insensitive substring of node name or pubkey (max 64 characters)", Type: "string"},
+				{Name: "offset", Description: "Rows to skip within the (filtered) list; non-negative (default 0)", Type: "integer"},
+				{Name: "limit", Description: "Rows per page (default 50; above 100 → 100; zero, negative or non-numeric → 50)", Type: "integer"},
 			}},
 		"GET /api/nodes/{pubkey}/neighbors": {Summary: "Get node neighbors", Description: "Returns the queried node's first-hop neighbors with affinity scores and observation metadata (count, SNR, distance, observers). Ambiguous edges carry candidate pubkeys.", Tag: "nodes", Response: schemaRef("NodeNeighborsResponse")},
 
@@ -116,7 +306,41 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/analytics/subpaths-bulk":   {Summary: "Bulk subpath analysis", Tag: "analytics"},
 		"GET /api/analytics/subpath-detail":  {Summary: "Subpath detail", Tag: "analytics"},
 		"GET /api/analytics/neighbor-graph":  {Summary: "Neighbor graph", Description: "Full neighbor affinity graph for visualization.", Tag: "analytics"},
-		"GET /api/analytics/wardriving": {Summary: "Wardriving channel analytics", Description: "Activity/entry-point/coverage/signal/session analytics for the #wardriving channel (or another channel via ?channel=): message volume over time, top senders, path[0] entry-point hash-prefix tallies (resolve names via /api/resolve-hops), per-observer coverage (observer's known IATA-derived coordinates, not the sender's — MeshMapper's wardriving messages normally carry an anonymous session token, not live GPS), average SNR/RSSI over the same time buckets as the activity series, each sender's messages grouped into distinct sessions/runs (split on a 15-minute gap, each with an AirtimeMs field — LoRa Time-on-Air × distinct relaying repeaters, same formula as the Overview tab's Relay Airtime Share, omitted in DB-only mode), and any senders who explicitly shared their own position (some clients append plaintext \"<lat>,<lon>\" after the token — a deliberate choice by that sender, confirmed empirically, not something CoreScope infers). Cached 30s per window+channel.", Tag: "analytics",
+		"GET /api/analytics/relay-airtime-share": {Summary: "Relay airtime share per payload type", Description: "Overview tab's Relay Airtime Share. Each distinct packet (deduplicated by content hash) scores LoRa Time-on-Air of its raw bytes × distinct repeaters that relayed it, under the assumed preset returned in preset (config analytics.loraPreset); originator TX is excluded. rows[] = {payload_type, type, route_class, count, count_pct, score, airtime_pct}, sorted by airtime_pct desc. type is the numeric payload type; payload_type is a display label and may change. ADVERT is split into up to four rows that all have type 4, classified from transmissions.route_mask (every raw route type observed for the content hash, independent of ingest order): route_class \"flood\" (only route 0/1 seen, label \"ADVERT (flood)\"), \"zero_hop\" (only route 2/3, label \"ADVERT (zero-hop)\"), \"mixed\" (the same payload was seen on both flood and zero-hop routes, e.g. a contact re-shared as a zero-hop advert; label \"ADVERT (mixed)\"; counted once, with all of its relays) and \"legacy\" (no usable route, label \"ADVERT\"; node detail's route_class calls the same bucket \"unknown\", one classifier). Rows whose route_mask is not backfilled yet fall back to the legacy first-inserted route_type; route_mask_backfill {status: pending|backfilling|complete, remaining} reports whether that fallback is still in use: complete only when no transmission lacks a mask and this server has read every backfilled mask (the server picks them up while running); remaining counts rows without a mask, or, once none are left, an upper bound on the transmissions this server has not re-read yet (null while it cannot be counted). route_class is null on every other row, so key rows by (type, route_class), never by type alone. Time-on-Air uses the frame of the first inserted observation, so its length (path bytes, transport codes) can still depend on ingest order. count_pct and airtime_pct are shares of total_count and total_score (nanoseconds). Payload Type Mix (/api/analytics/rf payloadTypes) is not split. Cached in the RF analytics cache (60s default).", Tag: "analytics",
+			QueryParams: []paramMeta{
+				{Name: "window", Description: "Relative window: 1h, 24h/1d, 3d, 7d/1w or 30d (default: all loaded packets)", Type: "string"},
+				{Name: "from", Description: "RFC3339 start; if from or to is given, window is ignored (an unparseable value leaves that bound open)", Type: "string"},
+				{Name: "to", Description: "RFC3339 end; if from or to is given, window is ignored (an unparseable value leaves that bound open)", Type: "string"},
+			}},
+		"GET /api/analytics/advert-intervals": {Summary: "Mesh-wide estimated advert intervals", Description: "#245 M2: the flood and zero-hop advert intervals the nodes run with, estimated per node exactly as node detail's advertIntervals (include=advertRoutes) - the newest 20 flood and 20 zero-hop adverts, the same classifier and estimator, snapped to the firmware's settable values (flood.advert.interval whole hours 3-168, advert.interval even minutes 60-240 or the 2-minute new-install default). Counts only nodes in the node list with at least one ADVERT; hidden identities are left out. Distributions (buckets) hold medium and high confidence estimates; low confidence, irregular, too few and not observed are counted beside them. No zero-hop adverts means the zero-hop interval is 0 (off) or no observer hears the node directly, so it is reported as not observed. Computed once per analytics cycle by a background pass over the database (config analytics.recomputeIntervalSeconds.advertIntervals, #492 pauseWhenIdle applies to it); every request, filtered or not, is answered from that snapshot.", Tag: "analytics", Response: schemaRef("AdvertIntervalAnalyticsResponse"),
+			QueryParams: append([]paramMeta{
+				{Name: "region", Description: "Comma-separated region (IATA) codes: only nodes whose sampled adverts an observer in one of them heard.", Type: "string"},
+				{Name: "area", Description: "Configured area key: only nodes whose position lies in the area (unknown key: 400).", Type: "string"},
+			}, dagiParamMetas("Only nodes whose position is in it (unknown code: 400).")...)},
+		"GET /api/analytics/advert-intervals/bucket": {Summary: "Nodes of one advert interval bucket", Description: "#896: the nodes one Flood or Zero-hop bucket of GET /api/analytics/advert-intervals counts, by the same rule (medium/high confidence estimates, keyed by interval_s and snapped) over the same snapshot rows and region/area filter. Served from the published analytics snapshot only: 503 before the first one, never a database scan. Identities the instance hides (node or observer blacklist, hidden-name prefix on the node, inactive-node or observer name, checked at serve time) are withheld: counted in withheld, never listed; nodes stays the histogram's count. Sorted by name case-insensitively, then name, then key. These are observed estimates, not confirmed firmware settings.", Tag: "analytics", Response: schemaRef("AdvertIntervalBucketResponse"),
+			QueryParams: []paramMeta{
+				{Name: "class", Description: "Route class of the distribution.", Type: "string", Required: true, Enum: []string{advertClassFlood, advertClassZeroHop}},
+				{Name: "interval_s", Description: "The bucket's interval_s (a positive integer; unsnapped buckets can lie above 168 h).", Type: "integer", Required: true},
+				{Name: "snapped", Description: "The bucket's snapped.", Type: "boolean", Required: true},
+				{Name: "region", Description: "As GET /api/analytics/advert-intervals.", Type: "string"},
+				{Name: "area", Description: "As GET /api/analytics/advert-intervals (unknown key: 400).", Type: "string"},
+				{Name: "kommune", Description: "As GET /api/analytics/advert-intervals (unknown code: 400); likewise landsdel, dkregion and postnr.", Type: "string"},
+				{Name: "offset", Description: "Visible members to skip (default 0).", Type: "integer"},
+				{Name: "limit", Description: "Members per page: default 50, at most 200 (larger values are capped).", Type: "integer"},
+				{Name: "snapshot", Description: "generated_at of the snapshot the client paged from; 409 when the published snapshot differs.", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "409", Description: "snapshot= is no longer the published snapshot; the body (AdvertIntervalBucketConflict) carries the current generated_at. Restart from offset 0."},
+				{Status: "500", Description: "Identity metadata could not be read (fails closed, no list)."},
+				{Status: "503", Description: "No analytics snapshot published yet (warming up); Retry-After gives the seconds to wait."},
+			}},
+		"GET /api/scope-audit": {Summary: "Declared versus observed forwarding scopes", Description: "Observer-confirmed scope declarations compared with collision-safe flood path evidence. Missing observations are not proof of a configuration error. Unknown scopes, ambiguous hops, absent observations, and declarations older than seven days make evidence incomplete. Observer scope lists may be truncated without a completeness flag. Cached 30 seconds for each of three supported windows; identity visibility is applied live.", Tag: "analytics", QueryParams: []paramMeta{{Name: "window", Description: "Observation window: 1h, 24h (default), or 7d", Type: "string"}}},
+		"GET /api/scope-audit/transport": {Summary: "Observed scope transport by repeater", Description: "#414: every repeater or room seen forwarding flood traffic (TRANSPORT_FLOOD/FLOOD observations) in the window, including repeaters never asked for a declaration (declaration null, not the same as an empty declaration). With scope, each row reports carrier (distinct transmissions seen carrying it) and nonCarrier (forwarded without it) and an evidence label: carrier, not-seen-carrying, ambiguous (a hop prefix shared with another repeater carried the scope), incomplete (unknown scopes or frames without headers), low-evidence (fewer than minForwarded transmissions) or no-scope-traffic (nobody in the population was seen carrying it). Evidence is observation only, never a configuration verdict: quiet traffic and observer coverage explain absence. Uses the same collision-safe attribution and per-transmission deduplication as /api/scope-audit; repeaters seen only through ambiguous prefixes are not listed. region restricts the whole population (counts, rows and details) to observations heard by observers in those IATA regions. One read-only scan per window and region is cached 30 seconds (bounded, singleflight) and serves every scope; identity visibility is applied live. coverage.complete is false when the oldest stored observation is newer than the window start.", Tag: "analytics", QueryParams: []paramMeta{
+			{Name: "window", Description: "Observation window: 1h, 24h (default), or 7d", Type: "string"},
+			{Name: "scope", Description: "Region scope name, exact case, optional leading #; omitted lists forwarders without carrier evidence", Type: "string"},
+			{Name: "region", Description: "Comma-separated observer IATA codes (at most 32); All or empty means every observer; codes without observers match nothing", Type: "string"},
+		}},
+		"GET /api/analytics/wardriving": {Summary: "Wardriving channel analytics", Description: "Activity/entry-point/coverage/signal/session analytics for the #wardriving channel (or another channel via ?channel=): message volume over time, top senders, path[0] entry-point hash-prefix tallies (resolve names via /api/resolve-hops), per-observer coverage (not the sender's — MeshMapper's wardriving messages normally carry an anonymous session token, not live GPS; each observer's coordinates prefer its own real node position, falling back to its configured IATA/region code's centroid only when no real position is known, with positionSource (\"real\"/\"iata\"/\"none\") marking which applies — #381), average SNR/RSSI over the same time buckets as the activity series, each sender's messages grouped into distinct sessions/runs (split on a 15-minute gap, each with an AirtimeMs field — LoRa Time-on-Air × distinct relaying repeaters, same formula as the Overview tab's Relay Airtime Share, omitted in DB-only mode), and any senders who explicitly shared their own position (some clients append plaintext \"<lat>,<lon>\" after the token — a deliberate choice by that sender, confirmed empirically, not something CoreScope infers). Cached 30s per window+channel.", Tag: "analytics",
 			QueryParams: []paramMeta{
 				{Name: "window", Description: "Time window: 1h, 24h (default), or 7d", Type: "string"},
 				{Name: "channel", Description: "Channel name to analyze (default #wardriving)", Type: "string"},
@@ -135,9 +359,54 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "until", Description: "RFC3339 end time — overrides window when paired with since", Type: "string"},
 			}},
 
+		"GET /api/analytics/observer-comparison": {Summary: "Reference-to-many observer comparison", Description: "Descriptive packet-overlap comparison between one reference observer and one or more other observers (#122). Computed server-side from every eligible RX observation.timestamp in [window.start, window.end) -- not from a client-side packet-list sample, and not from transmissions.first_seen -- so a transmission re-observed inside the window counts even if first seen earlier. Each transmission_id counts once per observer regardless of how many paths/observations reached it; TX and any non-RX/unknown direction are excluded. rows[].referenceCoveragePct/otherCoveragePct are null (not 0) when their denominator is zero. No SNR/RSSI comparison and no health classification -- counts and percentages only. Bounded to observerComparisonMaxObservers (40) compared observers per request and cached 30s per (ref, hours, observer set).", Tag: "analytics",
+			QueryParams: []paramMeta{
+				{Name: "ref", Description: "Reference observer id (required)", Type: "string"},
+				{Name: "hours", Description: "Window size: 1, 6, or 24 (required)", Type: "integer"},
+				{Name: "observers", Description: "Comma-separated ids of the other observers to compare against the reference (required, 1-40, must not include ref)", Type: "string"},
+			}},
+
 		// Channels
-		"GET /api/channels":                 {Summary: "List channels", Description: "Returns known mesh channels with message counts.", Tag: "channels"},
-		"GET /api/channels/{hash}/messages": {Summary: "Get channel messages", Description: "Returns messages for a specific channel.", Tag: "channels"},
+		"GET /api/channels": {Summary: "List channels", Description: "Returns known mesh channels with message counts. approvedChannels ([{name, hash}]) lists the shared hashtag channels an administrator approved, even before they carry traffic; omitted when empty. A channel with stored messages whose shared-channel proposal is not approved (revoked, suggested again and pending, or that re-suggestion rejected) is left out of the list (#251), unless the ingestor also decrypts that name through its built-in/config list (rainbow table, hashChannels, channelKeys); only approving the proposal lists it again, with its history. hiddenChannels ([string], omitted when empty) names the channels left out, so the page does not re-create their rows from live packets; it only names channels that have stored messages (never an unreviewed suggestion), it is global and not filtered by region, and another open tab keeps the set it last loaded, also after a re-approval. The messages stay readable per channel (GET /api/channels/{hash}/messages) and nothing is deleted. Decided per channel with stored messages from a short-lived snapshot of the proposals table (10s, dropped early when an approve/revoke result is read), never a per-request query and without a row cap. When the ingestor's built-in names file is missing or unreadable nothing is hidden. GET /api/analytics/channels is not filtered and still counts these channels.", Tag: "channels"},
+		"GET /api/channels/{hash}/messages": {Summary: "Get channel messages", Description: "Returns messages for a specific channel. The {hash} path parameter is the existing channel route key: the operator-assigned channel name for a decrypted channel, or \"enc_<HEX>\" for an undecryptable one — it is not the on-wire channel hash. The separate channelHashHex field on each message carries the actual one-byte hash taken from the packet (see the ChannelMessage schema).", Tag: "channels", Response: schemaRef("ChannelMessagesResponse"),
+			QueryParams: []paramMeta{
+				{Name: "limit", Description: "Max messages to return", Type: "integer"},
+				{Name: "offset", Description: "Pagination offset", Type: "integer"},
+				{Name: "region", Description: "Filter to transmissions observed by an observer in the given region code(s).", Type: "string"},
+			}},
+
+		// Shared channel proposals (internal/channelregistry). The server only
+		// queues requests; the ingestor applies them. Timestamps are Unix ms.
+		"GET /api/channel-proposals/config":               {Summary: "Channel suggestion availability", Description: "Returns {enabled}: whether public suggestions are open (requires channelProposals.enabled and a strong apiKey).", Tag: "channels"},
+		"POST /api/channel-proposals":                     {Summary: "Suggest a public hashtag channel", Description: "Body {name}, exactly one JSON object without other fields. Only public hashtag channel names (at most 31 UTF-8 bytes including #, case preserved, no control, line-separator or invisible formatting characters) are accepted — never keys. Returns 202 {requestId}; 400 invalid body or name, 403 disabled, 429 rate limited, 503 queue full (both with Retry-After).", Tag: "channels"},
+		"GET /api/channel-proposals/requests/{requestId}": {Summary: "Status of a suggestion or review request", Description: "Returns {status: queued|pending|approved|rejected|revoked|error, proposal: {id, name, status, createdAt, reviewedAt}, error, builtIn}. builtIn is true when the ingestor already decrypts the name through its built-in/config list. 404 when unknown or expired (24h).", Tag: "channels"},
+		"GET /api/admin/channel-proposals":                {Summary: "List channel suggestions", Description: "Returns {proposals, enabled}, newest first, bounded. A proposal whose name the ingestor already decrypts through its built-in/config list (rainbow table, hashChannels, channelKeys) carries builtIn: true. A proposal whose name differs from another proposal's or a built-in name only by letter case carries nearDuplicateOf: [those names] — a hint, not a merge: hashtag keys are derived from the exact bytes of the name (sha256 of \"#name\"), so #HelloWorld and #helloworld are different channels and stay separate proposals. The hint also sees proposals outside the status filter. An approved proposal carries approvedBy: auto (the autoApprove policy) or admin (#616); it is omitted on other statuses and until the ingestor has added channel_proposals.approved_by, and for approvals from before that migration it is inferred (approved within 60s of the suggestion = auto). Optional status filter.", Tag: "admin", Auth: true, QueryParams: []paramMeta{{Name: "status", Description: "pending, approved, rejected or revoked", Type: "string"}}},
+		"POST /api/admin/channel-proposals/{id}/approve":  {Summary: "Approve a channel suggestion", Description: "Queues the approval and returns 202 {requestId}. Approved channels are decrypted by the ingestor and listed for everyone.", Tag: "admin", Auth: true},
+		"POST /api/admin/channel-proposals/{id}/reject":   {Summary: "Reject a channel suggestion", Description: "Queues the rejection and returns 202 {requestId}.", Tag: "admin", Auth: true},
+		"POST /api/admin/channel-proposals/{id}/revoke":   {Summary: "Revoke an approved channel suggestion", Description: "Undoes a previous approval: the ingestor stops decrypting the channel and it drops out of GET /api/channels' approvedChannels. The channel also leaves GET /api/channels (#251) unless the ingestor still decrypts that name through its built-in/config list. Historical messages already decoded and stored are NOT deleted: they stay readable per channel (GET /api/channels/{hash}/messages), and the channel returns to the list, with its history, if the suggestion is approved again. Synchronous precondition check: 202 {requestId} only when the proposal is currently approved; 409 (no side effect, nothing queued) when it is not.", Tag: "admin", Auth: true},
+		// Owner antenna-height claims (#789 M2a). The server only queues
+		// claims and decisions; the ingestor stores them and proves claims at
+		// advert ingest. Timestamps are Unix ms.
+		"POST /api/nodes/{pubkey}/antenna-claims": {Summary: "Claim a node's antenna height", Description: "One JSON object without other fields, at most 1 KiB, carrying a height part, a station-details part (#898) or both. Height part: heightM (0-100 m in 0.1 m steps) or clear:true (clear always means: remove the height). Details part: details {antennaType: omni|yagi|panel|other, gainDbi: -5 to 20 dBi in 0.1 dBi steps, power: 1-3 of mains|solar|battery, installation: roof|mast|indoor|portable, contactPublic, contactAdmin}, at least one field, or clearDetails:true. Both contacts are optional, 1-32 letters, digits, single spaces or . _ - @ # + / with no leading or trailing space, and are refused, never rewritten; contactPublic is shown to everyone on GET /api/nodes/{pubkey}/station once approved; contactAdmin is admin only and never in a public response. A details part replaces all six fields of the node's previous details. Open only when antennaClaims.enabled is set and a strong apiKey is configured (403 otherwise); setting details also needs antennaClaims.detailsEnabled (403), clearing them does not. Returns 202 {requestId, code, expiresAt, nameBudgetBytes, suggestedName}: put the 6-character code into the node's advert name as a whole space-separated word within the first nameBudgetBytes (23) bytes, appended after the name, and send an advert. A new advert with a valid signature from that public key proves the claim; the code is single-use and expires after 24 h. A proven claim that only clears takes effect at once; any other proven claim is approved by an administrator, or automatically unless it is flagged for review (a gain outside 0-15 dBi is flagged too): a claim that sets details with antennaClaims.autoApproveDetails (and detailsEnabled), any other with antennaClaims.autoApproveProven. A switch turned on later does not approve claims already proven. One approval decides the whole claim, and replaces only the parts it carries. Hidden, unknown and unpositioned nodes all answer the same 404. A bad body costs no budget.", Tag: "nodes",
+			Errors: []routeError{
+				{Status: "403", Description: "Owner claims are disabled, or the body sets details while antennaClaims.detailsEnabled is off."},
+				{Status: "429", Description: "Global budget of antennaClaims.submissionsPerHour (default 20) exceeded; Retry-After gives the seconds to wait."},
+				{Status: "503", Description: "The claim queue is full (antennaClaims.maxQueuedRequests); Retry-After is set. The budget is refunded."},
+			}},
+		"GET /api/nodes/{pubkey}/station":              {Summary: "A node's owner-confirmed station details", Description: "Returns {details, approvedAt, stale}: the station details of the node's approved claim (#898): antennaType, gainDbi, power (canonical order mains, solar, battery), installation and the owner's optional contactPublic, each absent when not given. details is null when there are none, they were removed, station details are off (antennaClaims.detailsEnabled), or the node moved more than antennaClaims.staleMoveM metres from where they were proven (then stale is true). The administrator contact is never returned. Served from a snapshot refreshed every 30 s; it does not need the terrain profile. Hidden, unknown and unpositioned nodes all answer the same 404.", Tag: "nodes"},
+		"GET /api/antenna-claims/config":               {Summary: "Antenna height claim availability", Description: "Returns {enabled, detailsEnabled, autoApproveDetails, pollInitialMs, pollBackoff, pollMaxMs, pollMaxAttempts, adminDefaultFilter}: whether owners can claim a node's antenna height (requires antennaClaims.enabled and a strong apiKey), the same gate as POST /api/nodes/{pubkey}/antenna-claims, whether they can also set station details (antennaClaims.detailsEnabled on top of that), whether a proven, unflagged claim that sets details is approved without an administrator (antennaClaims.autoApproveDetails with detailsEnabled, #1007), and the operator's antennaClaims settings for the claim status polling (first delay, growth factor, cap per delay, number of checks) and the admin queue's first filter.", Tag: "nodes"},
+		"GET /api/nodes/{pubkey}/antenna":              {Summary: "A node's current antenna height", Description: "Returns {antennaM, antennaSource, assumed, estimatePending}: the antenna height a terrain profile uses for the node and its source, by the profile's precedence (operator-node, owner, dsm-estimate, operator-role, role-default). It never measures the surface: estimatePending is true while no surface estimate is cached, and a profile may then still raise a default to one. Hidden, unknown and unpositioned nodes all answer the same 404; 503 while the terrain profile is off.", Tag: "nodes"},
+		"GET /api/antenna-claims/requests/{requestId}": {Summary: "Status of an antenna height claim", Description: "Returns {status: queued|pending|proven|approved|rejected|revoked|expired|superseded|error, expiresAt, error}. The request id is the capability; the code is never returned here. A claim whose node is hidden answers like an unknown one (404).", Tag: "nodes"},
+		"GET /api/admin/antenna-claims":                {Summary: "List antenna height claims", Description: "Returns {claims, enabled, autoApprove, autoApproveDetails} (autoApprove is antennaClaims.autoApproveProven; autoApproveDetails is antennaClaims.autoApproveDetails with detailsEnabled), newest first, at most 1000. Each claim has id, pubkey, name, role, heightOp and detailsOp (set or clear; absent for a part the claim does not carry), heightM (set only when heightOp is set), details (station details, when detailsOp is set), heightInForce and detailsInForce (which parts of an approved claim are still served; a part a newer approved claim replaced is not), contactAdmin (admin only; never in a public response; listed for proven and approved claims only), status, needsReview (the height is more than antennaClaims.reviewDeltaM metres above the cached surface estimate + 2 m, or more than 2 m below the surface), createdAt, expiresAt, provenAt, proofHash, proofLat, proofLon, reviewedAt, approvedBy (auto, admin or owner), movedM and stale (the node moved more than antennaClaims.staleMoveM metres from the proof position; its height is then not used). Codes are never listed. Claims of hidden nodes are left out. Optional status filter.", Tag: "admin", Auth: true, QueryParams: []paramMeta{{Name: "status", Description: "pending, proven, approved, rejected, revoked, expired or superseded", Type: "string"}}},
+		"POST /api/admin/antenna-claims/{id}/approve":  {Summary: "Approve a proven antenna height claim", Description: "Queues the approval of the whole claim and returns 202 {requestId}; 409 unless the claim is proven, or when an approved claim proven later already carries one of its parts. The approved height becomes the node's owner antenna height in terrain profiles (below the operator's per-node height, above the surface-model estimate) and the approved details the node's station details; each replaces only the same part of the node's previous claims (a replaced details part loses its contacts).", Tag: "admin", Auth: true},
+		"POST /api/admin/antenna-claims/{id}/reject":   {Summary: "Reject an antenna height claim", Description: "Queues the rejection of the whole claim and returns 202 {requestId}; 409 unless the claim is pending or proven. Its contacts are deleted.", Tag: "admin", Auth: true},
+		"POST /api/admin/antenna-claims/{id}/revoke":   {Summary: "Revoke an approved antenna height claim", Description: "Queues the revocation of the whole claim and returns 202 {requestId}; 409 unless the claim is approved. Its contacts are deleted and nothing older comes back: profiles fall back to the next antenna source and the node has no station details, within 30 s.", Tag: "admin", Auth: true},
+		"GET /api/admin/region-scopes":                 {Summary: "List region-scope decisions", Description: "Admin-only status of observed OTA region-scope names. config.json and hashRegionsPath remain the baseline; approved names form a persistent overlay.", Tag: "admin", Auth: true},
+		"GET /api/admin/region-scopes/audit":           {Summary: "Recent region-scope decisions", Description: "Admin-only bounded audit trail of the latest 100 scope status changes.", Tag: "admin", Auth: true},
+		"POST /api/admin/region-scopes/approve":        {Summary: "Approve an observed unknown region scope", Description: "Body {name}; queues a decision for the ingestor and returns 202 {requestId}. The scope matches packets received afterwards, and the ingestor then re-matches stored transmissions whose region is still unknown (#380, decode backfill): it only ever fills in an unknown scope, never rewrites one already matched, and abstains when two regions collide on the 16-bit code1. Progress is on /api/healthz under decode_backfill. At most " + fmt.Sprint(regions.MaxApprovedScopes) + " scopes can be approved at once, because every region adds one HMAC per scoped packet and raises the chance of an ambiguous 16-bit code1; at the limit the response is 409 and nothing is queued.", Tag: "admin", Auth: true},
+		"POST /api/admin/region-scopes/reject":         {Summary: "Reject an observed unknown region scope", Description: "Body {name}; queues a rejection for the ingestor. No scope key is activated.", Tag: "admin", Auth: true},
+		"POST /api/admin/region-scopes/revoke":         {Summary: "Revoke an approved region scope", Description: "Body {name}; queues revocation. The scope stops matching packets received afterwards. Stored packets keep the scope they were stored with. Names still configured in config.json or hashRegionsPath remain active.", Tag: "admin", Auth: true},
+		"GET /api/admin/region-scopes/requests/{id}":   {Summary: "Region-scope decision status", Description: "Returns queued, approved, rejected, revoked, or error from the ingestor-owned decision queue.", Tag: "admin", Auth: true},
 
 		// Observers
 		"GET /api/observers":                                 {Summary: "List observers", Description: "Returns all known packet observers/gateways.", Tag: "observers"},
@@ -146,13 +415,16 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/observers/{id}/analytics":                  {Summary: "Get observer analytics", Tag: "observers"},
 		"GET /api/observers/{id}/neighbors":                  {Summary: "Get an observer's direct (zero-hop) neighbors", Description: "Ground truth from the observer's own /neighbors firmware report (#1865) -- distinct from the packet-path-inferred neighbor graph. Empty `neighbors` (never null) and an empty `reportedAt` mean the observer has never sent a /neighbors report: opt-in firmware, unavailable on non-PSRAM hardware -- absence is normal, not a fault. Each entry's `scopes` is null unless the neighbor's OTA scope query responded (status=\"responded\"); `name`/`role` are null when the pubkey doesn't resolve to a known node. `seenViaPackets` cross-references the packet-path-inferred neighbor_edges graph: false means this firmware-confirmed neighbor has never had a resolved packet path between it and the observer, a diagnostic signal (possible coverage gap or packet loss), not itself a fault.", Tag: "observers"},
 		"GET /api/observers/{id}/neighbors/{pubkey}/metrics": {Summary: "Get SNR history for one observer<->neighbor direct-RF link", Description: "Raw (unaggregated) history of the snr/heard_secs_ago fields the observer's own /neighbors report carries per neighbor -- report volume per pair is inherently low so, unlike /api/observers/{id}/metrics, there is no resolution/downsampling. Defaults to the last 30 days.", Tag: "observers", QueryParams: []paramMeta{{Name: "since", Description: "RFC3339 lower bound (default: 30 days ago)", Type: "string"}, {Name: "until", Description: "RFC3339 upper bound (default: none)", Type: "string"}}},
-		"GET /api/observers/metrics/summary":                 {Summary: "Observer metrics summary", Description: "Aggregate metrics across all observers.", Tag: "observers"},
+		"GET /api/observers/metrics/summary":                 {Summary: "Observer metrics summary", Description: "Aggregate metrics across all observers within window (noise floor, battery, sparkline). Each row also carries tx_airtime_pct_1h / rx_airtime_pct_1h: the airtime share over the last hour regardless of window, null with under 30 minutes of samples since the last reboot or no sample in the last 15 minutes. duty_cycle_warn_pct is the configured warning threshold (dutyCycleWarnPct, default 10).", Tag: "observers", QueryParams: []paramMeta{{Name: "window", Description: "Lookback such as 1h, 24h, 7d (default 24h)", Type: "string"}, {Name: "region", Description: "IATA code to filter observers", Type: "string"}}},
 		"GET /api/observers/neighbors": {Summary: "Every observer's reported direct neighbors, network-wide", Description: "Flattens /api/observers/{id}/neighbors across ALL observers into one list -- Tools > Observer Neighbors. Same per-entry semantics (scopes null unless the OTA scope query responded, seenViaPackets cross-references the packet-derived neighbor_edges graph, observer/neighbor name null when unresolved). Blacklisted observers (config.json observerBlacklist) are excluded. Empty list (not an error) when no observer has ever sent a /neighbors report. unknownScopes surfaces region-scope names that turned up in a reported neighbor scope list but aren't part of this deployment's configured hashRegions -- scopes the mesh is using that CoreScope doesn't know about yet.", Tag: "observers",
 			Response: schemaRef("AllObserverNeighborsResponse")},
-		"GET /api/analytics/new-nodes": {Summary: "Most recently first-seen nodes, network-wide", Description: "Tools > New Nodes. Newest first, each with its configured area(s) (same touched-areas matching View Path/Ping Scores' Area Activity draw from). Excludes nodes that also appear in inactive_nodes -- a node pruned for inactivity and later returning would otherwise get a freshly-INSERTed nodes.first_seen and misleadingly look brand new; that \"came back after being pruned\" case is its own distinct signal, not covered by this feed. Blacklisted nodes (config.json nodeBlacklist) are excluded. Empty list (not an error) when nothing qualifies.", Tag: "nodes",
+		"GET /api/analytics/new-nodes": {Summary: "Most recently first-seen nodes, network-wide", Description: "Tools > New Nodes. Newest first, each with its configured area(s) (same touched-areas matching View Path/Ping Scores' Area Activity draw from). Excludes nodes that also appear in inactive_nodes -- a node pruned for inactivity and later returning would otherwise get a freshly-INSERTed nodes.first_seen and misleadingly look brand new; that \"came back after being pruned\" case is its own distinct signal, not covered by this feed. Hidden identities are excluded, by the same rule as the node list: nodeBlacklist, observerBlacklist and hiddenNamePrefixes (read live, so a change applies to the next request). Empty list (not an error) when nothing qualifies.", Tag: "nodes",
 			QueryParams: []paramMeta{{Name: "limit", Description: "Max entries to return (default 50)", Type: "integer"}},
 			Response:    schemaRef("NewNodesResponse")},
-		"GET /api/analytics/node-changes": {Summary: "Recent node role/name/position changes and pruned-node returns", Description: "Tools > Node Changes, a durable audit log written by cmd/ingestor's UpsertNode as ADVERTs arrive (not a periodic snapshot diff, so nothing is missed between polls). changeType is \"role\", \"name\", \"position\" (>=1km move; GPS jitter under that is not logged), or \"resurrected\" (pubkey previously pruned to inactive_nodes for inactivity, now advertising again -- oldValue is its last_seen there before it returned). A field is only compared when both the old and new ADVERT values are present, since adverts routinely omit name/location. Each entry also carries the node's CURRENT role and foreign_advert (resolved live, not a historical snapshot) for the Tools page's role and All/Domestic/Foreign filters. Newest first. Blacklisted nodes excluded. Empty list (not an error) when nothing has been logged yet.", Tag: "nodes",
+		"GET /api/moments": {Summary: "Recent live moments (#881)", Description: "The newest moments first, from an in-memory ring of moments.historySize (default 50) entries. The same moments are broadcast on the WebSocket as {\"type\":\"moment\",\"data\":Moment}. Kinds: new_node (a repeater, room or sensor key seen for the first time in retained history: first_seen at most 10 min old and no inactive_nodes row), back_online (a repeater heard again after at least moments.backOnlineHours of silence, or returning from inactive_nodes), record_link (a new longest confident direct neighbor link inside the rolling moments.recordWindowHours, beating the previous record by max(0.5 km, 1 %)), busiest_repeater (the repeater with the most distinct non-advert relays in the last moments.busyWindowMinutes, at least moments.busyMinRelays). Detection runs on existing timers (node delta every 15 s, neighbor-graph swap every 60 s, relay recompute), never per packet; the first look after startup is a silent baseline. Rate limited per kind and globally (moments.maxPerMinute); a tick with more nodes of one kind than its cap allows becomes one moment with more = the rest. Companions never appear; node and observer blacklists and hidden-name prefixes are applied when a moment fires and again on every read; positions are advertised GPS only. An empty list (not an error) when moments are disabled (moments.enabled, default false).", Tag: "nodes",
+			QueryParams: []paramMeta{{Name: "limit", Description: "Max moments to return (default and maximum moments.historySize)", Type: "integer"}},
+			Response:    schemaRef("MomentsResponse")},
+		"GET /api/analytics/node-changes": {Summary: "Recent node role/name/position changes and pruned-node returns", Description: "Tools > Node Changes, a durable audit log written by cmd/ingestor's UpsertNode as ADVERTs arrive (not a periodic snapshot diff, so nothing is missed between polls). changeType is \"role\", \"name\", \"position\" (>=1km move; GPS jitter under that is not logged), or \"resurrected\" (pubkey previously pruned to inactive_nodes for inactivity, now advertising again -- oldValue is its last_seen there before it returned). A field is only compared when both the old and new ADVERT values are present, since adverts routinely omit name/location. Each entry also carries the node's CURRENT role and foreign_advert (resolved live, not a historical snapshot) for the Tools page's role and All/Domestic/Foreign filters. Newest first. Hidden identities are excluded with the node list's rule (#1015): node-blacklisted and observer-blacklisted keys, and nodes whose current name starts with a hidden-name prefix; a name change whose old or new value is a hidden name is also left out. Empty list (not an error) when nothing has been logged yet.", Tag: "nodes",
 			QueryParams: []paramMeta{{Name: "limit", Description: "Max entries to return (default 50)", Type: "integer"}},
 			Response:    schemaRef("NodeChangesResponse")},
 		"GET /api/analytics/network-digest": {Summary: "Rolling-window summary of New Nodes + Node Changes activity", Description: "Tools > Network Digest. \"What happened lately\" at a glance: new-node count, role/name changes, position moves, resurrections, and a ranked breakdown of new-node activity by area, all within the requested window (default 7d). Built on top of /api/analytics/new-nodes and /api/analytics/node-changes -- exact up to 500 rows fetched from each (see newNodesCapped/changesCapped on the response). areaBreakdown counts each new node toward its single most specific configured area (smallest bounding box on overlap), not every area its position happens to fall in -- an umbrella area covering a whole country/continent would otherwise \"win\" on virtually every window regardless of where the activity actually concentrated.", Tag: "nodes",
@@ -165,13 +437,26 @@ func routeDescriptions() map[string]routeMeta {
 		// Misc
 		"GET /api/resolve-hops":  {Summary: "Resolve hop path", Description: "Resolves hash prefixes in a hop path to node names. Returns affinity scores and best candidates.", Tag: "nodes", QueryParams: []paramMeta{{Name: "hops", Description: "Comma-separated hop hash prefixes", Type: "string", Required: true}}},
 		"GET /api/traces/{hash}": {Summary: "Get packet traces", Description: "Returns all observer sightings for a packet hash.", Tag: "packets"},
+		"GET /api/packets/{hash}/card.png": {Summary: "Share card of a packet (1200x630 PNG, the og:image of /p?packet=)", Description: "The link-preview card of one packet (#812): its firmware payload type, route type and deepest hop count, the observer that heard it first and how many observers heard it, the path as a schematic with no basemap (hop points and lines, observers, faint outlines of the touched areas), the spread, the farthest observer from the first, the estimated flood airtime (a lower bound), the first-heard time in UTC and the site name. Every payload type gets a card; nothing of the payload is shown (no message text, channel or sender), and only an advert names its origin. The path follows the ping-score path's visibility rule: a branch through a hidden node or observer is removed whole, a hidden first observation is dropped (the card then shows counts only), approximate positions are left out under an active visibility policy, and every count is computed from what is drawn. The hash is exactly 16 hex characters (no numeric ids). Unknown packets, packets no longer in the store or the database, and adverts from a hidden node are the same 404. The only query key is v, a cache-bust of at most 64 bytes that is accepted and ignored. Cards are cached (64 entries) by the values they show: 2 min while the packet was first heard less than 10 min ago, 24 h after that, with Cache-Control public, max-age to match; a cached card is not charged. A card not in the cache is charged to the per-client budget map.dhm.profile.rateLimitPerMin and drawn in the render slots shared with the other share cards. X-CoreScope-Card says hit, miss or refused. The card's theme and names setting are map.dhm.profile.card's. 404 unless share.packets.enabled. (#812)", Tag: "packets",
+			QueryParams: []paramMeta{
+				{Name: "v", Description: "preview cache-bust, at most 64 bytes; ignored", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "A hash that is not exactly 16 hex characters, or a query key other than one v."},
+				{Status: "404", Description: "Packet sharing disabled, an unknown packet, a packet no longer stored, or an advert from a hidden node."},
+				{Status: "429", Description: "Per-client budget of cards not in the cache exceeded (map.dhm.profile.rateLimitPerMin, shared with the other share cards). Retry-After gives the seconds to wait."},
+				{Status: "503", Description: "The server is drawing as many cards as it draws at once; nothing was done and the per-client charge is given back. Retry-After gives the seconds to wait."},
+			}},
 		"GET /api/packets/{hash}/path": {Summary: "Get a packet's full geographic flood spread", Description: "Resolves EVERY distinct station that observed a packet to its own branch: hop count (from that station's deepest observation) plus, where resolvable, each relay's name/role/lat/lon in path order and the station's own position (self-advertised GPS when known, same as /api/observers, else its configured IATA code). A station heard more than once (later flood copies via longer routes) contributes only its deepest observation. Lat/lon are null for any hop or observer that has no known position -- callers should draw a gap, not guess. Also returns `first`: the single earliest-arriving observation across every station (usually 0 hops, close to the sender) -- an approximate origin landmark, distinct from branches[0] which is the deepest/farthest-traveled branch. Backs the Channels tab's ping-bot \"View path\" map link.", Tag: "packets",
 			Response: schemaRef("PacketPathResponse")},
 		"GET /api/iata-coords":       {Summary: "Get IATA airport coordinates", Description: "Returns lat/lon for known airport codes (used for observer positioning).", Tag: "config"},
 		"GET /api/audio-lab/buckets": {Summary: "Audio lab frequency buckets", Description: "Returns frequency bucket data for audio analysis.", Tag: "analytics"},
-		"GET /api/ping-scores": {Summary: "Ping-score highscore board", Description: "Global (not scoped by region/area) records and leaderboards derived from every ping-bot-triggering channel message ever seen: farthest reach, most hops, widest simultaneous spread, fastest full spread, and most airtime-efficient ping, plus which relay nodes and which observers appear most often. Computed from the same GetPacketPath + LoRa-airtime-estimate logic behind /api/packets/{hash}/path and refreshed on a background interval, so it may lag the very latest ping by a few minutes. Fields are omitted (not zero) until at least one qualifying ping has been recorded.", Tag: "packets",
+		"GET /api/ping-scores": {Summary: "Ping-score highscore board", Description: "Global (not scoped by region/area) records and leaderboards derived from every ping-bot-triggering channel message ever seen: farthest reach, most hops, widest simultaneous spread, fastest full spread, and most airtime-efficient ping, plus which relay nodes and which observers appear most often. Computed from the same getPacketPath + LoRa-airtime-estimate logic behind /api/packets/{hash}/path and refreshed on a background interval, so it may lag the very latest ping by a few minutes. Fields are omitted (not zero) until at least one qualifying ping has been recorded.", Tag: "packets",
 			Response: schemaRef("PingScoresResponse")},
-		"GET /api/analytics/areas": {Summary: "Per-configured-Area node density, cross-area bridge nodes, and position-fix coverage", Description: "Three breakdowns over the drawn-polygon Areas configured via the meshguide.dk sync, distinct from hashRegion scope adoption (see /api/analytics/scope-stats): (1) density, node count/active-degraded-silent health/role mix per area (multi-membership via AreaKeysForPoint, so a node in a sub-area also counts toward its parent region), (2) bridgeNodes, nodes whose packet-derived neighbor_edges reach into at least one OTHER area (single most-specific area via AreaKeyForPoint), ranked by how many other areas they reach -- distinct from the network-wide, area-unaware bridge_score betweenness centrality, (3) positionGaps, per area how many nodes have a real GPS fix vs. how many were only placeable via the same neighbor-centroid estimate View Path's approx markers use (nearestPositionedNeighbor, geo-sanity-filtered by Config.NeighborMaxEdgeKm so a stray MQTT-bridge observer↔last-hop edge hundreds of km away can't skew the estimate or inflate its spreadKm). estimatedNodes is the flat, network-wide list backing positionGaps' approximated counts, with actual estimated coordinates -- used by the Areas tab's \"View Estimated Nodes\" map view and Tools > Position-Fix Coverage Gaps. Returns an empty response if no Areas are configured. Cached 30s.", Tag: "analytics",
+		"GET /api/ping-scores/{hash}/path": {Summary: "Get a displayed ping record's saved path", Description: "Returns coherent live or archived path evidence for the current record slot. Archived capture time describes saved geometry, not necessarily the transmission time. Old expired observations cannot be reconstructed. Superseded slot/hash pairs return 404; invalid slots return 400. Current identity privacy rules apply to both sources; unavailable and initializing responses omit path.", Tag: "packets",
+			QueryParams: []paramMeta{{Name: "record", Description: "allTime.<kind> or thisWeek.<kind>; kind is farthestPing, mostHopsPing, widestSpreadPing, fastestSpreadPing or mostEfficientPing", Type: "string", Required: true}},
+			Response:    schemaRef("PingScorePathResponse")},
+		"GET /api/analytics/areas": {Summary: "Per-configured-Area node density, cross-area bridge nodes, and position-fix coverage", Description: "Three breakdowns over the drawn-polygon Areas configured via the meshguide.dk sync, distinct from hashRegion scope adoption (see /api/analytics/scope-stats): (1) density, node count/active-degraded-silent health/role mix per area (multi-membership via AreaKeysForPoint, so a node in a sub-area also counts toward its parent region), (2) bridgeNodes, nodes whose packet-derived neighbor_edges reach into at least one OTHER area (single most-specific area via AreaKeyForPoint), ranked by how many other areas they reach -- distinct from the network-wide, area-unaware bridge_score betweenness centrality, (3) positionGaps, per area how many nodes have a real GPS fix vs. how many were only placeable via the same neighbor-centroid estimate View Path's approx markers use (nearestPositionedNeighbor, geo-sanity-filtered by Config.NeighborMaxEdgeKm so a stray MQTT-bridge observer↔last-hop edge hundreds of km away can't skew the estimate or inflate its spreadKm). estimatedNodes is the flat, network-wide list backing positionGaps' approximated counts, with actual estimated coordinates -- used by the Areas tab's \"View Estimated Nodes\" map view and Tools > Position-Fix Coverage Gaps. Hidden identities (nodeBlacklist, hiddenNamePrefixes) are left out of every count and list, the same rule /api/nodes applies, and contribute nothing as bridge neighbors or as estimate contributors (#1005). Returns an empty response if no Areas are configured. Cached 30s; a blacklist or hidden-prefix change invalidates the cache.", Tag: "analytics",
 			Response: schemaRef("AreaAnalyticsResponse")},
 		"GET /api/analytics/gps-sanity": {Summary: "Nodes whose self-reported GPS disagrees with their own RF neighbors", Description: "The neighbor-centroid technique nearestPositionedNeighbor uses to ESTIMATE a position for a node with no GPS, flipped around to sanity-check a node that DOES report one. For each node with a real (non-zero) GPS fix, takes its strongest neighbor_edges neighbor as an anchor, keeps whichever other positioned neighbors agree with the anchor within GPSSanityClusterTightKm (50km), and -- only if at least GPSSanityMinClusterSize (2) survive that filter -- compares the node's own position against their weighted centroid. Flags it when the distance exceeds GPSSanitySuspectKm (100km). Most nodes are skipped, not evaluated (no neighbor_edges, no positioned neighbor, or too scattered a neighbor set to trust), so evaluated is always well under totalRealGps. v1: doesn't weight by neighbor_edges' hash-prefix ambiguity mode (the confidence indicator public/nodes.js's Neighbors panel shows) since that breakdown only lives in the in-memory NeighborGraph, not the persisted table this reads. Not area-scoped -- works regardless of whether Areas are configured. Cached 30s.", Tag: "analytics",
 			Response: schemaRef("GPSSanityResponse")},
@@ -181,6 +466,373 @@ func routeDescriptions() map[string]routeMeta {
 // schemaRef returns an OpenAPI $ref pointing at a named component schema.
 func schemaRef(name string) map[string]interface{} {
 	return map[string]interface{}{"$ref": "#/components/schemas/" + name}
+}
+
+// openAPISchema is a typed OpenAPI 3.0 schema object. It marshals to the
+// same JSON as the map literals in componentSchemas; schemas added since
+// #2073 use it instead of new untyped map literals (#1383).
+type openAPISchema struct {
+	Ref         string                    `json:"$ref,omitempty"`
+	Type        string                    `json:"type,omitempty"`
+	Description string                    `json:"description,omitempty"`
+	Enum        []string                  `json:"enum,omitempty"`
+	Nullable    bool                      `json:"nullable,omitempty"`
+	Minimum     *int                      `json:"minimum,omitempty"`
+	Items       *openAPISchema            `json:"items,omitempty"`
+	Properties  map[string]*openAPISchema `json:"properties,omitempty"`
+}
+
+func openAPIRef(name string) *openAPISchema {
+	return &openAPISchema{Ref: "#/components/schemas/" + name}
+}
+
+// openAPIResponse / openAPIMediaType are typed OpenAPI 3.0 response objects.
+// They marshal to the same JSON as the map literals used for the shared 200
+// response; routeMeta.Errors uses them instead of new untyped map literals
+// (#1383).
+type openAPIResponse struct {
+	Description string                      `json:"description"`
+	Content     map[string]openAPIMediaType `json:"content,omitempty"`
+}
+
+type openAPIMediaType struct {
+	Schema *openAPISchema `json:"schema,omitempty"`
+}
+
+// jsonErrorResponse is an application/json response carrying the shared
+// ApiError body.
+func jsonErrorResponse(description string) openAPIResponse {
+	return openAPIResponse{
+		Description: description,
+		Content:     map[string]openAPIMediaType{"application/json": {Schema: openAPIRef("ApiError")}},
+	}
+}
+
+// momentSchemas documents GET /api/moments and the {"type":"moment"}
+// WebSocket frame (#881).
+func momentSchemas() map[string]*openAPISchema {
+	zero := 0
+	num := func(desc string) *openAPISchema { return &openAPISchema{Type: "number", Description: desc} }
+	return map[string]*openAPISchema{
+		"MomentNode": {
+			Type:        "object",
+			Description: "A node in a moment. Never a companion.",
+			Properties: map[string]*openAPISchema{
+				"publicKey": {Type: "string"},
+				"name":      {Type: "string", Description: "Omitted when the node has no name."},
+				"role":      {Type: "string"},
+				"lat":       num("Advertised latitude; omitted without GPS (never 0,0 or an estimate)."),
+				"lon":       num("Advertised longitude; omitted without GPS."),
+			},
+		},
+		"MomentLink": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"a":          openAPIRef("MomentNode"),
+				"b":          openAPIRef("MomentNode"),
+				"distanceKm": num("Great-circle distance between the advertised positions, 0.1 km."),
+			},
+		},
+		"Moment": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"id":            {Type: "string", Description: "Unique per server run; clients deduplicate by it."},
+				"kind":          {Type: "string", Enum: []string{MomentKindNewNode, MomentKindBackOnline, MomentKindRecordLink, MomentKindBusiest}},
+				"at":            {Type: "string", Description: "RFC3339 time the moment was detected."},
+				"node":          openAPIRef("MomentNode"),
+				"link":          openAPIRef("MomentLink"),
+				"silentHours":   num("back_online: hours of silence, 0.1 h."),
+				"relays":        {Type: "integer", Minimum: &zero, Description: "busiest_repeater: distinct non-advert packets relayed in windowMinutes."},
+				"windowMinutes": {Type: "integer", Minimum: &zero, Description: "busiest_repeater: the busy window."},
+				"previousKm":    num("record_link: the record this link beat; omitted for the first record."),
+				"more":          {Type: "integer", Minimum: &zero, Description: "Further nodes of the same kind folded into this moment by the per-kind cap; omitted when 0."},
+			},
+		},
+		"MomentsResponse": {
+			Type:       "object",
+			Properties: map[string]*openAPISchema{"moments": {Type: "array", Items: openAPIRef("Moment"), Description: "Newest first."}},
+		},
+	}
+}
+
+// heardBySchemas documents the node health endpoints and their Heard By
+// lists (#76).
+func heardBySchemas() map[string]*openAPISchema {
+	zero := 0
+	str := func(desc string) *openAPISchema { return &openAPISchema{Type: "string", Description: desc} }
+	num := func(desc string) *openAPISchema {
+		return &openAPISchema{Type: "number", Nullable: true, Description: desc}
+	}
+	canRelay := &openAPISchema{Type: "boolean", Description: "Node health only: false for an observer that reported repeat off (listener), true for repeat on; omitted when it never reported repeat."}
+	stats := &openAPISchema{
+		Type: "object",
+		Properties: map[string]*openAPISchema{
+			"totalTransmissions": {Type: "integer", Minimum: &zero},
+			"totalObservations":  {Type: "integer", Minimum: &zero},
+			"totalPackets":       {Type: "integer", Minimum: &zero, Description: "Same as totalTransmissions (backward compatibility)."},
+			"packetsToday":       {Type: "integer", Minimum: &zero},
+			"avgSnr":             num("Mean SNR (dB) over the node's direct receptions (HeardDirectObserver); null without one. Other copies carry the SNR of whichever node the observer heard."),
+			"avgHops":            {Type: "integer", Description: "Node health only: rounded mean path length of the node's transmissions."},
+			"lastHeard":          {Type: "string", Nullable: true, Description: "Newest own ADVERT or unambiguous relay evidence (#64)."},
+			"lastAdvert":         {Type: "string", Nullable: true, Description: "Newest own ADVERT: from the packet-store window, else the newest own ADVERT in the database (#848)."},
+			"lastAdvertSource":   {Type: "string", Description: "Where lastAdvert came from: window (in-memory packet store) or db (database, outside the window). Omitted when lastAdvert is null (#848)."},
+		},
+	}
+	direct := &openAPISchema{Type: "array", Items: openAPIRef("HeardDirectObserver"), Description: "Observers that received the node's own transmission, most direct receptions first."}
+	relay := &openAPISchema{Type: "array", Items: openAPIRef("HeardRelayObserver"), Description: "Every other observer of the node's transmissions, most transmissions first."}
+	return map[string]*openAPISchema{
+		"HeardDirectObserver": {
+			Type: "object",
+			Description: "Heard By (#76), direct: at least one observation shows this observer received the node's own transmission on air. Observed routing evidence, not radio range. Only an ADVERT (signature not known invalid) can show it, with the observation's own route type (its frame header; else the transmission's route type, unknown when the transmission was heard on both flood and direct routes) and its own path: " +
+				"a FLOOD or TRANSPORT_FLOOD path that is empty credits the advertiser, a non-empty one its last hop when that hop is the node's full key or a wire prefix unique among relay-capable nodes and the node is not a listener; " +
+				"an empty DIRECT or TRANSPORT_DIRECT path (zero hop) credits the advertiser; a non-empty direct path is the remaining route and credits nobody. " +
+				"An observer never counts as hearing its own upload. Hidden identities are left out.",
+			Properties: map[string]*openAPISchema{
+				"observer_id":   str(""),
+				"observer_name": str(""),
+				"packetCount":   {Type: "integer", Minimum: &zero, Description: "Direct receptions."},
+				"avgSnr":        num("Mean SNR (dB) over the direct receptions: the node's signal at this observer."),
+				"avgRssi":       num("Mean RSSI (dBm) over the direct receptions."),
+				"can_relay":     canRelay,
+			},
+		},
+		"HeardRelayObserver": {
+			Type:        "object",
+			Description: "Heard By (#76), relay: this observer saw the node's traffic, but no observation shows it received the node's own transmission (relayed copies, non-ADVERT traffic, direct routes, an ambiguous last hop). Its signal values describe another transmitter and are not reported. An empty directObservers list is missing evidence, not proof of missing coverage.",
+			Properties: map[string]*openAPISchema{
+				"observer_id":   str(""),
+				"observer_name": str(""),
+				"packetCount":   {Type: "integer", Minimum: &zero, Description: "The node's transmissions this observer saw (any copy)."},
+				"can_relay":     canRelay,
+			},
+		},
+		"NodeHealthResponse": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"node":            {Type: "object", Description: "The node row."},
+				"stats":           stats,
+				"directObservers": direct,
+				"relayObservers":  relay,
+				"recentPackets":   {Type: "array", Items: &openAPISchema{Type: "object"}, Description: "Newest 20 transmissions, observations stripped."},
+				"activity24h":     {Type: "object", Description: "The rolling 24-hour window of the node's transmissions: 24 one-hour buckets, windowStart/windowEnd, coverageStart and complete, plus previous {windowStart, windowEnd, count, complete} — the equally long window before it, for a like-for-like comparison only (#304). A window is complete only when the in-memory history is proven to cover all of it; an incomplete window is a lower bound, never a quiet period."},
+			},
+		},
+		"BulkHealthEntry": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"public_key":      str(""),
+				"name":            {Type: "string", Nullable: true},
+				"role":            {Type: "string", Nullable: true},
+				"lat":             {Type: "number", Nullable: true},
+				"lon":             {Type: "number", Nullable: true},
+				"stats":           stats,
+				"directObservers": direct,
+				"relayObservers":  relay,
+			},
+		},
+		"BulkHealthResponse": {Type: "array", Items: openAPIRef("BulkHealthEntry"), Description: "A bare array, not wrapped in an object."},
+	}
+}
+
+// nodeAdvertRouteSchemas documents the #2073 node-detail advert route fields
+// (port of upstream Kpa-clawbot/CoreScope#2073).
+func nodeAdvertRouteSchemas() map[string]*openAPISchema {
+	zero := 0
+	count := &openAPISchema{Type: "integer", Minimum: &zero}
+	list := func(desc string) *openAPISchema {
+		return &openAPISchema{Type: "array", Items: openAPIRef("NodeAdvert"), Description: desc}
+	}
+	return map[string]*openAPISchema{
+		"NodeAdvertsByRoute": {
+			Type:        "object",
+			Description: "Node detail with include=advertRoutes only (#2073): the newest ADVERTs of the node per route class (see NodeAdvert.route_class), newest ingest first. The class is filtered before the per-class limit, so frequent zero-hop adverts cannot push rare flood adverts out; a mixed advert is listed only under mixed. Rows are the NodeAdvert shape without the observations array (observation_count and the best observation's observer/snr/rssi/path fields are kept); route_class is the class the row was listed under. Absent without include=advertRoutes and when the node's identity is hidden (node or observer blacklist, hidden-name prefix). Cached per node for up to 30 s (refreshed once the node has a newer transmission, at most every 5 s).",
+			Properties: map[string]*openAPISchema{
+				"limit":    {Type: "integer", Description: "Maximum rows per class (20)."},
+				"flood":    list("Adverts seen only on flood routes (0/1)."),
+				"zero_hop": list("Adverts seen only on zero-hop routes (2/3)."),
+				"mixed":    list("Adverts seen on both flood and zero-hop routes."),
+				"unknown":  list("Adverts with no usable route (Relay Airtime Share's legacy bucket); present only when the node has any."),
+			},
+		},
+		"NodeAdvertCounts": {
+			Type:        "object",
+			Description: "Node detail with include=advertRoutes only (#2073): distinct ADVERTs (by content hash) per route class whose first_seen - when the advert was first heard, the axis flood_advert_count_7d also uses - lies in the last 24 hours / 7 days. Classified like NodeAdvert.route_class. Unlike Node.flood_advert_count_7d (route_type 1 only, unchanged external contract), 7d.flood also counts transport flood (route 0) and never counts a mixed advert. Rows whose first_seen cannot be parsed are skipped, as for flood_advert_count_7d. unknown is the bucket Relay Airtime Share calls legacy (same classifier, see NodeAdvert.route_class). Absent without include=advertRoutes and when the node's identity is hidden.",
+			Properties: map[string]*openAPISchema{
+				"24h":                 openAPIRef("AdvertRouteCounts"),
+				"7d":                  openAPIRef("AdvertRouteCounts"),
+				"truncated":           {Type: "boolean", Description: "true when the node had more adverts at or after the 7d date floor than the per-request row cap (50000); the counts then cover the newest rows only."},
+				"route_mask_backfill": openAPIRef("RouteMaskBackfillStatus"),
+			},
+		},
+		"AdvertRouteCounts": {
+			Type:       "object",
+			Properties: map[string]*openAPISchema{"flood": count, "zero_hop": count, "mixed": count, "unknown": count},
+		},
+		"NodeAdvertIntervals": {
+			Type:        "object",
+			Description: "Node detail with include=advertRoutes only (#245): the node's estimated flood and zero-hop advert intervals, from the gaps between the adverts listed in recentAdvertsByRoute.flood / .zero_hop (mixed and unknown adverts are not used). A gap uses the adverts' own (sender) timestamps when both are plausible - not ahead of first_seen by more than 10 min, positive, and within max(10 min, 10 %) of the first_seen gap - else first_seen. The interval must be seen directly in at least two gaps and a quarter of them, and be one the class's timer can run at (flood 3 h or more, zero-hop 2 min or 60 min or more, each less 10 %); gaps of 2-4x it count as missed adverts, shorter gaps (manual adverts, reboots) are dropped, longer gaps that are no multiple are irregular. When the newest 3 gaps that fit are all the same multiple k > 1 the interval was raised, and the estimate is redone on the adverts since the change. It is the median of gap/k over the gaps that fit k x the interval, snapped to the firmware's settable values: flood.advert.interval whole hours 3-168, advert.interval even minutes 60-240 or the 2-minute new-install default. No zero-hop adverts can mean the node's zero-hop interval is 0 (off) or that no observer hears it directly. Absent without include=advertRoutes and when the node's identity is hidden; cached with recentAdvertsByRoute.",
+			Properties: map[string]*openAPISchema{
+				"window":   {Type: "integer", Description: "Most adverts per class considered (the recentAdvertsByRoute limit, 20)."},
+				"flood":    openAPIRef("AdvertIntervalEstimate"),
+				"zero_hop": openAPIRef("AdvertIntervalEstimate"),
+			},
+		},
+		"AdvertIntervalEstimate": {
+			Type:        "object",
+			Description: "One route class of NodeAdvertIntervals.",
+			Properties: map[string]*openAPISchema{
+				"interval_s":     {Type: "integer", Nullable: true, Description: "Estimated interval in seconds, snapped when snapped is true; null when confidence is none."},
+				"raw_interval_s": {Type: "integer", Nullable: true, Description: "The median before snapping; null when confidence is none."},
+				"snapped":        {Type: "boolean", Description: "true when the estimate is within 10 % of the firmware's settable range and interval_s is the nearest settable value."},
+				"samples":        {Type: "integer", Minimum: &zero, Description: "Adverts used; after a raised interval, the adverts since the change."},
+				"gaps_used":      {Type: "integer", Minimum: &zero, Description: "Gaps between the samples that fit 1-4x the interval."},
+				"confidence":     {Type: "string", Enum: []string{advertConfidenceHigh, advertConfidenceMedium, advertConfidenceLow, advertConfidenceNone}, Description: "high: >= 6 fitting gaps and >= 75 % of the non-short gaps fit; medium: >= 3 and >= 50 %; low: fewer; none: under 3 adverts or no interval seen at least twice."},
+				"status":         {Type: "string", Enum: []string{advertIntervalEstimated, advertIntervalNoneObserved, advertIntervalTooFew, advertIntervalIrregular}, Description: "estimated: interval_s is set; none_observed: no adverts of the class; too_few: under 3 adverts; irregular: enough adverts but no interval fits."},
+				"last_advert":    {Type: "string", Nullable: true, Description: "RFC3339 first_seen of the newest advert in the class; null when there is none."},
+			},
+		},
+		"RouteMaskBackfillStatus": {
+			Type:        "object",
+			Description: "The ingestor's transmissions.route_mask backfill (#89). Until complete, rows without a mask are classified by their first-inserted route_type, so route classes are provisional.",
+			Properties: map[string]*openAPISchema{
+				"status":    {Type: "string", Enum: []string{"pending", "backfilling", "complete"}},
+				"remaining": {Type: "integer", Nullable: true, Description: "Rows still without a mask; null when it cannot be counted cheaply."},
+			},
+		},
+	}
+}
+
+// advertIntervalAnalyticsSchemas documents GET /api/analytics/advert-intervals
+// (#245 M2).
+func advertIntervalAnalyticsSchemas() map[string]*openAPISchema {
+	zero := 0
+	count := func(desc string) *openAPISchema {
+		return &openAPISchema{Type: "integer", Minimum: &zero, Description: desc}
+	}
+	str := &openAPISchema{Type: "string"}
+	summary := openAPIRef("AdvertIntervalClassSummary")
+	groups := func(desc string) *openAPISchema {
+		return &openAPISchema{Type: "array", Items: openAPIRef("AdvertIntervalGroup"), Description: desc}
+	}
+	return map[string]*openAPISchema{
+		"AdvertIntervalAnalyticsResponse": {
+			Type:        "object",
+			Description: "Mesh-wide estimated advert intervals (#245 M2), see GET /api/analytics/advert-intervals.",
+			Properties: map[string]*openAPISchema{
+				"window":            {Type: "integer", Description: "Most adverts per class and node estimated from (20, as node detail)."},
+				"min_confidence":    {Type: "string", Enum: []string{advertConfidenceMedium}, Description: "Least confidence an estimate needs to be in buckets."},
+				"nodes":             count("Nodes counted (after the region/area filter)."),
+				"flood":             summary,
+				"zero_hop":          summary,
+				"by_role":           groups("Per normalized role (empty: unknown), largest first."),
+				"by_region":         groups("Per region of the observers that heard the node's sampled adverts, largest first; a node heard in two regions counts in both, one heard by no observer with a region under \"unknown\"."),
+				"regions_truncated": {Type: "boolean", Description: "true when by_region holds only the 50 largest regions."},
+				"outliers":          {Type: "array", Items: openAPIRef("AdvertIntervalOutlier"), Description: "Most frequent first (median_gap_s ascending), at most 50."},
+				"outliers_total":    count("All outlier rows before the limit."),
+				"outliers_withheld": count("Outlier rows left out of outliers because the instance hides their identity (checked at serve time, including observer and inactive-node names); still counted in outliers_total (#896)."),
+				"flood_re_arm":      openAPIRef("AdvertIntervalFloodReArm"),
+				"scan":              openAPIRef("AdvertIntervalScanInfo"),
+			},
+		},
+		"AdvertIntervalClassSummary": {
+			Type:        "object",
+			Description: "One route class: every counted node is in exactly one of estimated, low_confidence, irregular, too_few and not_observed (node detail's status and confidence).",
+			Properties: map[string]*openAPISchema{
+				"estimated":      count("Medium or high confidence estimates; these are in buckets."),
+				"low_confidence": count("Estimates with low confidence."),
+				"irregular":      count("Enough adverts, but no interval fits."),
+				"too_few":        count("Fewer than 3 adverts."),
+				"not_observed":   count("No adverts of the class. For zero-hop: off, or no observer in direct range."),
+				"buckets":        {Type: "array", Items: openAPIRef("AdvertIntervalBucket"), Description: "By interval_s ascending."},
+			},
+		},
+		"AdvertIntervalBucket": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"interval_s": {Type: "integer", Description: "The snapped firmware value, or an estimate outside the settable range rounded to the hour (flood) or minute (zero-hop)."},
+				"snapped":    {Type: "boolean", Description: "false for estimates outside the settable range."},
+				"nodes":      count(""),
+			},
+		},
+		"AdvertIntervalGroup": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"key":      {Type: "string", Description: "Role, or region code (\"unknown\": no observer with a region)."},
+				"nodes":    count(""),
+				"flood":    summary,
+				"zero_hop": summary,
+			},
+		},
+		"AdvertIntervalOutlier": {
+			Type:        "object",
+			Description: "A node advertising more often than the class's shortest timer setting allows (median gap of its sampled adverts under 3 h flood or 60 min zero-hop, less 10 %: manual or scripted adverts, a reboot loop, other firmware), or with a zero-hop estimate at the 2-minute new-install default. One row per node and class.",
+			Properties: map[string]*openAPISchema{
+				"public_key":   str,
+				"name":         str,
+				"role":         str,
+				"regions":      {Type: "array", Items: &openAPISchema{Type: "string"}},
+				"class":        {Type: "string", Enum: []string{advertClassFlood, advertClassZeroHop}},
+				"reason":       {Type: "string", Enum: []string{advertOutlierFloodFast, advertOutlierZeroHopFast, advertOutlierZeroHopDefault}},
+				"median_gap_s": {Type: "integer", Description: "Median gap between the class's sampled adverts, in seconds."},
+				"samples":      count("Adverts the class estimate used."),
+				"interval_s":   {Type: "integer", Nullable: true, Description: "The class estimate (AdvertIntervalEstimate.interval_s)."},
+			},
+		},
+		"AdvertIntervalFloodReArm": {
+			Type:        "object",
+			Description: "A flood advert re-arms the zero-hop timer (MeshCore examples/simple_repeater/MyMesh.cpp:1294-1306), which shapes the zero-hop reading (#247 review F7/N4). Both counts compare medium/high estimates only.",
+			Properties: map[string]*openAPISchema{
+				"zero_hop_paced_by_flood":   count("Zero-hop estimate equal to the flood interval (within 10 %): with zero-hop Z < flood F <= 2Z every zero-hop gap is F, so the setting is between F/2 and F."),
+				"zero_hop_maybe_suppressed": count("Zero-hop not observed and flood interval at most 240 min: with advert.interval >= flood the zero-hop timer never fires."),
+			},
+		},
+		"AdvertIntervalBucketResponse": {
+			Type:        "object",
+			Description: "The nodes of one distribution bucket (#896), see GET /api/analytics/advert-intervals/bucket.",
+			Properties: map[string]*openAPISchema{
+				"class":        {Type: "string", Enum: []string{advertClassFlood, advertClassZeroHop}},
+				"interval_s":   {Type: "integer", Description: "The bucket's interval_s, as requested."},
+				"snapped":      {Type: "boolean"},
+				"generated_at": {Type: "string", Description: "scan.generated_at of the snapshot served; pass it as snapshot= for further pages."},
+				"nodes":        count("The bucket's count in this snapshot and filter (the histogram's)."),
+				"visible":      count("Listable members over all pages."),
+				"withheld":     count("nodes - visible: hidden identities, never listed."),
+				"offset":       count(""),
+				"limit":        count("Page size served (default 50, at most 200)."),
+				"members":      {Type: "array", Items: openAPIRef("AdvertIntervalBucketMember"), Description: "At most limit visible members from offset; [] past the end."},
+			},
+		},
+		"AdvertIntervalBucketMember": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"public_key": str,
+				"name":       str,
+				"role":       str,
+				"regions":    {Type: "array", Items: &openAPISchema{Type: "string"}},
+				"interval_s": {Type: "integer", Description: "The node's own estimate; in an unsnapped bucket not rounded like the bucket."},
+				"snapped":    {Type: "boolean"},
+				"confidence": {Type: "string", Enum: []string{advertConfidenceHigh, advertConfidenceMedium}},
+				"samples":    count("Adverts the estimate used."),
+				"gaps_used":  count("Gaps between them that fit the interval."),
+			},
+		},
+		"AdvertIntervalBucketConflict": {
+			Type:        "object",
+			Description: "409 of GET /api/analytics/advert-intervals/bucket.",
+			Properties: map[string]*openAPISchema{
+				"error":        str,
+				"generated_at": {Type: "string", Description: "The published snapshot's generated_at."},
+			},
+		},
+		"AdvertIntervalScanInfo": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"generated_at": {Type: "string", Description: "RFC3339 time of the pass the response comes from."},
+				"rows":         count("ADVERT rows the pass read."),
+				"truncated":    {Type: "boolean", Description: "true when the pass stopped at its row cap (1000000, newest first)."},
+			},
+		},
+	}
 }
 
 // componentSchemas returns the reusable OpenAPI schemas surfaced under
@@ -197,6 +849,10 @@ func componentSchemas() map[string]interface{} {
 			"description": desc,
 		}
 	}
+	// prop is a plain typed property with a description.
+	prop := func(typ, desc string) map[string]interface{} {
+		return map[string]interface{}{"type": typ, "description": desc}
+	}
 	str := func(desc string) map[string]interface{} {
 		m := map[string]interface{}{"type": "string"}
 		if desc != "" {
@@ -204,7 +860,7 @@ func componentSchemas() map[string]interface{} {
 		}
 		return m
 	}
-	return map[string]interface{}{
+	schemas := map[string]interface{}{
 		"Node": map[string]interface{}{
 			"type": "object",
 			// additionalProperties:true — the node object carries more fields
@@ -235,14 +891,16 @@ func componentSchemas() map[string]interface{} {
 				"flood_advert_count_7d":       map[string]interface{}{"type": "integer", "description": "Distinct FLOOD adverts originated in the last 7 days (zero-hop adverts excluded). Present on the node detail endpoint."},
 				"battery_mv":                  map[string]interface{}{"type": "integer", "nullable": true},
 				"temperature_c":               map[string]interface{}{"type": "number", "nullable": true},
-				"relay_active":                map[string]interface{}{"type": "boolean", "description": "Repeater/room only: relayed traffic within the active window."},
-				"relay_count_1h":              map[string]interface{}{"type": "integer", "description": "Repeater/room only: relay-hop appearances in the last hour."},
-				"relay_count_24h":             map[string]interface{}{"type": "integer", "description": "Repeater/room only: relay-hop appearances in the last 24 hours."},
-				"unscoped_relay_count_24h":    map[string]interface{}{"type": "integer", "description": "Repeater/room only: subset of relay_count_24h that were unscoped floods (route_type FLOOD). A well-configured repeater sets flood.max.unscoped 0, so a non-trivial count flags a base-config problem."},
+				"relay_active":                prop("boolean", "Repeater/room only: relayed traffic within the active window."),
+				"relay_count_1h":              prop("integer", "Repeater/room only: relay-hop appearances in the last hour."),
+				"relay_count_24h":             prop("integer", "Repeater/room only: relay-hop appearances in the last 24 hours."),
+				"unscoped_relay_count_24h":    prop("integer", "Repeater/room only: subset of relay_count_24h that were unscoped floods (route_type FLOOD). A well-configured repeater sets flood.max.unscoped 0, so a non-trivial count flags a base-config problem."),
+				"est_airtime_pct_24h":         prop("number", "Repeater/room only (#697): estimated relay duty cycle over the last 24 hours, in percent. LoRa time-on-air of every packet the node relayed (adverts of other nodes included) at the configured loraPreset, divided by 24 h. A lower bound: only flood packets an observer heard with the node in the raw path count; its own adverts and direct-routed traffic do not. Checked against repeaters that report their own TX airtime it was 2-74% of the real figure, so a low value does not mean the node is under the duty-cycle limit."),
+				"est_airtime_peak_pct":        prop("number", "Repeater/room only (#697): the same estimate for the node's busiest rolling hour in the last 24 hours, in percent of that hour. The 10% duty-cycle limit applies per hour; as a lower bound, a value at the limit means the node is over it."),
 				"last_relayed":                str("Repeater/room only: RFC3339 time this node last appeared as a relay hop."),
 				"transported_scopes":          map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Repeater/room only: sorted, deduplicated region scopes this node has ever carried as a relay hop, while still resident in the in-memory index (NOT time-windowed -- can include scopes last carried weeks ago). Absent when empty."},
 				"transported_scopes_recent":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Repeater/room only: subset of transported_scopes last carried within the relay-activity window (same window as relay_active) -- a live signal, not just ever-seen. Absent when empty."},
-				"relay_window_hours":          map[string]interface{}{"type": "integer", "description": "Repeater/room only, /api/nodes/{pubkey} detail endpoint only: width (hours) of the relay-activity window the relay_count_* values cover."},
+				"relay_window_hours":          prop("integer", "Repeater/room only, /api/nodes/{pubkey} detail endpoint only: width (hours) of the relay-activity window the relay_count_* values cover."),
 				"traffic_share_score":         score01("#672 Traffic axis: share of non-advert traffic relayed through this repeater. Repeater/room only."),
 				"bridge_score":                score01("#672 Bridge axis: normalized betweenness centrality (chokepoint importance). Repeater/room only."),
 				"coverage_score":              score01("#672 Coverage axis: normalized harmonic reach centrality (how much of the mesh the node can reach). Repeater/room only."),
@@ -252,6 +910,45 @@ func componentSchemas() map[string]interface{} {
 					"type": "string", "enum": []string{"A", "B", "C", "D", "F"},
 					"description": "Letter grade derived from usefulness_score. Repeater/room only.",
 				},
+			},
+		},
+		"ChannelMessage": map[string]interface{}{
+			"type": "object",
+			// additionalProperties:true — the message object carries more
+			// fields than are spelled out here (area/bot-reply annotations,
+			// resolved path data). Only the stable contract fields are
+			// documented.
+			"additionalProperties": true,
+			"description":          "A single channel message, aggregated across every observation of the same transmission.",
+			"properties": map[string]interface{}{
+				"sender": str("Display sender, split from the message text at its first \": \" separator. A heuristic label, never an identity: channel frames carry no sender field, so this is a substring of the message body and can be the body's first clause rather than a real name."),
+				"text":   str("Message body with the sender prefix removed."),
+				"timestamp": map[string]interface{}{
+					"type": "string", "nullable": true,
+					"description": "Existing observation/ingest-based display timestamp: the latest observation time recorded for this transmission (server-side), falling back to first-seen when no observation timestamp exists. It reflects when the message was observed, not when the sender stamped it, and it moves forward as further observations of the same transmission arrive. Unchanged by this schema.",
+				},
+				"sender_timestamp": map[string]interface{}{
+					"type": "integer", "nullable": true,
+					"description": "The sender's own embedded wire timestamp, read verbatim from the decrypted payload. The key is always present; its value is null when unavailable (the decoded packet carries no sender timestamp). Unchanged by this schema.",
+				},
+				"channelHashHex": map[string]interface{}{
+					"type": "string", "pattern": "^[0-9A-F]{2}$",
+					"description": "The two-digit uppercase hexadecimal representation of the actual one-byte channel hash carried by the packet, taken from the decoded payload. Always exactly two uppercase hex characters when present, including a leading zero (\"00\", \"03\", \"A7\", \"FF\") — \"00\" is a valid, meaningful present value, never an absence. Optional, and its absence does not mean every new message eventually gets it: the field stays absent whenever the wire byte was never available or could not be trusted, which includes (1) legacy records stored before this field existed, (2) malformed stored values, rejected rather than guessed, and (3) every message ingested through the Companion/MQTT bridge — permanently and by design, not merely legacy backlog, because that path delivers already-decrypted text and never observes the raw packet envelope. Absence always means \"unavailable\", never \"zero\". Non-secret — it is the first byte of the GRP_TXT/GRP_DATA payload envelope, sent unencrypted ahead of the encrypted body (it is not a field of every packet header), and no channel key or PSK is read or exposed to produce it. Never derived or reconstructed from the operator-assigned channel name, the {hash} route/path label, transmissions.channel_hash, or a channel key/PSK — only ever copied from the value the ingestor decoder read off the wire. COLLISION-PRONE: one byte is not a unique channel identity — distinct channels collide, so this field is an evidence component to be combined with other signals, never sufficient on its own to identify a channel. This validated contract covers GET /api/channels/{hash}/messages only. CoreScope's live WebSocket broadcast is a separate, unvalidated surface: it passes each packet's raw decoded_json through verbatim as decoded.payload, so a channelHashHex value observed there has not gone through this validator and must not be treated as equivalent REST evidence.",
+				},
+				"packetId":   map[string]interface{}{"type": "integer", "description": "CoreScope row id associated with this message, but its identity semantics are backend-dependent: which row it identifies (observation vs. transmission) varies by storage backend, a divergence that pre-dates and is unrelated to this schema addition. Must not be used as a cross-backend correlation key. Consumers that need to correlate the same packet across backends should use packetHash instead, which is stable regardless of backend."},
+				"packetHash": map[string]interface{}{"type": "string", "nullable": true, "description": "Transmission hash used for dedup."},
+				"repeats":    map[string]interface{}{"type": "integer", "description": "Number of observations aggregated into this message."},
+				"observers":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Distinct observers that heard this transmission."},
+				"hops":       map[string]interface{}{"type": "integer", "description": "Relay path length for the reported observation."},
+				"snr":        map[string]interface{}{"type": "number", "nullable": true},
+				"scope":      map[string]interface{}{"type": "string", "nullable": true},
+			},
+		},
+		"ChannelMessagesResponse": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"messages": map[string]interface{}{"type": "array", "items": schemaRef("ChannelMessage")},
+				"total":    map[string]interface{}{"type": "integer", "description": "Total messages in the channel after region filtering, before pagination."},
 			},
 		},
 		"NodeListResponse": map[string]interface{}{
@@ -265,8 +962,11 @@ func componentSchemas() map[string]interface{} {
 		"NodeDetailResponse": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"node":          schemaRef("Node"),
-				"recentAdverts": map[string]interface{}{"type": "array", "items": schemaRef("NodeAdvert"), "description": "Up to 20 most recent transmissions from this node (newest first)."},
+				"node":                 schemaRef("Node"),
+				"recentAdverts":        map[string]interface{}{"type": "array", "items": schemaRef("NodeAdvert"), "description": "Up to 20 most recent transmissions from this node (newest ingest first, #1345), all route classes together."},
+				"recentAdvertsByRoute": openAPIRef("NodeAdvertsByRoute"),
+				"advertCounts":         openAPIRef("NodeAdvertCounts"),
+				"advertIntervals":      openAPIRef("NodeAdvertIntervals"),
 			},
 		},
 		"NodeAdvert": map[string]interface{}{
@@ -279,6 +979,7 @@ func componentSchemas() map[string]interface{} {
 				"payload_type": map[string]interface{}{"type": "integer", "description": "MeshCore payload type."},
 				"first_seen":   str("RFC3339 time the transmission was first observed."),
 				"from_pubkey":  str("Originating node public key."),
+				"route_class":  &openAPISchema{Type: "string", Enum: []string{advertClassFlood, advertClassZeroHop, advertClassMixed, advertClassUnknown}, Description: "Node detail with include=advertRoutes, ADVERT rows only (absent on other payload types and without the opt-in): the advert's route class, classified like Relay Airtime Share's ADVERT rows. flood: only route 0/1 (transport flood/flood) seen for the content hash; zero_hop: only route 2/3 (a zero-hop advert is sent DIRECT with an empty path); mixed: both; unknown: no usable route - the same bucket Relay Airtime Share's route_class calls \"legacy\" (its historical plain ADVERT row); node detail names it for what it is, both come from one classifier. Omitted when the node's identity is hidden. From transmissions.route_mask, falling back to the first-inserted route_type while the mask is not backfilled (see advertCounts.route_mask_backfill)."},
 			},
 		},
 		"CandidateEntry": map[string]interface{}{
@@ -391,7 +1092,7 @@ func componentSchemas() map[string]interface{} {
 			"type":        "object",
 			"description": "The station that produced a given branch's observation of a packet path, positioned from its own self-advertised GPS when known (same source as /api/observers), else its configured IATA code, else a weighted centroid of its positioned neighbors (see approx).",
 			"properties": map[string]interface{}{
-				"publicKey":           str("Observer's mesh pubkey, when it has one (some bridge-type observers publish under a device name instead -- see the name-match fallback in GetPacketPath). Empty otherwise."),
+				"publicKey":           str("Observer's mesh pubkey, when it has one (some bridge-type observers publish under a device name instead -- see the name-match fallback in getPacketPath). Empty otherwise."),
 				"name":                str("Observer display name."),
 				"iata":                str("Observer's configured IATA airport code, when set."),
 				"role":                str("Observer's own node role (e.g. repeater, room), when it's known as a mesh node itself -- not just an MQTT/API listener."),
@@ -400,6 +1101,7 @@ func componentSchemas() map[string]interface{} {
 				"approx":              map[string]interface{}{"type": "boolean", "description": "True when lat/lon are not this station's own position but a count-weighted centroid of its positioned neighbors instead -- a last-resort stand-in, not a real fix."},
 				"approxNeighborCount": map[string]interface{}{"type": "integer", "description": "Present only when approx=true. See PacketPathPoint.approxNeighborCount."},
 				"approxSpreadKm":      map[string]interface{}{"type": "number", "nullable": true, "description": "Present only when approx=true and approxNeighborCount>1. See PacketPathPoint.approxSpreadKm."},
+				"positionSource":      map[string]interface{}{"type": "string", "enum": []string{"real", "iata", "none"}, "description": "Where lat/lon came from: \"real\" (own GPS, matched by pubkey or name), \"iata\" (the configured IATA code's centroid, only because no real position exists), or \"none\" (lat/lon are nil). Omitted when positioned via the approx neighbor-centroid estimate instead (#381)."},
 			},
 		},
 		"PacketPathBranch": map[string]interface{}{
@@ -437,11 +1139,17 @@ func componentSchemas() map[string]interface{} {
 				"airtimeRelayCount":  map[string]interface{}{"type": "integer", "description": "Distinct relay count behind estimatedAirtimeMs. Present only alongside it."},
 			},
 		},
+		"PingScorePathResponse": &openAPISchema{Type: "object", Properties: map[string]*openAPISchema{
+			"status":     {Type: "string", Enum: []string{"live", "archived", "unavailable", "initializing"}},
+			"capturedAt": {Type: "string", Description: "UTC archive capture time, present for archived geometry."},
+			"reason":     {Type: "string", Enum: []string{"raw_data_expired_before_capture", "no_coordinates", "privacy_filtered", "archive_too_large", "record_evidence_unavailable"}},
+			"path":       openAPIRef("PacketPathResponse"),
+		}},
 		"PingScore": map[string]interface{}{
 			"type":        "object",
-			"description": "One ping's computed highscore-relevant stats, derived from the same GetPacketPath + airtime-annotation logic behind /api/packets/{hash}/path.",
+			"description": "One ping's computed highscore-relevant stats, derived from the same getPacketPath + airtime-annotation logic behind /api/packets/{hash}/path.",
 			"properties": map[string]interface{}{
-				"hash":               str("The winning ping's packet hash -- pass to /api/packets/{hash}/path for the full View Path map."),
+				"hash":               str("The winning ping's hash; use /api/ping-scores/{hash}/path with its record slot for saved View Path evidence."),
 				"sender":             str("Display name of whoever sent the ping, when resolvable from the channel message."),
 				"channelHash":        str("Which channel the ping was sent on."),
 				"timestamp":          str("RFC3339 timestamp the ping was first seen."),
@@ -546,8 +1254,9 @@ func componentSchemas() map[string]interface{} {
 		},
 		"AreaAnalyticsResponse": map[string]interface{}{
 			"type":        "object",
-			"description": "Node density/health, cross-area bridge nodes, and position-fix coverage per configured Area (the drawn-polygon regions from the meshguide.dk sync, distinct from hashRegion scope adoption). Empty when no Areas are configured.",
+			"description": "Node density/health, cross-area bridge nodes, and position-fix coverage per configured Area. When estimatedPositions.enabled is false, returns estimatedPositionsEnabled:false and real density/bridgeNodes/unpositionedTotal only; positionGaps, estimatedNodes, and unpositionedNoNeighborFix are omitted because they were not evaluated.",
 			"properties": map[string]interface{}{
+				"estimatedPositionsEnabled": &openAPISchema{Type: "boolean", Description: "Present as false only when neighbor-derived position estimation is disabled by the operator."},
 				"density":                   map[string]interface{}{"type": "array", "items": schemaRef("AreaDensity")},
 				"bridgeNodes":               map[string]interface{}{"type": "array", "items": schemaRef("AreaBridgeNode"), "description": "Top cross-area bridge nodes, ranked by how many other areas they reach."},
 				"positionGaps":              map[string]interface{}{"type": "array", "items": schemaRef("AreaPositionGap")},
@@ -573,11 +1282,12 @@ func componentSchemas() map[string]interface{} {
 		},
 		"GPSSanityResponse": map[string]interface{}{
 			"type":        "object",
-			"description": "Nodes whose self-reported GPS disagrees with a trusted cluster of their own RF neighbors.",
+			"description": "Nodes whose self-reported GPS disagrees with a trusted cluster of their own RF neighbors. When estimatedPositions.enabled is false, returns only estimatedPositionsEnabled:false; nodes, totalRealGps and evaluated are omitted, not reported as zero.",
 			"properties": map[string]interface{}{
-				"nodes":        map[string]interface{}{"type": "array", "items": schemaRef("SuspiciousGPSNode"), "description": "Flagged nodes, sorted worst (largest distanceKm) first."},
-				"totalRealGps": map[string]interface{}{"type": "integer", "description": "Every node with a real (non-zero) GPS fix -- the population this check ran over."},
-				"evaluated":    map[string]interface{}{"type": "integer", "description": "The subset of totalRealGps that had a trustworthy neighbor cluster to compare against."},
+				"estimatedPositionsEnabled": &openAPISchema{Type: "boolean", Description: "Present as false only when neighbor-derived position estimation is disabled by the operator."},
+				"nodes":                     map[string]interface{}{"type": "array", "items": schemaRef("SuspiciousGPSNode"), "description": "Flagged nodes, sorted worst (largest distanceKm) first."},
+				"totalRealGps":              map[string]interface{}{"type": "integer", "description": "Every node with a real (non-zero) GPS fix -- the population this check ran over."},
+				"evaluated":                 map[string]interface{}{"type": "integer", "description": "The subset of totalRealGps that had a trustworthy neighbor cluster to compare against."},
 			},
 		},
 		"AllObserverNeighborsEntry": map[string]interface{}{
@@ -689,6 +1399,27 @@ func componentSchemas() map[string]interface{} {
 			},
 		},
 	}
+	schemas["ApiError"] = &openAPISchema{
+		Type:        "object",
+		Description: "The shared error body every /api/* error answer uses (#266): a single human-readable message. Status codes carry the machine-readable meaning, not this string.",
+		Properties:  map[string]*openAPISchema{"error": {Type: "string"}},
+	}
+	for name, schema := range nodeAdvertRouteSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range advertIntervalAnalyticsSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range regionsObservedSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range momentSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range heardBySchemas() {
+		schemas[name] = schema
+	}
+	return schemas
 }
 
 // buildOpenAPISpec constructs an OpenAPI 3.0 spec by walking the mux router.
@@ -751,6 +1482,22 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 			respSchema = meta.Response
 		}
 
+		responses := map[string]interface{}{
+			"200": map[string]interface{}{
+				"description": "Success",
+				"content": map[string]interface{}{
+					"application/json": map[string]interface{}{
+						"schema": respSchema,
+					},
+				},
+			},
+		}
+		if hasMeta {
+			for _, e := range meta.Errors {
+				responses[e.Status] = jsonErrorResponse(e.Description)
+			}
+		}
+
 		// Build operation
 		op := map[string]interface{}{
 			"summary": func() string {
@@ -759,16 +1506,7 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 				}
 				return ri.path
 			}(),
-			"responses": map[string]interface{}{
-				"200": map[string]interface{}{
-					"description": "Success",
-					"content": map[string]interface{}{
-						"application/json": map[string]interface{}{
-							"schema": respSchema,
-						},
-					},
-				},
-			},
+			"responses": responses,
 		}
 
 		if hasMeta {
@@ -789,11 +1527,15 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 			if len(meta.QueryParams) > 0 {
 				params := make([]interface{}, 0, len(meta.QueryParams))
 				for _, qp := range meta.QueryParams {
+					schema := map[string]interface{}{"type": qp.Type}
+					if len(qp.Enum) > 0 {
+						schema["enum"] = qp.Enum
+					}
 					p := map[string]interface{}{
 						"name":     qp.Name,
 						"in":       "query",
 						"required": qp.Required,
-						"schema":   map[string]interface{}{"type": qp.Type},
+						"schema":   schema,
 					}
 					if qp.Description != "" {
 						p["description"] = qp.Description
@@ -852,7 +1594,7 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 		"openapi": "3.0.3",
 		"info": map[string]interface{}{
 			"title":       "CoreScope API",
-			"description": "MeshCore network analyzer — packet capture, node tracking, and mesh analytics.",
+			"description": "MeshCore network analyzer — packet capture, node tracking, and mesh analytics. An unrecognized /api or /api/* path returns 404; a documented path called with an unsupported method returns 405 with an Allow header. Both are JSON (#233). POST /api/decode and POST /api/packets/observations cap their request body in bytes before parsing it and answer 413 with the ApiError body when it is over the cap (#334); the other body-taking endpoints bound their body on the JSON decoder instead, which is weaker and reports an over-cap body as 400 — docs/api-spec.md lists every cap, how it is enforced, and its status. HEAD is served on every GET path.",
 			"version":     version,
 			"license": map[string]interface{}{
 				"name": "MIT",
@@ -913,12 +1655,23 @@ func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, swaggerUIHTML)
 }
 
+// swaggerUIHTML pins swagger-ui-dist to an exact version and verifies it with
+// Subresource Integrity. #442 additionally vendors the bytes into
+// public/vendor/swagger-ui-dist/<version>/ (see tools/browser-deps-manifest.json
+// and tools/fetch-browser-deps.sh) and serves them from there, so the browser
+// makes no third-party request at all. The integrity attribute stays: it is
+// cheap insurance against the file changing underneath the pin on disk. The
+// digests are sha384 over the exact bytes of that version; openapi_sri_test.go
+// holds the reviewed values and docs/browser-dependencies.md records how to
+// recompute them when the pin moves.
 const swaggerUIHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>CoreScope API — Swagger UI</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <link rel="stylesheet" href="/vendor/swagger-ui-dist/5.33.2/swagger-ui.css"
+    integrity="sha384-Ov4/wv3j2bmct8cDc5X4ngJZohVPzEmc6uDPH8WeljUxO5vtoykvMEfbu9Vh6RaW"
+    crossorigin="anonymous">
   <style>
     html { box-sizing: border-box; overflow-y: scroll; }
     *, *:before, *:after { box-sizing: inherit; }
@@ -928,7 +1681,9 @@ const swaggerUIHTML = `<!DOCTYPE html>
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="/vendor/swagger-ui-dist/5.33.2/swagger-ui-bundle.js"
+    integrity="sha384-gNnUp++d7WqR9OKX4OMoUmV2w0JxEs1uu6NPXgcynGClIX5DOu6ol4Lp+lINyZcJ"
+    crossorigin="anonymous"></script>
   <script>
     SwaggerUIBundle({
       url: '/api/spec',

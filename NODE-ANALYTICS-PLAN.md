@@ -129,7 +129,7 @@ IIFE pattern matching existing pages. Registers with the router for `#/nodes/:pu
 - Reloads data via API when changed
 
 ### Chart Library
-- **Chart.js v4** from CDN (unpkg): `https://unpkg.com/chart.js@4/dist/chart.umd.min.js`
+- **Chart.js v4** from CDN (unpkg), pinned with SRI: `https://unpkg.com/chart.js@4.5.1/dist/chart.umd.min.js` (see `docs/browser-dependencies.md`)
 - Add `<script>` tag in `index.html` (with cache buster)
 - Chart.js is ~70KB gzipped, handles all chart types needed
 

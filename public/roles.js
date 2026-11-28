@@ -32,7 +32,11 @@
       if (typeof document === 'undefined' || !document.documentElement) return fallback;
       var v = '';
       if (typeof getComputedStyle === 'function') {
-        v = getComputedStyle(document.documentElement).getPropertyValue(name);
+        // Resolve on <body>, not documentElement: an active CB preset delivers
+        // its colours through body[data-cb-preset="X"] (style.css), and since
+        // #1449 customize-v2 no longer mirrors them onto documentElement.
+        // <body> inherits every :root value, so non-preset reads are unchanged.
+        v = getComputedStyle(document.body || document.documentElement).getPropertyValue(name);
       }
       if (!v && document.documentElement.style && typeof document.documentElement.style.getPropertyValue === 'function') {
         v = document.documentElement.style.getPropertyValue(name);
@@ -444,6 +448,87 @@
     };
   };
 
+  // Three-state health only applies the existing role thresholds. Callers
+  // choose their evidence; this never turns a guessed relay into activity.
+  function _healthTimestamp(value) {
+    var stamp = _parseFreshnessCandidate(value);
+    return stamp !== null && stamp > 0 ? stamp : null;
+  }
+
+  window.getHealthStatus = function (role, heard, nowMs) {
+    var stamp = _healthTimestamp(heard);
+    if (stamp === null) return null;
+    var now = _resolveNow(nowMs);
+    if (stamp > now + NODE_FRESHNESS_FUTURE_TOLERANCE_MS) return null;
+    var age = Math.max(0, now - stamp);
+    var thresholds = getHealthThresholds(role);
+    return age < thresholds.degradedMs ? 'healthy'
+      : age < thresholds.silentMs ? 'degraded' : 'silent';
+  };
+
+  // Health APIs explicitly return null when there is no identity-safe
+  // activity. Never fall back from that null to relay-touched directory
+  // timestamps. Only legacy responses missing lastHeard use directory data.
+  window.getHealthLastHeard = function (node, stats) {
+    if (stats && Object.prototype.hasOwnProperty.call(stats, 'lastHeard')) {
+      return _healthTimestamp(stats.lastHeard) !== null ? stats.lastHeard : null;
+    }
+    if (node && _healthTimestamp(node.last_heard) !== null) return node.last_heard;
+    return node && _healthTimestamp(node.last_seen) !== null ? node.last_seen : null;
+  };
+
+  // ─── #902: observer reporting and per-role wording ───
+  // A node whose public key is also an observer that reported within
+  // healthThresholds.observerOnlineMinutes (sent to the client as
+  // observerOnlineMs) is running right now: that report is direct evidence,
+  // so three-state health classifies it as healthy whatever its role. The
+  // 30 s tolerance and the 60 min default match the Observers page's own
+  // "Online" classifier (observers.js healthStatus), so both pages agree.
+  var OBSERVER_REPORT_TOLERANCE_MS = 30000;
+  var OBSERVER_ONLINE_DEFAULT_MS = 3600000;
+
+  window.getObserverReportCredit = function (reportedAt, nowMs) {
+    var stamp = _healthTimestamp(reportedAt);
+    if (stamp === null) return null;
+    var now = _resolveNow(nowMs);
+    if (stamp > now + NODE_FRESHNESS_FUTURE_TOLERANCE_MS) return null;
+    var onlineMs = Number(HEALTH_THRESHOLDS.observerOnlineMs);
+    if (!(onlineMs > 0)) onlineMs = OBSERVER_ONLINE_DEFAULT_MS;
+    return now - stamp < onlineMs + OBSERVER_REPORT_TOLERANCE_MS ? reportedAt : null;
+  };
+
+  // The single entry point for three-state health. `heard` is the node's own
+  // radio evidence (getHealthLastHeard); `observerReportedAt` is the matching
+  // observer's last_seen, or null when the node is not an observer.
+  // Returns { status, source: 'heard' | 'observer' | null, at }.
+  window.getNodeHealth = function (role, heard, observerReportedAt, nowMs) {
+    var status = getHealthStatus(role, heard, nowMs);
+    if (status !== 'healthy') {
+      var credit = getObserverReportCredit(observerReportedAt, nowMs);
+      if (credit !== null) return { status: 'healthy', source: 'observer', at: credit };
+    }
+    return status ? { status: status, source: 'heard', at: heard } : { status: null, source: null, at: null };
+  };
+
+  // Companions and sensors are not expected to transmit continuously, so
+  // their middle state reads "Quiet" in a neutral colour instead of the
+  // "Degraded" warning. Thresholds are unchanged; only wording and colour.
+  var QUIET_HEALTH_ROLES = { companion: true, sensor: true };
+  window.isQuietHealthRole = function (role) {
+    return typeof role === 'string' && QUIET_HEALTH_ROLES.hasOwnProperty(role);
+  };
+  window.getHealthLabel = function (role, status) {
+    if (status === 'healthy') return 'Active';
+    if (status === 'degraded') return isQuietHealthRole(role) ? 'Quiet' : 'Degraded';
+    if (status === 'silent') return 'Silent';
+    return null;
+  };
+  window.getHealthStatusClass = function (role, status) {
+    if (status === 'healthy') return 'status-ok';
+    if (status === 'degraded') return isQuietHealthRole(role) ? 'status-muted' : 'status-warn';
+    return 'status-err';
+  };
+
   function _nodeStaleMs(role) {
     var isInfra = role === 'repeater' || role === 'room';
     return isInfra ? HEALTH_THRESHOLDS.infraSilentMs : HEALTH_THRESHOLDS.nodeSilentMs;
@@ -583,48 +668,96 @@
     return _statusFromAge(ageLegacy, _nodeStaleMs(roleOrNode));
   };
 
+  // ─── Hash size ───
+  // getKnownHashSize(node) -> 1 | 2 | 3 | null
+  //   The node's path hash size only when the server actually knows it
+  //   (hash_size on /api/nodes: from an advert in the packet-store window, or
+  //   the node's last known advert, #807). null means unknown, and callers
+  //   must not read it as 1-byte. 4 is reserved by the firmware (#1211) and
+  //   is treated as unknown. Cast at the boundary: "2" -> 2.
+  window.getKnownHashSize = function (node) {
+    var hs = node ? Number(node.hash_size) : NaN;
+    return (hs === 1 || hs === 2 || hs === 3) ? hs : null;
+  };
+
   // ─── Tile URLs ───
-  window.TILE_DARK  = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-  window.TILE_LIGHT = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+  // #332 — these are the LAST-RESORT templates, used only when
+  // map-tile-providers.js has not loaded (standalone pages, unit tests) or
+  // when the active style is malformed. They must not be CARTO: keyless
+  // CARTO raster tiles have been stamped "API KEY REQUIRED" since August
+  // 2026, so a CARTO default produced watermarked maps on every instance
+  // that had not changed providers. Keyless OSM Standard is the baseline
+  // the rest of the app already uses for its registry-less maps.
+  // Operators can still override both via the legacy `tiles.dark` /
+  // `tiles.light` and `map.tiles.darkUrl` / `lightUrl` config keys.
+  window.TILE_DARK  = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  window.TILE_LIGHT = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  // Runtime metadata for the registry, not a new config setting. An
+  // implicit provider fallback must not mask the operator's legacy URL.
+  // #390 — dark needs the same treatment as light got in #366: before it,
+  // `tiles.dark` / `map.tiles.darkUrl` were silently masked by whichever
+  // dark style the registry defaulted to.
+  window.MC_LIGHT_TILE_URL_OVERRIDE = null;
+  window.MC_DARK_TILE_URL_OVERRIDE  = null;
+
+  function _tileThemeIsDark() {
+    return document.documentElement.getAttribute('data-theme') === 'dark' ||
+      (document.documentElement.getAttribute('data-theme') !== 'light' &&
+       window.matchMedia('(prefers-color-scheme: dark)').matches);
+  }
+
+  /* #332 — resolve the configured provider for the current theme.
+   * Returns the registry style object, or null when no registry applies.
+   * Both themes are honoured: before #332 only dark consulted the
+   * registry, so a light-mode map ignored map.tiles.lightDefault entirely
+   * and fell through to the hard-coded CARTO template above. */
+  function _activeTileStyle() {
+    var isDark = _tileThemeIsDark();
+    try {
+      var reg = window.MC_TILE_PROVIDERS;
+      if (!reg) return null;
+      var getId = isDark ? window.MC_getDarkTileProvider : window.MC_getLightTileProvider;
+      if (typeof getId !== 'function') return null;
+      return reg[getId()] || null;
+    } catch (_e) { return null; }
+  }
 
   window.getTileUrl = function () {
-    var isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
-      (document.documentElement.getAttribute('data-theme') !== 'light' &&
-       window.matchMedia('(prefers-color-scheme: dark)').matches);
-    if (!isDark) return TILE_LIGHT;
-    // #1461 followup: honor customizer's dark-tile-provider pick (#1420 / #1430)
-    // when the registry is loaded. Falls back to TILE_DARK if absent.
+    var isDark = _tileThemeIsDark();
     try {
-      if (window.MC_getDarkTileProvider && window.MC_TILE_PROVIDERS) {
-        var id = window.MC_getDarkTileProvider();
-        var p = window.MC_TILE_PROVIDERS[id];
-        if (p && (p.url || p.baseUrl)) {
-          // #1614: providers added in #1533 (carto/osm/stamen) declare
-          // `url` as a function for lazy config resolution. Invoke it so
-          // we always return a string URL template; L.tileLayer otherwise
-          // stringifies the function source and every tile request 404s.
-          var u = p.url || p.baseUrl;
-          return (typeof u === 'function') ? u() : u;
-        }
+      // Preferred path: the registry's own resolver already invokes lazy
+      // `url` functions and picks the right provider per theme.
+      if (typeof window.MC_getTileSpec === 'function') {
+        var spec = window.MC_getTileSpec(isDark ? 'dark' : 'light');
+        if (spec && spec.url) return spec.url;
+      }
+      // Older/partial registries (and tests that mock only the accessors)
+      // expose MC_TILE_PROVIDERS + MC_get*TileProvider without getTileSpec.
+      var p = _activeTileStyle();
+      if (p && (p.url || p.baseUrl)) {
+        // #1614: providers added in #1533 (carto/osm/stamen) declare
+        // `url` as a function for lazy config resolution. Invoke it so
+        // we always return a string URL template; L.tileLayer otherwise
+        // stringifies the function source and every tile request 404s.
+        var u = p.url || p.baseUrl;
+        return (typeof u === 'function') ? u() : u;
       }
     } catch (_e) {}
-    return TILE_DARK;
+    return isDark ? TILE_DARK : TILE_LIGHT;
   };
   /* Helper: get the full provider object (for callers that also need the
-   * invertFilter or refUrl/attribution). Returns null when no customizer
-   * provider applies (light mode, or registry not loaded). */
+   * invertFilter or refUrl/attribution). Returns null when no registry
+   * provider applies. #332: light mode resolves too, so the node-detail
+   * inset map credits the configured light provider instead of a generic
+   * fallback. */
   window.getActiveTileProvider = function () {
-    var isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
-      (document.documentElement.getAttribute('data-theme') !== 'light' &&
-       window.matchMedia('(prefers-color-scheme: dark)').matches);
-    if (!isDark) return null;
+    // A legacy URL has no registry vendor/overlay/filter to borrow. Inset
+    // maps retain their historical generic attribution and clear filters.
     try {
-      if (window.MC_getDarkTileProvider && window.MC_TILE_PROVIDERS) {
-        var id = window.MC_getDarkTileProvider();
-        return window.MC_TILE_PROVIDERS[id] || null;
-      }
+      if (typeof window.MC_getTileSpec === 'function' &&
+          window.MC_getTileSpec(_tileThemeIsDark() ? 'dark' : 'light').id === null) return null;
     } catch (_e) {}
-    return null;
+    return _activeTileStyle();
   };
 
   // ─── SNR thresholds ───
@@ -669,8 +802,65 @@
     flasher: 'https://flasher.meshcore.io/'
   };
 
+  // One operator-owned policy for every estimated-position surface. Local
+  // preferences and deep links cannot enable it; older servers default on.
+  var estimatedPositionsEnabled = true;
+  window.EstimatedPositions = {
+    enabled: function (response) {
+      return estimatedPositionsEnabled && (!response || response.estimatedPositionsEnabled !== false);
+    },
+    disabledMessage: 'Estimated positions are disabled by the instance operator.',
+    disabledNoticeHTML: '<p class="text-muted estimated-positions-note" data-estimated-positions-disabled>Estimated positions are disabled by the instance operator.</p>'
+  };
+
+  // ─── #969 Operator display defaults ───
+  // config.json `timestamps` and `moments.display` arrive on
+  // /api/config/client, their only source; /api/config/theme carries
+  // neither. app.js's bootSiteConfig hands them to the customizer as its
+  // server defaults, so the customizer's own merge gives the precedence
+  // viewer > operator > built-in (and a ?moments= link above all for
+  // Moments on/off, in live.js).
+  var TS_BUILTIN = { defaultMode: 'ago', timezone: 'local', formatPreset: 'iso', customFormat: '', allowCustomFormat: false };
+  function oneOf(v, list, dflt) { return list.indexOf(v) >= 0 ? v : dflt; }
+  // Cast at the boundary: an unknown value is the built-in.
+  function normalizeTimestampConfig(ts) {
+    var t = ts && typeof ts === 'object' ? ts : {};
+    return {
+      defaultMode: oneOf(t.defaultMode, ['ago', 'absolute'], TS_BUILTIN.defaultMode),
+      timezone: oneOf(t.timezone, ['local', 'utc'], TS_BUILTIN.timezone),
+      formatPreset: oneOf(t.formatPreset, ['iso', 'iso-seconds', 'locale'], TS_BUILTIN.formatPreset),
+      customFormat: typeof t.customFormat === 'string' ? t.customFormat : '',
+      allowCustomFormat: t.allowCustomFormat === true
+    };
+  }
+  // The operator's sections from a /api/config/client body. moments is
+  // null unless the server has Moments on and the operator set a default.
+  function operatorDisplayDefaults(cfg) {
+    var c = cfg && typeof cfg === 'object' ? cfg : {};
+    var m = c.moments;
+    var display = m && m.enabled === true && m.display && typeof m.display === 'object' && !Array.isArray(m.display)
+      ? Object.assign({}, m.display) : null;
+    return { timestamps: normalizeTimestampConfig(c.timestamps), moments: display };
+  }
+  // The theme body with the operator's sections in place of anything it
+  // carries under those names; without operator values (the client config
+  // failed), the timestamps built-ins. themeCfg is not changed.
+  function withOperatorDisplayDefaults(themeCfg, operator) {
+    var cfg = Object.assign({}, themeCfg && typeof themeCfg === 'object' ? themeCfg : {});
+    var op = operator && typeof operator === 'object' ? operator : {};
+    cfg.timestamps = normalizeTimestampConfig(op.timestamps);
+    if (op.moments && typeof op.moments === 'object') cfg.moments = Object.assign({}, op.moments);
+    else delete cfg.moments;
+    return cfg;
+  }
+  window.normalizeTimestampConfig = normalizeTimestampConfig;
+  window.operatorDisplayDefaults = operatorDisplayDefaults;
+  window.withOperatorDisplayDefaults = withOperatorDisplayDefaults;
+  window.MC_OPERATOR_DISPLAY = null;
+
   // ─── Fetch server overrides ───
   window.MeshConfigReady = fetch('/api/config/client').then(function (r) { return r.json(); }).then(function (cfg) {
+    estimatedPositionsEnabled = !cfg.estimatedPositions || cfg.estimatedPositions.enabled !== false;
     window.MC_CLIENT_RX_COVERAGE = cfg.clientRxCoverage === true;
     // Coverage is opt-in: the nav link is NOT in static HTML (so the default-off
     // nav matches upstream and the nav-overflow tests). Inject it after Analytics
@@ -737,6 +927,32 @@
       if (cfg.map.tiles.darkUrl) window.TILE_DARK = cfg.map.tiles.darkUrl;
       if (cfg.map.tiles.lightUrl) window.TILE_LIGHT = cfg.map.tiles.lightUrl;
     }
+    window.MC_LIGHT_TILE_URL_OVERRIDE = cfg.tiles ? (cfg.tiles.light || null) :
+      (cfg.map && cfg.map.tiles && cfg.map.tiles.lightUrl) || null;
+    window.MC_DARK_TILE_URL_OVERRIDE = cfg.tiles ? (cfg.tiles.dark || null) :
+      (cfg.map && cfg.map.tiles && cfg.map.tiles.darkUrl) || null;
+    // #680 — terrain overlay offer; absent unless the server's DHM proxy is on.
+    window.MC_DHM_CFG = cfg.dhm || null;
+    // #811 M4 — node share links (public/node-share.js); absent unless
+    // share.nodes.enabled is on.
+    window.MC_SHARE_CFG = cfg.share || null;
+    // #723 — protected ancient monuments overlay; absent unless map.heritage is on.
+    window.MC_HERITAGE_CFG = cfg.heritage || null;
+    // #724 — antenna sites overlay; absent unless map.masts is on.
+    window.MC_MASTS_CFG = cfg.masts || null;
+    // #737 — oblique aerial photos (public/skraafoto.js); absent unless the
+    // server's Skråfoto proxy is on. Never carries the token.
+    window.MC_SKRAAFOTO_CFG = cfg.skraafoto || null;
+    // #941 — Predicted reach (public/coverage.js); absent unless the
+    // server's map.coverage is on and has terrain.
+    window.MC_COVERAGE_CFG = cfg.coverage || null;
+    // #881 — Live moments; absent unless the server's moments.enabled is on.
+    window.MC_MOMENTS_CFG = (cfg.moments && cfg.moments.enabled === true) ? cfg.moments : null;
+    window.MC_OPERATOR_DISPLAY = operatorDisplayDefaults(cfg);
+    // #968 M1 — the operator kiosk preset (config.json "kiosk", resolved by
+    // the server); it fills what a #/live?kiosk=1 link does not say. null
+    // when the server has none (undefined until this fetch resolves).
+    window.MC_KIOSK_CFG = cfg.kiosk || null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);
@@ -762,6 +978,36 @@
     // Sync ROLE_STYLE colors with ROLE_COLORS
     // #1407 — both are now live getters; no manual sync needed. Kept as no-op for clarity.
   }).catch(function () { /* use defaults */ });
+
+  /* Node actions owned by other modules: #681 M5 "Terrain profile"
+   * (terrain-profile.js) and #941 "Predicted reach" (coverage.js), in node
+   * detail's order. Each module owns its button and its gate (feature
+   * switched on, node has a fix); build() reads the client config when it
+   * runs, so mount it with mountConfigAction. Node detail and the Map page
+   * popup (#959) both list them here, so each shows the same actions. */
+  window.nodeToolActions = function (node, env) {
+    var w = env || window, out = [];
+    var tp = w.TerrainProfile, pr = w.PredictedReach;
+    if (tp && typeof tp.nodeEntryAction === 'function') {
+      out.push({ testid: 'node-terrain-profile', build: function () { return tp.nodeEntryAction(node, w.MC_DHM_CFG); } });
+    }
+    if (pr && typeof pr.nodeEntryAction === 'function') {
+      out.push({ testid: 'node-predicted-reach', build: function () { return pr.nodeEntryAction(node, w.MC_COVERAGE_CFG); } });
+    }
+    return out;
+  };
+
+  /* mountConfigAction waits for the client config and appends what build()
+   * hands back. A row that left the page, or already holds that test id,
+   * gets nothing. Resolves to the appended action, or null. */
+  window.mountConfigAction = function (row, testid, build) {
+    return Promise.resolve(window.MeshConfigReady).catch(function () {}).then(function () {
+      if (!row.isConnected || row.querySelector('[data-testid="' + testid + '"]')) return null;
+      var action = build();
+      if (action) row.appendChild(action);
+      return action || null;
+    });
+  };
 
   // ─── Built-in IATA airport code → city name mapping ───
   window.IATA_CITIES = {
@@ -969,6 +1215,69 @@
     }
   };
 
+  /* #368 — attribute escape for the Markdown link destination below.
+     Same 5-char-minus-&<> set as the escapeAttr helpers in public/home.js and
+     public/path-inspector.js: by the time miniMarkdown() captures a
+     destination it has already turned & < > into entities, so the only
+     characters that can still leave a double-quoted href are the two quote
+     characters. Exported so the Home render path has one shared copy. */
+  function escapeAttr(s) {
+    return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  window.escapeAttr = escapeAttr;
+
+  /* #368 — scheme allowlist for Markdown link destinations.
+     Home checklist/step text is site-customization content, which is
+     importable and therefore untrusted, so a destination may not be able to
+     pick its own URL scheme. Only these are anchored; everything without a
+     scheme (relative paths, #fragments, ?query) is left alone. mailto: is not
+     in the list because nothing in the product emits one today — adding it is
+     a product decision, not a security one. */
+  var SAFE_LINK_SCHEMES = ['http', 'https'];
+  /* RFC 3986 scheme grammar, lowercased before matching. */
+  var LINK_SCHEME_RE = /^([a-z][a-z0-9+.\-]*):/;
+
+  /* True when `url` may become a link or resource URL: it carries no scheme
+     (relative path, #fragment, ?query) or an allowlisted one. Normalisation
+     mirrors what a browser does before it resolves a scheme: ASCII controls
+     and ASCII whitespace are ignored, and the scheme is case-insensitive. So
+     `JaVa\tScRiPt:alert(1)` is rejected for the same reason
+     `javascript:alert(1)` is. #429: exported as the one scheme check for
+     every customization-fed URL sink (Home footer links, branding logo and
+     favicon), so no sink grows an allowlist of its own. */
+  function linkUrlProbe(url) {
+    return String(url == null ? '' : url).replace(/[\u0000-\u0020\u007f]/g, '').toLowerCase();
+  }
+  function isSafeLinkUrl(url) {
+    var probe = linkUrlProbe(url);
+    if (!probe) return false;
+    var m = LINK_SCHEME_RE.exec(probe);
+    return !m || SAFE_LINK_SCHEMES.indexOf(m[1]) !== -1;
+  }
+  window.isSafeLinkUrl = isSafeLinkUrl;
+  /* #429 — image sinks (branding logo, favicon) take the same check plus
+     inline data:image/ URLs: an <img> or icon never runs script from its URL,
+     and the customizer has always accepted an inline logo. */
+  window.isSafeImageUrl = function(url) {
+    return isSafeLinkUrl(url) || linkUrlProbe(url).indexOf('data:image/') === 0;
+  };
+
+  /* Returns the escaped href for `dest`, or '' when the destination must not
+     become a link. `dest` is already & < > escaped (see miniMarkdown). */
+  function safeLinkHref(dest) {
+    var raw = String(dest == null ? '' : dest);
+    return isSafeLinkUrl(raw) ? escapeAttr(raw) : '';
+  }
+
+  /* #429 — the same check for a RAW url headed for a quoted HTML attribute:
+     returns the fully escaped value (& < > " '), or '' when it must not
+     become a link. '&' matters here: left alone, `&#106;avascript:` carries
+     no scheme for the check but is decoded back into `javascript:` while the
+     browser parses the attribute. */
+  window.safeUrlAttr = function(url) {
+    return safeLinkHref(String(url == null ? '' : url)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+  };
   // Simple markdown → HTML (bold, italic, links, code, lists, line breaks)
   window.miniMarkdown = function(text) {
     if (!text) return '';
@@ -977,7 +1286,14 @@
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.+?)\*/g, '<em>$1</em>')
       .replace(/`(.+?)`/g, '<code>$1</code>')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" style="color:var(--link-color)">$1</a>')
+      /* #368: a replacement function, not a '$2' template — a '$&'/"$'" in the
+         destination would otherwise be re-expanded by String.replace. A
+         rejected destination degrades to its already-escaped label text. */
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_m, label, dest) {
+        var href = safeLinkHref(dest);
+        if (!href) return label;
+        return '<a href="' + href + '" target="_blank" rel="noopener" style="color:var(--link-color)">' + label + '</a>';
+      })
       .replace(/^- (.+)/gm, '<li>$1</li>')
       .replace(/\n/g, '<br>');
     // Wrap consecutive <li> in <ul>

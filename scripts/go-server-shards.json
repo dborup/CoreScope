@@ -1,0 +1,97 @@
+{
+  "version": 2,
+  "shards": 3,
+  "package": "github.com/corescope/server",
+  "metadata": {
+    "generatedBy": "scripts/rebalance-go-server-shards.js",
+    "method": "Top-level go test -json Elapsed from GitHub runners, mean per Test over the source runs. The cheapest entries fill catch-all shard 3 up to 1/3 of the total; the rest are pinned longest-first to the lightest of shards 1..2. Unpinned and new Tests run in shard 3.",
+    "projectedTestSeconds": [
+      558.04,
+      549.73,
+      550.605
+    ],
+    "unmeasuredEntries": 0,
+    "sources": [
+      {
+        "input": "go-run-43697641036",
+        "runContexts": [
+          {
+            "runId": "43697641036",
+            "attempt": "1",
+            "headSha": "c4de1f20fba370e8667b4691b910e977f13735ef"
+          }
+        ],
+        "files": [
+          {
+            "file": "go-server-1/test.jsonl",
+            "sha256": "4ac05cacee563722c3a1fe6dbecb22db8ec8290ebd1a61d366870488caabb7af"
+          },
+          {
+            "file": "go-server-2/test.jsonl",
+            "sha256": "2b98d526132fbbe01b45597c579da6e8671dd72acd1f8dcdd5ef8b4a2bd70078"
+          },
+          {
+            "file": "go-server-3/test.jsonl",
+            "sha256": "f4dbd8d31da99c2f6d29f08a711a08e99d8e3c2325a7470d191681b81cee3ecd"
+          }
+        ]
+      },
+      {
+        "input": "go-run-43697309240",
+        "runContexts": [
+          {
+            "runId": "43697309240",
+            "attempt": "1",
+            "headSha": "a1dc0e47b02009da7c41c22f730ac26b732974bb"
+          }
+        ],
+        "files": [
+          {
+            "file": "go-server-1/test.jsonl",
+            "sha256": "6bd7203ca71e2a3e82b12794dbba803fc32ef197b275c70724193cef26408106"
+          },
+          {
+            "file": "go-server-2/test.jsonl",
+            "sha256": "a70cefca3b37a347b8d00fcecc5ca2c494e304cb6ff6e3d1fbe95d8946111515"
+          },
+          {
+            "file": "go-server-3/test.jsonl",
+            "sha256": "953e1082f50a17ecb357456d60c1b8fbcc7eb14c0e5b49271106b2ab4417091e"
+          }
+        ]
+      }
+    ]
+  },
+  "pinned": [
+    {"name":"TestHotStartup_ConcurrentQueryDuringBackgroundLoad","shard":1,"samplesSeconds":[270.99,171.45],"meanSeconds":221.22},
+    {"name":"TestObsDedup411_MemoryBudgetEvictsTheSameOnEveryPath","shard":1,"samplesSeconds":[35.77,47.66],"meanSeconds":41.715},
+    {"name":"TestObsDedup411_RebuildKeepsIndexesAndCharges","shard":1,"samplesSeconds":[35.56,47.33],"meanSeconds":41.445},
+    {"name":"TestChannelsSQL_PlanWithStats","shard":1,"samplesSeconds":[44.5,35.71],"meanSeconds":40.105},
+    {"name":"TestNodeAdvertRoutes_StreamMatchesWindowOracle","shard":1,"samplesSeconds":[43.5,34.69],"meanSeconds":39.095},
+    {"name":"TestNodeAdvertRoutes_FloodCountMatchesCountFloodAdvertsForNode","shard":1,"samplesSeconds":[33.88,27.01],"meanSeconds":30.445},
+    {"name":"TestMemoryEviction_CrossesHighAndReachesLow_113","shard":1,"samplesSeconds":[20.55,27.65],"meanSeconds":24.1},
+    {"name":"TestGraphScore561_AllocationBudget","shard":1,"samplesSeconds":[20.99,26.79],"meanSeconds":23.89},
+    {"name":"TestDifferentRegionsAreNeverMixed_109","shard":1,"samplesSeconds":[23.72,16.13],"meanSeconds":19.925},
+    {"name":"TestFloodAdvertCountSQL_MatchesUnpinned","shard":1,"samplesSeconds":[18.99,14.79],"meanSeconds":16.89},
+    {"name":"TestSubpathsOnDemandMatchLegacyIndex_413","shard":1,"samplesSeconds":[13.28,17.79],"meanSeconds":15.535},
+    {"name":"TestNodePathsAndHopAnalyticsConcurrentIngest470","shard":1,"samplesSeconds":[12.99,16.83],"meanSeconds":14.91},
+    {"name":"TestBulkScanReuseAllocations486","shard":1,"samplesSeconds":[9.13,11.78],"meanSeconds":10.455},
+    {"name":"TestResolvedRelayChargeTracksHeap_534","shard":1,"samplesSeconds":[7.92,10.47],"meanSeconds":9.195},
+    {"name":"TestSubpathOnDemandConcurrentWriters_413","shard":1,"samplesSeconds":[7.45,10.78],"meanSeconds":9.115},
+    {"name":"TestGraphScore629_GoldenBitIdentical","shard":2,"samplesSeconds":[127.73,109.07],"meanSeconds":118.4},
+    {"name":"TestObserverComparisonPerf_RealisticFixtureEndToEnd","shard":2,"samplesSeconds":[74.47,98.99],"meanSeconds":86.73},
+    {"name":"TestChannelRegion379PlansKeepIndexedMembership","shard":2,"samplesSeconds":[39.69,52.67],"meanSeconds":46.18},
+    {"name":"TestObsDedup411_EvictionCreditsWhatEachPathCharged","shard":2,"samplesSeconds":[35.8,47.55],"meanSeconds":41.675},
+    {"name":"TestObsDedup411_PathsKeepTheSameObservationsAndIndexes","shard":2,"samplesSeconds":[35.35,47.32],"meanSeconds":41.335},
+    {"name":"TestTrackedBytesTracksTheHeap_113","shard":2,"samplesSeconds":[44.54,35.04],"meanSeconds":39.79},
+    {"name":"TestGetChannels_PinnedMatchesUnpinned","shard":2,"samplesSeconds":[41.49,33],"meanSeconds":37.245},
+    {"name":"TestGetChannelMessagesPerfLargeChannel","shard":2,"samplesSeconds":[31.15,23.88],"meanSeconds":27.515},
+    {"name":"TestNodeRegionIndex618_UnionEqualsPerSetBuild","shard":2,"samplesSeconds":[18.88,25.17],"meanSeconds":22.025},
+    {"name":"TestFloodAdvertCountSQL_Plan","shard":2,"samplesSeconds":[22.65,17.96],"meanSeconds":20.305},
+    {"name":"TestCanonicalPaths548EvictionOrderPastCapacity","shard":2,"samplesSeconds":[15.7,22.1],"meanSeconds":18.9},
+    {"name":"TestObsStringsSharedOnEveryConstructionPath_489","shard":2,"samplesSeconds":[13.03,17.53],"meanSeconds":15.28},
+    {"name":"TestScopeAuditHandlerSingleflightShareSurvivesFirstCallerDisconnect","shard":2,"samplesSeconds":[11.18,14.76],"meanSeconds":12.97},
+    {"name":"TestAreaFilterSQLMatchesMemory569","shard":2,"samplesSeconds":[9.56,12.66],"meanSeconds":11.11},
+    {"name":"TestComputeObserverComparison_ScalesLinearlyInObservers","shard":2,"samplesSeconds":[8.49,12.05],"meanSeconds":10.27}
+  ]
+}

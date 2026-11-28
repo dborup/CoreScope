@@ -1,0 +1,12 @@
+title   44px bold    x=  44 y= 78 w= 539 GRP_TXT · Flood · 6 hops
+heard   24px regular x=  44 y=114 w= 533 First heard by Aarhus-Obs · heard by 3 observers
+empty   26px regular x= 314 y=306 w= 572 No station on this path has an advertised position
+label   20px regular x=  24 y=502 w=  92 Observers
+value   34px bold    x=  24 y=540 w=  19 3
+label   20px regular x= 312 y=502 w=  65 Spread
+value   34px bold    x= 312 y=540 w=  66 4.2s
+label   20px regular x= 600 y=502 w= 158 Farthest from first
+value   34px bold    x= 600 y=540 w= 125 38.0 km
+label   20px regular x= 888 y=502 w= 152 Est. flood airtime
+value   34px bold    x= 888 y=540 w=  85 ≥1.2s
+footer  22px regular x=  24 y=596 w= 380 First heard 2026-11-15 13:20:41 UTC

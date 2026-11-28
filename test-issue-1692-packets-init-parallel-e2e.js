@@ -16,6 +16,13 @@
  * observers-stub delay so a serial implementation reliably trips the gate
  * even with timing jitter, and a parallel implementation comfortably passes.
  *
+ * Window guard (#439): the test seeds a 1-year time window so the first row
+ * does not depend on how old the freshened CI fixture is. packets.js reads
+ * that window once, when the script is evaluated, so the seed only counts if
+ * it is in localStorage before the first page load. The first /api/packets
+ * request is checked to carry that window; with the default 15-minute window
+ * the run fails once the fixture is older than 15 minutes.
+ *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-1692-packets-init-parallel-e2e.js
  */
 'use strict';
@@ -24,6 +31,10 @@ const { chromium } = require('playwright');
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const OBSERVERS_DELAY_MS = 4000;
 const FIRST_ROW_BUDGET_MS = 3000;
+const SEEDED_WINDOW_MIN = 525600; // 1 year
+// The `since` of the first /api/packets request must reach at least this far
+// back; the default 15-minute window is far short of it.
+const MIN_WINDOW_MS = 300 * 24 * 3600 * 1000;
 
 let passed = 0, failed = 0;
 async function step(name, fn) {
@@ -62,13 +73,20 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await route.fulfill({ status: 200, contentType, body });
   });
 
+  let firstPacketsUrl = null;
+  page.on('request', (req) => {
+    if (!firstPacketsUrl && /\/api\/packets\?/.test(req.url())) firstPacketsUrl = req.url();
+  });
+
   await step(`first table row appears < ${FIRST_ROW_BUDGET_MS}ms despite ${OBSERVERS_DELAY_MS}ms /api/observers stub`, async () => {
-    // Clean SPA state — mirrors gotoPackets() pattern from test-e2e-playwright.js.
-    await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-    await page.evaluate(() => {
+    // Clean SPA state, seeded before any app script runs: packets.js reads
+    // meshcore-time-window when it is evaluated, not on each init() (#439).
+    await ctx.addInitScript((windowMin) => {
       localStorage.removeItem('meshcore-groupbyhash');
-      localStorage.setItem('meshcore-time-window', '525600');
-    });
+      localStorage.setItem('meshcore-time-window', String(windowMin));
+    }, SEEDED_WINDOW_MIN);
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' });
+    firstPacketsUrl = null;
 
     const t0 = Date.now();
     await page.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
@@ -77,6 +95,14 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     console.log(`    first-row elapsed: ${elapsed}ms (budget ${FIRST_ROW_BUDGET_MS}ms, observers stub ${OBSERVERS_DELAY_MS}ms)`);
     assert(elapsed < FIRST_ROW_BUDGET_MS,
       `first tr[data-hash] took ${elapsed}ms, expected < ${FIRST_ROW_BUDGET_MS}ms — packets.js::init() is serializing loadObservers → loadPackets (#1692)`);
+  });
+
+  await step(`first /api/packets request uses the seeded ${SEEDED_WINDOW_MIN}-minute window`, async () => {
+    assert(firstPacketsUrl, 'no /api/packets request was seen');
+    const since = new URL(firstPacketsUrl).searchParams.get('since');
+    const reach = since ? Date.now() - Date.parse(since) : Infinity;
+    assert(reach >= MIN_WINDOW_MS,
+      `first /api/packets request has since=${since} (${Math.round(reach / 60000)} min back) — the seeded meshcore-time-window was not in effect when packets.js loaded, so rows depend on fixture age (#439)`);
   });
 
   await page.unroute('**/api/observers**');

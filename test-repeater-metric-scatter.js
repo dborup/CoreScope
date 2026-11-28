@@ -75,6 +75,10 @@ assert(!/traffic_share_score\s*!=\s*null\s*\?\s*n\.traffic_share_score\s*:\s*\(n
   'this tab\'s _toScatterPoints must NOT fall back traffic to usefulness_score (the #1760 semantic fix)');
 const esc = s => s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
 const windowStub = { ROLE_COLORS: { repeater: '#3b82f6', room: '#a855f7' } };
+// Busiest Repeaters formats estimated airtime with the real ObserverAirtime.
+new Function('window', fs.readFileSync(path.join(__dirname, 'public', 'observer-airtime.js'), 'utf8'))(windowStub);
+// index.html loads my-mesh-activity.js before analytics.js, so analytics.js reads the label from it with no fallback.
+new Function('window', fs.readFileSync(path.join(__dirname, 'public', 'my-mesh-activity.js'), 'utf8'))(windowStub);
 let _regionQS = '', _areaQS = '';
 const RegionFilter = { regionQueryString: () => _regionQS };
 const AreaFilter = { areaQueryString: () => _areaQS };
@@ -89,10 +93,33 @@ const fakeLocalStorage = (() => {
   return { getItem: k => (k in s ? s[k] : null), setItem: (k, v) => { s[k] = String(v); }, removeItem: k => { delete s[k]; } };
 })();
 
+// Busiest Repeaters (the tab's second section) keeps its URL view-param
+// specs next to the other tabs' ones, outside the block: run the real ones.
+const specStart = src.indexOf('var BUSIEST_SORT');
+const specEnd = src.indexOf('// === BUSIEST SPECS END');
+if (specStart < 0 || specEnd < 0) {
+  console.error('  ✗ could not locate the BUSIEST_* view-param specs');
+  process.exit(1);
+}
+const SPECS = new Function(src.slice(specStart, specEnd) + '\nreturn { BUSIEST_SORT, BUSIEST_OBSERVERS, BUSIEST_LIMIT };')();
+let observersData = { observers: [] };
+let lastApiPath = null;
+const api = async (p) => { lastApiPath = p; return observersData; };
+// The URL as restoreViewParams/setViewParam would read and write it.
+const viewParams = {};
+const restoreViewParams = specs => specs.map(s => {
+  const v = viewParams[s.param];
+  return v != null && s.allowed.indexOf(v) >= 0 ? v : s.dflt;
+});
+const setViewParam = (spec, v) => { viewParams[spec.param] = v; };
+CLIENT_TTL.observers = 0;
+
 const M = new Function(
   'esc', 'window', 'RegionFilter', 'AreaFilter', 'fetchAllNodes', 'getFavorites', 'CLIENT_TTL', 'localStorage',
-  block + '\nreturn { REPEATER_METRIC_AXES, REPEATER_METRIC_POINT_CAP, _niceCeil, _axisFmt, _axisFromMax, _resolveAxis, _toScatterPoints, _sampleExact, _sampleForPlot, renderMetricScatter, renderRepeaterMetricsTab };')(
-  esc, windowStub, RegionFilter, AreaFilter, fetchAllNodes, getFavorites, CLIENT_TTL, fakeLocalStorage);
+  'api', 'restoreViewParams', 'setViewParam', 'BUSIEST_SORT', 'BUSIEST_OBSERVERS', 'BUSIEST_LIMIT',
+  block + '\nreturn { REPEATER_METRIC_AXES, REPEATER_METRIC_POINT_CAP, _niceCeil, _axisFmt, _axisFromMax, _resolveAxis, _toScatterPoints, _sampleExact, _sampleForPlot, renderMetricScatter, renderRepeaterMetricsTab, _busiestRepeaterRows, renderBusiestRepeatersTable, BUSIEST_DEFAULT_ROWS };')(
+  esc, windowStub, RegionFilter, AreaFilter, fetchAllNodes, getFavorites, CLIENT_TTL, fakeLocalStorage,
+  api, restoreViewParams, setViewParam, SPECS.BUSIEST_SORT, SPECS.BUSIEST_OBSERVERS, SPECS.BUSIEST_LIMIT);
 
 console.log('\n=== [1] axis registry: all 8 axes exist and read the right point fields ===');
 assert(M.REPEATER_METRIC_AXES.map(a => a.key).join(',') === 'traffic,usefulness,bridge,coverage,redundancy,relay1h,relay24h,adverts',
@@ -323,6 +350,7 @@ function makeElement(id) {
     querySelectorAll() { return []; },
     addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); },
     fireChange() { (this._listeners.change || []).forEach(fn => fn({ target: this })); },
+    fireClick() { (this._listeners.click || []).forEach(fn => fn({ target: this })); },
   };
 }
 
@@ -487,6 +515,198 @@ function makeElement(id) {
     assert(/No repeater or room nodes/.test(el.innerHTML),
       'a node set with no repeater/room rows shows an explicit empty state');
   }
+
+  console.log('\n=== [B1] Busiest Repeaters rows: who is listed, in which order ===');
+  {
+    const nodes = [
+      { public_key: 'aa01', name: 'Alpha', role: 'repeater', relay_count_1h: 10, relay_count_24h: 300 },
+      { public_key: 'bb02', name: 'Bravo', role: 'repeater', relay_count_1h: 40, relay_count_24h: 200 },
+      { public_key: 'cc03', name: 'Charlie', role: 'room', relay_count_1h: '5', relay_count_24h: '300' },
+      { public_key: 'dd04', name: 'Delta', role: 'repeater', relay_count_1h: 0, relay_count_24h: 0 },
+      { public_key: 'ee05', name: 'Echo', role: 'companion', relay_count_1h: 99, relay_count_24h: 999 },
+      { public_key: 'FF06', name: 'Foxtrot', role: 'repeater', relay_count_1h: 1, relay_count_24h: 500 },
+    ];
+    const obs = new Set(['ff06']);
+    const r24 = M._busiestRepeaterRows(nodes, obs, '24h', false);
+    assert(r24.map(r => r.name).join(',') === 'Alpha,Charlie,Bravo',
+      '24h: repeaters and rooms with relays, most first; ties go to the 1h count; got ' + r24.map(r => r.name).join(','));
+    assert(r24[1].relay24h === 300 && r24[1].relay1h === 5, 'string counts from the API are cast to numbers');
+    const r1 = M._busiestRepeaterRows(nodes, obs, '1h', false);
+    assert(r1.map(r => r.name).join(',') === 'Bravo,Alpha,Charlie', '1h: ranked by the last hour; got ' + r1.map(r => r.name).join(','));
+    const withObs = M._busiestRepeaterRows(nodes, obs, '24h', true);
+    assert(withObs[0].name === 'Foxtrot' && withObs[0].observer === true,
+      'an observer repeater is listed when included, matched on a lower-cased public key');
+    assert(withObs.filter(r => r.observer).length === 1, 'only the observer repeater is marked as one');
+    assert(M._busiestRepeaterRows(nodes, new Set(), '24h', false).length === 4,
+      'without an observer list nothing is hidden');
+  }
+
+  console.log('\n=== [B2] Busiest Repeaters table markup ===');
+  {
+    const rows = Array.from({ length: 60 }, (_, i) => ({ pk: 'k' + i, name: 'R' + i, role: 'repeater', relay1h: 1, relay24h: 1000 - i, observer: false }));
+    rows[0].name = '<img src=x onerror=alert(1)>';
+    const top = M.renderBusiestRepeatersTable(rows, '24h', '50');
+    assert((top.match(/<tr><td/g) || []).length === M.BUSIEST_DEFAULT_ROWS, 'the default limit shows the top 50 rows');
+    assert(!top.includes('<img src=x') && top.includes('&lt;img src=x'), 'a node name is escaped');
+    assert(/id="busiestLimitToggle"[^>]*>Show all 60</.test(top), 'a "Show all 60" button follows the truncated list');
+    assert(/aria-sort="descending">Relayed 24h</.test(top) && !/aria-sort="descending">Relayed 1h</.test(top),
+      'the sorted column is marked aria-sort="descending"');
+    // #716: the column headers name what they count (not just "24h"/"1h"),
+    // so they stay unambiguous even read in isolation from the "Relayed"
+    // group header above them.
+    assert(/aria-sort="descending">Relayed 24h</.test(top), 'the 24h column header says "Relayed 24h", not just "24h"');
+    const all = M.renderBusiestRepeatersTable(rows, '1h', 'all');
+    assert((all.match(/<tr><td/g) || []).length === 60 && /Show top 50</.test(all), '"all" shows every row and offers the top 50 again');
+    assert(/aria-sort="descending">Relayed 1h</.test(all), 'sorting by 1h marks the 1h column');
+    const few = M.renderBusiestRepeatersTable(rows.slice(0, 3), '24h', '50');
+    assert(!few.includes('busiestLimitToggle'), 'no limit button when every row fits');
+    assert(/No repeater in this view relayed/.test(M.renderBusiestRepeatersTable([], '24h', '50')), 'an empty list says so');
+    assert(/<td style="text-align:right">1<\/td><td[^>]*><a href="#\/nodes\/k0\/analytics"/.test(top), 'rows are numbered and link to the node analytics');
+    assert(/^<div class="analytics-table-scroll"><table class="analytics-table busiest-repeaters-table"/.test(top),
+      'the table carries its own #206 scroll wrapper, so a redraw keeps it, and the class that lifts the 480px minimum');
+  }
+
+  console.log('\n=== [B3] Busiest Repeaters in the rendered tab: URL state and controls ===');
+  {
+    nodesData = [
+      { public_key: 'aa01', name: 'Alpha', role: 'repeater', relay_count_1h: 10, relay_count_24h: 300 },
+      { public_key: 'bb02', name: 'Bravo', role: 'repeater', relay_count_1h: 40, relay_count_24h: 200 },
+      { public_key: 'ff06', name: 'ObsRep', role: 'repeater', relay_count_1h: 1, relay_count_24h: 900 },
+    ];
+    observersData = { observers: [{ id: 'FF06', name: 'ObsRep' }] };
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    assert(lastApiPath === '/observers', 'the tab fetches the observer list');
+    const table = () => el.querySelector('#busiestRepeatersTable').innerHTML;
+    const names = () => Array.from(table().matchAll(/class="analytics-link">([^<]+)</g), m => m[1]).join(',');
+    assert(names() === 'Alpha,Bravo', 'default: 24h order with the observer repeater hidden; got ' + names());
+    assert(/Include observer repeaters \(1\)/.test(el.innerHTML), 'the checkbox shows how many observer repeaters are hidden');
+    assert(/option value="24h" selected/.test(el.innerHTML), 'the sort select opens on 24h');
+
+    const sortSel = el.querySelector('#busiestSort');
+    sortSel.value = '1h';
+    sortSel.fireChange();
+    assert(names() === 'Bravo,Alpha' && viewParams.bsort === '1h', 'choosing 1h re-sorts and writes bsort=1h to the URL');
+
+    const obsBox = el.querySelector('#busiestObservers');
+    obsBox.checked = true;
+    obsBox.fireChange();
+    assert(names() === 'Bravo,Alpha,ObsRep' && viewParams.bobs === 'show', 'including observers lists them and writes bobs=show');
+    assert(/ObsRep<\/a> <span class="text-muted">observer<\/span>/.test(table()), 'an observer repeater is tagged as one');
+
+    sortSel.value = 'bogus';
+    sortSel.fireChange();
+    assert(viewParams.bsort === '24h', 'an unknown sort value falls back to 24h');
+  }
+  {
+    // Deep link: the URL decides the state on render.
+    viewParams.bsort = '1h'; viewParams.bobs = 'show'; viewParams.blimit = 'all';
+    nodesData = Array.from({ length: 55 }, (_, i) => ({ public_key: 'p' + i, name: 'N' + i, role: 'repeater', relay_count_1h: i, relay_count_24h: 100 }));
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    assert(/option value="1h" selected/.test(el.innerHTML) && /id="busiestObservers" checked/.test(el.innerHTML),
+      'bsort=1h and bobs=show from the URL select the controls');
+    const html = el.querySelector('#busiestRepeatersTable').innerHTML;
+    assert((html.match(/<tr><td/g) || []).length === 55, 'blimit=all from the URL shows every row');
+    el.querySelector('#busiestRepeatersTable').querySelector('#busiestLimitToggle').fireClick();
+    assert(viewParams.blimit === '50' && (el.querySelector('#busiestRepeatersTable').innerHTML.match(/<tr><td/g) || []).length === 50,
+      'the limit button goes back to the top 50 and writes it to the URL');
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+  }
+  {
+    const failingApi = observersData;
+    observersData = null;
+    nodesData = [{ public_key: 'aa01', name: 'Alpha', role: 'repeater', relay_count_1h: 1, relay_count_24h: 2 }];
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    assert(/Alpha/.test(el.querySelector('#busiestRepeatersTable').innerHTML) && /Include observer repeaters \(0\)/.test(el.innerHTML),
+      'without an observer list the table still renders and hides nobody');
+    observersData = failingApi;
+  }
+
+  console.log('\n=== [B5] seen airtime columns and the busiest-hour sort (#697 M2) ===');
+  {
+    const nodes = [
+      { public_key: 'a1', name: 'Quiet', role: 'repeater', relay_count_1h: 50, relay_count_24h: 900, est_airtime_pct_24h: 0.4, est_airtime_peak_pct: 1.2 },
+      { public_key: 'b2', name: 'Busy', role: 'repeater', relay_count_1h: 5, relay_count_24h: 100, est_airtime_pct_24h: 3.1, est_airtime_peak_pct: 10.04 },
+      { public_key: 'c3', name: 'OldServer', role: 'repeater', relay_count_1h: 99, relay_count_24h: 999 },
+      { public_key: 'd4', name: 'Tiny', role: 'repeater', relay_count_1h: 0, relay_count_24h: 1, est_airtime_pct_24h: 0.0012, est_airtime_peak_pct: '0.03' },
+    ];
+    const peak = M._busiestRepeaterRows(nodes, new Set(), 'peak', false);
+    assert(peak.map(r => r.name).join(',') === 'Busy,Quiet,Tiny,OldServer',
+      'peak: ranked by the estimated busiest hour, rows without an estimate last; got ' + peak.map(r => r.name).join(','));
+    assert(peak[2].estPeak === 0.03, 'a string estimate from the API is cast to a number');
+    assert(peak[3].estAvg === null && peak[3].estPeak === null, 'a missing estimate stays null, not 0');
+    const html = M.renderBusiestRepeatersTable(peak, 'peak', '50');
+    const row = name => (html.split('<tr>').find(tr => tr.includes('>' + name + '<')) || '');
+    assert(/airtime-pct airtime-over[^>]*>≥10\.0%</.test(row('Busy')), 'a seen busiest hour at the 10% limit reads ≥10.0% and is flagged like observer TX airtime');
+    assert(/airtime-pct"[^>]*>≥1\.2%</.test(row('Quiet')) && !/airtime-over/.test(row('Quiet')), 'below the limit it reads ≥1.2%, not flagged');
+    assert(/>&lt;0\.1%</.test(row('Tiny')) && !/≥&lt;/.test(row('Tiny')), 'a very small value reads <0.1%, escaped, without ≥');
+    assert(/>0\.0%</.test(M.renderBusiestRepeatersTable([{ pk: 'z', name: 'Zero', role: 'repeater', relay1h: 0, relay24h: 1, estAvg: 0, estPeak: 0, observer: false }], 'peak', '50')),
+      'zero seen airtime reads 0.0%, not ≥0.0%');
+    assert((row('OldServer').match(/<span class="text-muted">—<\/span>/g) || []).length === 2, 'no estimate shows a dash in both airtime columns');
+    assert(/aria-sort="descending">Busiest hour</.test(html), 'sorting by peak marks the Busiest hour column');
+    assert(/colspan="2"[^>]*>Relayed<\/th>/.test(html) && /colspan="2"[^>]*>Seen airtime<\/th>/.test(html),
+      'the counts and the estimates are grouped under two header cells');
+    assert((html.match(/<tr><td/g) || []).length === peak.length && (html.split('<tr><td')[1].match(/<td/g) || []).length === 5,
+      'every row has six cells, matching the six columns');
+  }
+  {
+    nodesData = [{ public_key: 'a1', name: 'A', role: 'repeater', relay_count_1h: 1, relay_count_24h: 2, est_airtime_pct_24h: 1, est_airtime_peak_pct: 2 }];
+    observersData = { observers: [] };
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    assert(/option value="peak">Busiest hour \(seen airtime\)</.test(el.innerHTML), 'the sort select offers the busiest hour');
+    const sel = el.querySelector('#busiestSort');
+    sel.value = 'peak';
+    sel.fireChange();
+    assert(viewParams.bsort === 'peak', 'choosing it writes bsort=peak');
+    viewParams.bsort = 'peak';
+    const el2 = makeElement('root');
+    await M.renderRepeaterMetricsTab(el2);
+    assert(/option value="peak" selected/.test(el2.innerHTML), 'bsort=peak from the URL selects it');
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+  }
+
+  console.log('\n=== [B6] #716: Relayed vs Home "All traffic" cross-reference ===');
+  {
+    // The column headers must say what they count even read on their own,
+    // not only via the "Relayed" group header sitting above them.
+    const rows = [{ pk: 'a', name: 'A', role: 'repeater', relay1h: 1, relay24h: 2, estAvg: null, estPeak: null, observer: false }];
+    const html = M.renderBusiestRepeatersTable(rows, '24h', '50');
+    assert(/>Relayed 24h</.test(html) && />Relayed 1h</.test(html),
+      'the 24h/1h column headers read "Relayed 24h"/"Relayed 1h", not just "24h"/"1h"');
+    const relayedTh = (html.match(/<th scope="colgroup" colspan="2"[^>]*>Relayed<\/th>/) || [''])[0];
+    assert(/title="[^"]*forwarded[^"]*"/.test(relayedTh), 'the "Relayed" group header carries a tooltip explaining what it counts');
+    assert(/Adverts are not counted/.test(relayedTh), 'the tooltip says adverts are excluded');
+    assert(/\blag\b/.test(relayedTh), 'the tooltip says the figure can lag, since it is a periodic snapshot');
+  }
+  {
+    nodesData = [{ public_key: 'a1', name: 'A', role: 'repeater', relay_count_1h: 1, relay_count_24h: 2 }];
+    observersData = { observers: [] };
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    assert(/This is not the same number as a repeater's/.test(el.innerHTML),
+      'a short line under the table title explains the difference from the node\'s total traffic');
+    assert(/All traffic · 24 h/.test(el.innerHTML),
+      'the explanatory line names the Home/My Mesh metric by its own label (window.MyMeshActivity.TRAFFIC_LABEL), not a paraphrase that can drift out of sync (DRY)');
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+    // DRY: the source itself must read the label from MyMeshActivity, not
+    // carry its own copy of the string — a hardcoded duplicate would still
+    // pass the innerHTML assertion above but silently drift if Home's
+    // label is ever renamed again.
+    assert(/\$\{window\.MyMeshActivity\.TRAFFIC_LABEL\}/.test(src),
+      'the Busiest Repeaters cross-reference line reads window.MyMeshActivity.TRAFFIC_LABEL rather than a hardcoded copy of the Home label text');
+  }
+
+  console.log('\n=== [B4] wiring (structural) ===');
+  assert(/'repeater-metrics': \[BUSIEST_SORT\.param, BUSIEST_OBSERVERS\.param, BUSIEST_LIMIT\.param\]/.test(src),
+    'TAB_URL_PARAMS drops bsort/bobs/blimit when another tab is selected');
+  assert(/api\('\/observers', \{ ttl: CLIENT_TTL\.observers \}\)\.catch\(/.test(block),
+    'a failing observer fetch cannot break the Repeater Metrics tab');
 
   console.log('\n────────────────────────────────────────');
   console.log(`  ${passed} passed, ${failed} failed`);

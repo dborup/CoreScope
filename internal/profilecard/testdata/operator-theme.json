@@ -1,0 +1,30 @@
+{
+  "theme": {
+    "background": "#fef7f2",
+    "text": "#1c0f06",
+    "textMuted": "#6b5344",
+    "border": "#e8d5c8",
+    "statusYellow": "#a16207",
+    "terrainFill": "#8a6f4e",
+    "terrainClutter": "rgba(46, 125, 50, 0.5)",
+    "losLine": "#c2410c",
+    "fresnel100": "#0e7490",
+    "fresnel60": "#67e8f9",
+    "profileBlocked": "not-a-colour",
+    "accent": "#c2410c"
+  },
+  "themeDark": {
+    "background": "#1a0f08",
+    "text": "#f0ddd0",
+    "textMuted": "#b09080",
+    "border": "#4a2a18",
+    "statusYellow": "#facc15",
+    "terrainFill": "#6b5a40",
+    "terrainClutter": "rgba(74, 222, 128, 0.35)",
+    "losLine": "#fb923c",
+    "fresnel100": "#22d3ee",
+    "fresnel60": "#0891b2",
+    "profileBlocked": "rgb(300, 0, 0)",
+    "accent": "#fb923c"
+  }
+}

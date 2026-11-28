@@ -176,20 +176,9 @@
   function showOnMap(candidate) {
     // Store pending route for map init to pick up.
     window._pendingPathInspectorRoute = candidate;
-    // Switch to map page if not there; map init will draw the route.
-    if (location.hash.indexOf('#/map') !== 0) {
-      location.hash = '#/map';
-    } else {
-      // Already on map — draw directly.
-      delete window._pendingPathInspectorRoute;
-      if (window.routeLayer) window.routeLayer.clearLayers();
-      // Pass FULL path as hopKeys (not slice(1)) — drawPacketRoute resolves
-      // each entry against nodes[] for plotting. The 2nd arg is the origin
-      // OBJECT (with pubkey/lat/lon/name); pass null since the origin is
-      // already the first hop in the path itself, and drawPacketRoute draws
-      // a marker for every resolved hop.
-      if (window.drawPacketRoute) window.drawPacketRoute(candidate.path, null);
-    }
+    // This standalone page navigates to the map; its embedded inspector
+    // has a separate handler in map.js.
+    location.hash = '#/map';
   }
 
   function escapeAttr(s) {

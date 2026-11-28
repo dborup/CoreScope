@@ -45,6 +45,28 @@ async function gotoPackets(page) {
   await page.waitForSelector('table tbody tr[data-hash]', { timeout: 15000 });
 }
 
+// Waits until the channels page has rendered its /api/channels list and the
+// channel count has stopped changing. channels.js sets its WS test hooks
+// synchronously in init(), before loadChannels() resolves, so a test that
+// snapshots the list as soon as the hook exists can see 0 channels and then
+// the full list one evaluate later, whatever its WS message did.
+async function waitForChannelListSettled(page, { timeout = 10000, stableMs = 300 } = {}) {
+  const deadline = Date.now() + timeout;
+  let last = -1;
+  let since = Date.now();
+  for (;;) {
+    const count = await page.evaluate(() => {
+      const list = document.getElementById('chList');
+      if (!list || list.querySelector('.ch-loading') || typeof window._channelsGetStateForTest !== 'function') return -1;
+      return window._channelsGetStateForTest().channels.length;
+    });
+    if (count !== last) { last = count; since = Date.now(); }
+    if (count > 0 && Date.now() - since >= stableMs) return count;
+    if (Date.now() > deadline) throw new Error(`channel list did not settle within ${timeout}ms (last count ${count})`);
+    await page.waitForTimeout(50);
+  }
+}
+
 async function run() {
   console.log('Launching Chromium...');
   const browser = await chromium.launch({
@@ -64,6 +86,273 @@ async function run() {
 
   console.log(`\nRunning E2E tests against ${BASE}\n`);
 
+  // #382 (port of upstream 2132): Total Packets / "(seen N×)" help in both node views.
+  const packetCountCases = [];
+  for (const [view, width, full] of [['desktop side pane', 1280, false], ['desktop full view', 1280, true], ['mobile full view', 375, true]]) {
+    for (const interaction of ['', 'Escape', 'scroll edges', ...(width < 640 ? [] : ['hover Escape', 'hover transfer'])]) {
+      packetCountCases.push({ view, width, full, interaction, stats: { totalTransmissions: 233, totalPackets: 500, totalObservations: 12278 } });
+    }
+  }
+  // Text variants: no seen count shown, and the advert_count fallback.
+  packetCountCases.push({ view: 'desktop full view', width: 1280, full: true, interaction: '', variant: 'no seen',
+    stats: { totalTransmissions: 233, totalPackets: 233, totalObservations: 233 } });
+  packetCountCases.push({ view: 'desktop full view', width: 1280, full: true, interaction: '', variant: 'advert fallback', stats: {} });
+  packetCountCases.push({ view: 'desktop side pane', width: 1280, full: false, interaction: '', variant: 'advert fallback', stats: {} });
+  for (const { view, width, full, interaction, variant, stats } of packetCountCases) {
+    await test(`#382 packet count help${variant ? ' ' + variant : ''}${interaction ? ' ' + interaction : ''} in ${view}`, async () => {
+      const height = interaction === 'scroll edges' ? 600 : (width < 640 ? 667 : 900);
+      const fixtureContext = await browser.newContext({ viewport: { width, height }, hasTouch: width < 640 });
+      const fixturePage = await fixtureContext.newPage();
+      await fixturePage.addInitScript(() => {
+        window.addEventListener('theme-refresh', () => { window.__packetCountThemeReady = true; }, { once: true });
+      });
+      const pubkey = 'b'.repeat(64);
+      const node = { public_key: pubkey, name: 'Packet count fixture', role: 'repeater',
+        last_seen: new Date().toISOString(), advert_count: 900 };
+      // Keep enough real detail content below the metric to scroll it to either edge.
+      const recentAdverts = Array.from({ length: 12 }, (_, i) => ({ hash: i.toString(16).padStart(64, '0'),
+        timestamp: new Date(Date.now() - i * 60000).toISOString(), payload_type: 4, route_type: 1 }));
+      await fixturePage.route('**/api/nodes**', async route => {
+        const path = new URL(route.request().url()).pathname;
+        let body;
+        if (path === '/api/nodes') body = { nodes: [node], total: 1 };
+        else if (path === '/api/nodes/' + pubkey) body = { node, recentAdverts };
+        else if (path === '/api/nodes/' + pubkey + '/health') body = { stats };
+        else return route.continue();
+        await route.fulfill({ json: body });
+      });
+      try {
+        // Initial theme refresh rebuilds node details; finish it before testing focus.
+        await fixturePage.goto(`${BASE}/#/home`, { waitUntil: 'domcontentloaded' });
+        await fixturePage.waitForFunction(() => window.__packetCountThemeReady);
+        await fixturePage.goto(`${BASE}/#/nodes${full ? '/' + pubkey : ''}`, { waitUntil: 'domcontentloaded' });
+        if (!full) await fixturePage.locator(`tr[data-key="${pubkey}"]`).click();
+        const label = fixturePage.locator(full ? '#nodeFullBody td:first-child' : '#nodesRight dt')
+          .filter({ has: fixturePage.getByRole('button', { name: 'Total Packets help', exact: true }) });
+        await label.waitFor();
+        const count = await label.evaluate(el => el.nextElementSibling.innerText.trim());
+        const fallback = !stats.totalTransmissions;
+        const expectedCount = fallback ? '900' : (full && !variant ? '233 (seen 12278×)' : '233');
+        assert(count === expectedCount, `Packet counts changed: ${count}, expected ${expectedCount}`);
+
+        const help = label.getByRole('button', { name: 'Total Packets help', exact: true });
+        assert(await help.count() === 1, `Total Packets help is missing in ${view}`);
+        const descriptionId = await help.getAttribute('aria-describedby');
+        assert(descriptionId, 'Packet count help must have an accessible description');
+        const tooltip = fixturePage.locator('#' + descriptionId);
+        assert(await tooltip.count() === 1, 'Packet count description must reference one tooltip');
+        await fixturePage.mouse.move(0, 0);
+        assert(!await tooltip.isVisible(), 'Packet count tooltip should start closed');
+        if (width < 640) {
+          await help.tap();
+        } else {
+          await help.hover();
+          assert(await tooltip.isVisible(), 'Packet count help must open on hover');
+          await fixturePage.mouse.move(0, 0);
+          await help.focus();
+          await fixturePage.keyboard.press('Shift+Tab');
+          await fixturePage.keyboard.press('Tab');
+          assert(await help.evaluate(el => el === document.activeElement), 'Packet count help must be keyboard reachable');
+        }
+        assert(await tooltip.isVisible(), `Packet count help is not visible after ${width < 640 ? 'tap' : 'keyboard focus'}`);
+        const explanation = await tooltip.innerText();
+        if (fallback) {
+          assert(/advert count/i.test(explanation) && !/distinct transmissions/i.test(explanation),
+            `Fallback help must describe the advert count, got: ${explanation}`);
+        } else {
+          assert(/distinct transmissions/i.test(explanation), 'Help must explain the Total Packets count');
+          assert(/originator/i.test(explanation) && /destination/i.test(explanation) && /resolved relay/i.test(explanation),
+            'Help must explain that counted traffic can involve this node in different roles');
+          assert(/packet window/i.test(explanation) && /retention/i.test(explanation) && /not all.time/i.test(explanation),
+            `Help must say the count covers the current packet window, got: ${explanation}`);
+          const seenShown = full && !variant;
+          if (seenShown) {
+            assert(/seen/i.test(explanation) && /one transmission can have multiple observations/i.test(explanation),
+              'Help must explain why seen observations can exceed transmissions');
+          } else {
+            assert(!/seen/i.test(explanation), `Help must not mention a seen count that is not shown, got: ${explanation}`);
+          }
+        }
+        const box = await tooltip.boundingBox();
+        assert(box && box.x >= 0 && box.x + box.width <= width && box.y >= 0 && box.y + box.height <= height,
+          `Packet count help is clipped in ${view}`);
+        const clippedBy = await tooltip.evaluate(el => {
+          const rect = el.getBoundingClientRect();
+          for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            const bounds = parent.getBoundingClientRect();
+            if ((/hidden|auto|scroll|clip/.test(style.overflowX) && (rect.left < bounds.left - 1 || rect.right > bounds.right + 1)) ||
+                (/hidden|auto|scroll|clip/.test(style.overflowY) && (rect.top < bounds.top - 1 || rect.bottom > bounds.bottom + 1))) {
+              return parent.id || parent.className || parent.tagName;
+            }
+          }
+          return null;
+        });
+        assert(!clippedBy, `Packet count help is clipped by ${clippedBy} in ${view}`);
+        if (width < 640) await label.locator('..').locator('td').nth(1).tap();
+        else await fixturePage.keyboard.press('Tab');
+        assert(!await tooltip.isVisible(), 'Packet count help must close when focus or touch moves away');
+
+        if (interaction === 'Escape' || interaction === 'hover Escape') {
+          const selectedUrl = fixturePage.url();
+          if (interaction === 'Escape') await help.focus();
+          else await help.hover();
+          const focusedBeforeEscape = await fixturePage.evaluateHandle(() => document.activeElement);
+          assert(await tooltip.isVisible(), 'Help must be open before Escape');
+          await fixturePage.keyboard.press('Escape');
+          assert(await help.count() === 1, `Escape dismissed the selected node in ${view}`);
+          assert(fixturePage.url() === selectedUrl, `Escape changed the selected node URL in ${view}`);
+          assert(await focusedBeforeEscape.evaluate(el => el === document.activeElement), 'Escape must preserve the current focus');
+          assert(!await tooltip.isVisible(), 'Escape must dismiss the packet count help');
+          await fixturePage.keyboard.press('Escape');
+          await fixturePage.waitForFunction(() => location.hash === '#/nodes');
+          await help.waitFor({ state: 'detached' });
+          assert(await help.count() === 0, 'A second Escape must retain normal node dismissal');
+          if (!full) assert(await fixturePage.locator('#nodesRight.empty').count() === 1, 'A second Escape must clear the side pane');
+        }
+
+        if (interaction === 'scroll edges') {
+          const container = fixturePage.locator(full ? '#nodeFullBody' : '#nodesRight');
+          // Content above the metric varies by layout; pad it so both edges are reachable.
+          await help.evaluate(el => {
+            const spacer = document.createElement('div');
+            spacer.style.height = '700px';
+            el.closest('table, dl').before(spacer);
+          });
+          for (const edge of ['top', 'bottom']) {
+            await help.evaluate((el, edge) => {
+              const scroller = el.closest('#nodeFullBody, #nodesRight');
+              const bounds = scroller.getBoundingClientRect();
+              const trigger = el.getBoundingClientRect();
+              const target = edge === 'top' ? bounds.top + 40 : bounds.bottom - trigger.height - 40;
+              scroller.scrollTop += trigger.top - target;
+            }, edge);
+            const trigger = await help.boundingBox();
+            const bounds = await container.boundingBox();
+            assert(trigger && bounds && trigger.y >= bounds.y && trigger.y + trigger.height <= bounds.y + bounds.height,
+              `Help trigger must remain visible near the ${edge} in ${view}`);
+            assert(edge === 'top' ? trigger.y - bounds.y <= 50 : bounds.y + bounds.height - trigger.y - trigger.height <= 50,
+              `Help trigger did not reach the ${edge} of the scroll container in ${view}`);
+            if (width < 640) await help.tap();
+            else await help.hover();
+            assert(await tooltip.isVisible(), `Help must open after scrolling near the ${edge} in ${view}`);
+            const tip = await tooltip.boundingBox();
+            assert(tip && tip.x >= Math.max(0, bounds.x) && tip.x + tip.width <= Math.min(width, bounds.x + bounds.width) &&
+              tip.y >= Math.max(0, bounds.y) && tip.y + tip.height <= Math.min(height, bounds.y + bounds.height),
+            `Packet count help is clipped at the scroll container ${edge} in ${view}: ${JSON.stringify({ tip, bounds })}`);
+            if (width < 640) await label.locator('..').locator('td').nth(1).tap();
+            else await fixturePage.mouse.move(0, 0);
+            assert(!await tooltip.isVisible(), 'Help must close before testing the next scroll edge');
+          }
+        }
+
+        if (interaction === 'hover transfer') {
+          assert(!await help.evaluate(el => el === document.activeElement), 'Hover transfer must not rely on trigger focus');
+          await help.hover();
+          assert(await tooltip.isVisible(), 'Help must open before pointer transfer');
+          const tip = await tooltip.boundingBox();
+          await fixturePage.mouse.move(tip.x + tip.width / 2, tip.y + tip.height / 2, { steps: 20 });
+          assert(await tooltip.isVisible(), `Help disappeared while the pointer moved into its explanation in ${view}`);
+          await fixturePage.mouse.move(0, 0);
+          assert(!await tooltip.isVisible(), 'Help must close when the pointer leaves both trigger and explanation');
+        }
+      } finally {
+        await fixtureContext.close();
+      }
+    });
+  }
+
+  // #382: position() must tolerate a help label outside the two node containers.
+  await test('#382 packet count help positioning tolerates a label outside the node containers', async () => {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const p = await ctx.newPage();
+    const errors = [];
+    p.on('pageerror', e => errors.push(e.message));
+    const pubkey = 'd'.repeat(64);
+    const node = { public_key: pubkey, name: 'Guard fixture', role: 'repeater', last_seen: new Date().toISOString(), advert_count: 3 };
+    await p.route('**/api/nodes**', async route => {
+      const path = new URL(route.request().url()).pathname;
+      let body;
+      if (path === '/api/nodes') body = { nodes: [node], total: 1 };
+      else if (path === '/api/nodes/' + pubkey) body = { node, recentAdverts: [] };
+      else if (path === '/api/nodes/' + pubkey + '/health') body = { stats: { totalTransmissions: 5, totalObservations: 9 } };
+      else return route.continue();
+      await route.fulfill({ json: body });
+    });
+    try {
+      await p.goto(`${BASE}/#/nodes/${pubkey}`, { waitUntil: 'domcontentloaded' });
+      await p.locator('#nodeFullBody .node-packet-count-help').waitFor();
+      await p.evaluate(() => {
+        const stray = document.createElement('button');
+        stray.id = 'strayHelp';
+        stray.className = 'sort-help node-packet-count-help';
+        stray.innerHTML = 'Stray <span class="sort-help-tip">stray help</span>';
+        document.getElementById('app').appendChild(stray);
+        stray.focus();
+      });
+      await p.waitForTimeout(100);
+      assert(errors.length === 0, `Positioning a help outside the node containers threw: ${errors.join('; ')}`);
+      assert(await p.locator('#strayHelp .sort-help-tip').isVisible(), 'The stray help should still open');
+    } finally { await ctx.close(); }
+  });
+
+  // #382: .node-stats-table no longer clips (overflow: visible, so the help
+  // tooltip can extend past it). Striped and hovered rows must still follow the
+  // rounded corners, in both themes.
+  for (const scheme of ['light', 'dark']) {
+    await test(`#382 node stats table rows follow the rounded corners in ${scheme} theme`, async () => {
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: scheme });
+      const p = await ctx.newPage();
+      await p.addInitScript(() => {
+        window.addEventListener('theme-refresh', () => { window.__packetCountThemeReady = true; }, { once: true });
+      });
+      const pubkey = 'c'.repeat(64);
+      const node = { public_key: pubkey, name: 'Corner fixture', role: 'repeater', last_seen: new Date().toISOString(), advert_count: 3 };
+      await p.route('**/api/nodes**', async route => {
+        const path = new URL(route.request().url()).pathname;
+        let body;
+        if (path === '/api/nodes') body = { nodes: [node], total: 1 };
+        else if (path === '/api/nodes/' + pubkey) body = { node, recentAdverts: [] };
+        else if (path === '/api/nodes/' + pubkey + '/health') body = { stats: { totalTransmissions: 5, totalObservations: 9 } };
+        else return route.continue();
+        await route.fulfill({ json: body });
+      });
+      try {
+        // The initial theme refresh replaces this table; settle it before
+        // evaluating row styles, just as the packet-count fixtures above do.
+        await p.goto(`${BASE}/#/home`, { waitUntil: 'domcontentloaded' });
+        await p.waitForFunction(() => window.__packetCountThemeReady);
+        await p.goto(`${BASE}/#/nodes/${pubkey}`, { waitUntil: 'domcontentloaded' });
+        const table = p.locator('#nodeFullBody .node-stats-table').first();
+        await table.waitFor();
+        const rows = table.locator('tr');
+        const last = (await rows.count()) - 1;
+        for (const index of [0, 1, last - 1, last]) {
+          await rows.nth(index).hover();
+          const r = await table.evaluate((t, index) => {
+            const tr = t.querySelectorAll('tr')[index];
+            const cells = tr.querySelectorAll('td');
+            const corner = (td, prop) => parseFloat(getComputedStyle(td)[prop]);
+            const tableRadius = parseFloat(getComputedStyle(t).borderTopLeftRadius);
+            const lastRow = t.querySelectorAll('tr').length - 1;
+            return {
+              tableRadius, collapse: getComputedStyle(t).borderCollapse, overflow: getComputedStyle(t).overflow,
+              trBg: getComputedStyle(tr).backgroundColor,
+              topLeft: corner(cells[0], 'borderTopLeftRadius'), topRight: corner(cells[cells.length - 1], 'borderTopRightRadius'),
+              bottomLeft: corner(cells[0], 'borderBottomLeftRadius'), bottomRight: corner(cells[cells.length - 1], 'borderBottomRightRadius'),
+              isFirst: index === 0, isLast: index === lastRow,
+            };
+          }, index);
+          assert(r.overflow === 'visible', `Table must not clip the help tooltip (overflow ${r.overflow})`);
+          assert(r.collapse === 'separate', `border-radius needs border-collapse: separate, got ${r.collapse} in ${scheme}`);
+          assert(r.trBg === 'rgba(0, 0, 0, 0)', `Row ${index} paints a square background on the tr in ${scheme}: ${r.trBg}`);
+          if (r.isFirst) assert(r.topLeft > 0 && r.topRight > 0, `First row top corners are square in ${scheme}`);
+          if (r.isLast) assert(r.bottomLeft > 0 && r.bottomRight > 0, `Last row bottom corners are square in ${scheme}`);
+        }
+      } finally { await ctx.close(); }
+    });
+  }
+
   // --- Group: Home page (tests 1, 6, 7) ---
 
   // Test 1: Home page loads
@@ -74,6 +363,29 @@ async function run() {
     assert(title.toLowerCase().includes('corescope'), `Title "${title}" doesn't contain CoreScope`);
     const nav = await page.$('nav, .navbar, .nav, [class*="nav"]');
     assert(nav, 'Nav bar not found');
+  });
+
+  await test('Regions map deep link renders observed repeaters without claiming RF coverage', async () => {
+    const repeater = (key, lat, lon) => ({ publicKey: key, name: key, role: 'repeater', lat, lon,
+      positionSource: 'reported', scopes: [{ name: '#dk', lastRelayed: '2026-10-16T11:00:00Z' }] });
+    const nodes = [repeater('a', 55, 10), repeater('b', 55, 11), repeater('c', 56, 10)];
+    await page.route('**/api/regions/observed?*', route => route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ window: '24h', windowStart: '2026-10-15T12:00:00Z', windowEnd: '2026-10-16T12:00:00Z',
+        generatedAt: '2026-10-16T12:00:00Z', coverage: { start: '2026-10-15T12:00:00Z', complete: true, loading: false },
+        nodes, truncated: false, scopesTruncated: false }) }));
+    try {
+      await page.goto(`${BASE}/#/regions?scope=%23dk`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('.regions-status');
+      await page.waitForFunction(() => document.querySelector('.regions-status')?.textContent.includes('3 positioned relay nodes'));
+      assert(await page.locator('.regions-leaflet .leaflet-interactive').count() >= 3, 'repeater markers missing');
+      assert((await page.locator('.regions-note').textContent()).includes('not a radio coverage measurement'), 'coverage disclaimer missing');
+      const scope = page.getByRole('combobox', { name: 'Region scope' });
+      assert(await scope.inputValue() === '#dk', 'scope deep link not selected');
+      await scope.selectOption('');
+      assert((await page.evaluate(() => location.hash)) === '#/regions?window=24h', 'scope change not reflected in URL');
+    } finally {
+      await page.unroute('**/api/regions/observed?*');
+    }
   });
 
   // #1137 follow-up: Aldrich webfont must actually load so the navbar logo SVG
@@ -259,34 +571,41 @@ async function run() {
     assert(!navVersionBadge, 'version-badge should not be in the navbar (moved to Perf dashboard)');
     const navEngineBadge = await page.$('#navStats .engine-badge');
     assert(!navEngineBadge, 'engine-badge should not be in the navbar (moved to Perf dashboard)');
-    // Check if health API exposes version info
-    const hasVersionData = await page.evaluate(async () => {
-      try {
-        const res = await fetch('/api/health');
-        const data = await res.json();
-        return !!(data.version || data.commit);
-      } catch { return false; }
+    // The server resolves version/commit from ldflags, .git-commit or
+    // `git rev-parse` in its cwd; without any of them both read "unknown" and
+    // the card is deliberately hidden, so the card used to depend on where
+    // the server was started (#567). Serve fixed values through the real
+    // /api/health response instead. uptimeHuman, which the Uptime card shows,
+    // marks which response the overview was rendered from.
+    let served = null;
+    await page.route('**/api/health', async route => {
+      const res = await route.fetch();
+      await route.fulfill({ response: res, json: { ...(await res.json()), ...served } });
     });
-    if (!hasVersionData) {
-      console.log('    ⏭️  Server does not expose version/commit in /api/health — perf card test skipped');
-      return;
+    const versionCardAfter = async (health, reload) => {
+      served = health;
+      if (reload) await page.reload({ waitUntil: 'domcontentloaded' });
+      else await page.goto(`${BASE}/#/perf`, { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(uptime => Array.from(document.querySelectorAll('.perf-card'))
+        .some(c => c.querySelector('.perf-label')?.textContent.trim() === 'Uptime' &&
+          c.querySelector('.perf-num')?.textContent.trim() === uptime), health.uptimeHuman, { timeout: 10000 });
+      return page.evaluate(() => {
+        const label = Array.from(document.querySelectorAll('.perf-card .perf-label'))
+          .find(el => el.textContent.trim() === 'Version');
+        if (!label) return null;
+        const num = label.closest('.perf-card').querySelector('.perf-num, .perf-num--small');
+        return num ? num.textContent.trim() : '';
+      });
+    };
+    try {
+      const hidden = await versionCardAfter({ version: 'unknown', commit: 'unknown', uptimeHuman: 'e2e-567-unknown' }, false);
+      assert(hidden === null, `Version card must be hidden when version and commit are unknown, got "${hidden}"`);
+      const shown = await versionCardAfter({ version: 'v9.9.9-e2e', commit: '0123456789abcdef', uptimeHuman: 'e2e-567-known' }, true);
+      assert(shown !== null, 'Version perf-card not found on #/perf');
+      assert(shown === 'v9.9.9-e2e · 01234567', `Version card text = "${shown}", want "v9.9.9-e2e · 01234567"`);
+    } finally {
+      await page.unroute('**/api/health');
     }
-    // Version card should appear on the Perf dashboard
-    await page.goto(`${BASE}/#/perf`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => {
-      const cards = document.querySelectorAll('.perf-card .perf-label');
-      return Array.from(cards).some(el => el.textContent.trim() === 'Version');
-    }, { timeout: 10000 });
-    // waitForFunction already confirmed the Version label exists; just grab the num text
-    const versionNumText = await page.evaluate(() => {
-      const labels = document.querySelectorAll('.perf-card .perf-label');
-      const label = Array.from(labels).find(el => el.textContent.trim() === 'Version');
-      if (!label) return null;
-      const num = label.closest('.perf-card').querySelector('.perf-num, .perf-num--small');
-      return num ? num.textContent.trim() : '';
-    });
-    assert(versionNumText !== null, 'Version perf-card not found on #/perf');
-    assert(versionNumText.length > 0, 'Version card .perf-num should have non-empty text');
   });
 
   // --- Group: Nodes page (tests 2, 5) ---
@@ -846,6 +1165,71 @@ async function run() {
     assert(winFor(/\/api\/analytics\/channels/), `expected window=24h on channels, saw: ${seen.join(', ')}`);
     assert(noWinFor(/\/api\/analytics\/hash-sizes/), `hash-sizes must NOT carry window param, saw: ${seen.join(', ')}`);
     assert(noWinFor(/\/api\/analytics\/hash-collisions/), `hash-collisions must NOT carry window param, saw: ${seen.join(', ')}`);
+  });
+
+  // #89: Relay Airtime Share rows mirror the API rows, and a mixed ADVERT row
+  // (same payload seen on flood and zero-hop routes) has its own identity,
+  // fixed colour and tooltip. The fixture DB has no mixed rows, so the second
+  // half injects one via page.route.
+  await test('#89 Relay Airtime Share renders API rows and the mixed ADVERT row', async () => {
+    const relayUrl = '**/api/analytics/relay-airtime-share*';
+    const readRows = () => page.$$eval('.dumbbell-row', els => els.map(e => ({
+      type: e.getAttribute('data-payload-type'),
+      routeClass: e.getAttribute('data-route-class'),
+      label: e.querySelector('.dumbbell-label').textContent,
+      dot: e.querySelector('.dumbbell-dot-airtime').style.background,
+      title: e.getAttribute('title'),
+    })));
+
+    await page.goto(`${BASE}/#/analytics?tab=overview`, { waitUntil: 'domcontentloaded' });
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForSelector('.dumbbell-chart, .analytics-card .text-muted', { timeout: 15000 });
+    // Re-read exactly the URL the page rendered from (window param included);
+    // the server caches it and the fixture DB is static.
+    const api = await page.evaluate(async () => {
+      const hit = performance.getEntriesByType('resource').map(e => e.name)
+        .filter(u => /\/api\/analytics\/relay-airtime-share(\?|$)/.test(u)).pop();
+      return (await fetch(hit || '/api/analytics/relay-airtime-share')).json();
+    });
+    assert(api.route_mask_backfill && ['pending', 'backfilling', 'complete'].includes(api.route_mask_backfill.status),
+      `route_mask_backfill must report a status, got ${JSON.stringify(api.route_mask_backfill)}`);
+    const real = await readRows();
+    if (api.total_score > 0) {
+      assert(real.length === api.rows.length, `DOM rows ${real.length} != API rows ${api.rows.length}`);
+      api.rows.forEach((r, i) => {
+        assert(real[i].type === String(r.type) && real[i].routeClass === r.route_class && real[i].label === (r.payload_type || 'UNK'),
+          `row ${i}: DOM ${JSON.stringify(real[i])} != API ${JSON.stringify(r)}`);
+      });
+    }
+
+    await page.route(relayUrl, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        total_count: 3, total_score: 3000, window: '', cached: false,
+        route_mask_backfill: { status: 'complete', remaining: 0 },
+        rows: [
+          { payload_type: 'ADVERT (flood)', type: 4, route_class: 'flood', count: 1, count_pct: 33.3, score: 2000, airtime_pct: 66.7 },
+          { payload_type: 'ADVERT (mixed)', type: 4, route_class: 'mixed', count: 1, count_pct: 33.3, score: 1000, airtime_pct: 33.3 },
+          { payload_type: 'ADVERT (zero-hop)', type: 4, route_class: 'zero_hop', count: 1, count_pct: 33.3, score: 0, airtime_pct: 0 },
+        ],
+      }),
+    }));
+    try {
+      await page.reload({ waitUntil: 'load' });
+      await page.waitForSelector('.dumbbell-row[data-route-class="mixed"]', { timeout: 15000 });
+      const rows = await readRows();
+      assert(rows.length === 3, `expected 3 injected rows, got ${rows.length}`);
+      const mixed = rows.find(r => r.routeClass === 'mixed');
+      assert(mixed.label === 'ADVERT (mixed)' && mixed.type === '4', `mixed row identity: ${JSON.stringify(mixed)}`);
+      assert(mixed.dot === 'var(--status-purple)', `mixed row colour must be var(--status-purple), got ${mixed.dot}`);
+      assert(/observed on both flood and zero-hop routes; counted once/.test(mixed.title), `mixed tooltip: ${mixed.title}`);
+      rows.filter(r => r.routeClass !== 'mixed').forEach(r => {
+        assert(!/counted once/.test(r.title), `non-mixed row ${r.label} must not carry the mixed tooltip`);
+      });
+    } finally {
+      await page.unroute(relayUrl);
+    }
   });
 
   // Analytics sub-tab tests
@@ -2231,6 +2615,9 @@ async function run() {
     await page.goto(`${BASE}/#/channels`, { waitUntil: 'domcontentloaded' });
     // Wait for the channels init() to mount and expose the test hook.
     await page.waitForFunction(() => typeof window._channelsProcessWSBatchForTest === 'function', { timeout: 10000 });
+    // The hook exists before /api/channels has answered; snapshot only the
+    // loaded list, or the count can jump from 0 between before and after.
+    await waitForChannelListSettled(page);
 
     // Snapshot starting state so we can compare deltas.
     const before = await page.evaluate(() => {
@@ -2271,6 +2658,9 @@ async function run() {
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.goto(`${BASE}/#/channels`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => typeof window._channelsProcessWSBatchForTest === 'function', { timeout: 10000 });
+    // Same as above: route the message into the loaded list, not one that
+    // loadChannels() replaces a moment later.
+    await waitForChannelListSettled(page);
 
     const sentinel = '__test_chan_1468_' + Date.now();
     const before = await page.evaluate((name) => {
@@ -3536,6 +3926,8 @@ async function run() {
     assert(/^rgb\(255,\s*0,\s*0\)/.test(result.border),
       `.vcr-scope-btn.active border should track --accent-strong, got ${result.border}`);
   });
+
+  await require('./tools/scope-audit-e2e')({page, BASE, assert, test});
 
   await browser.close();
 

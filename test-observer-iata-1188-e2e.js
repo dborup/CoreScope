@@ -94,33 +94,53 @@ async function run() {
     //   (a) `td.col-observer` is hidden (display:none via .col-hidden)
     //   (b) tapping a row opens the panel whose .detail-meta carries the
     //       Observer row + .badge-iata next to the observer name.
+    //
+    // Mobile caps a saved time window above 3 h back to 15 min (#340), so a
+    // plain #/packets list here only had rows while the freshened fixture was
+    // under 15 min old (#567). A ?hash= list suppresses the time window, so
+    // pin a packet heard by exactly one IATA-tagged observer instead.
     const mobile = await browser.newContext({ viewport: { width: 375, height: 812 } });
     const mpage = await mobile.newPage();
     mpage.setDefaultTimeout(15000);
-    await mpage.goto(`${BASE}/#/packets`, { waitUntil: 'domcontentloaded' });
-    await mpage.evaluate(() => localStorage.setItem('meshcore-time-window', '525600'));
-    await mpage.reload({ waitUntil: 'load' });
+    const res = await mpage.request.get(`${BASE}/api/packets?limit=500&groupByHash=true`);
+    assert(res.ok(), `GET /api/packets: HTTP ${res.status()}`);
+    const pinned = ((await res.json()).packets || [])
+      .find(p => p.observation_count === 1 && /^[A-Z]{3}$/.test(p.observer_iata || ''));
+    assert(pinned, 'fixture has no single-observation packet from an IATA-tagged observer');
+    await mpage.goto(`${BASE}/#/packets?hash=${encodeURIComponent(pinned.hash)}`, { waitUntil: 'domcontentloaded' });
     await mpage.waitForSelector('[data-loaded="true"]', { timeout: 20000 });
     await mpage.waitForSelector('table tbody tr:not([id^=vscroll])', { timeout: 15000 });
 
     // (a) observer column hidden in the row at 375px
-    const rowObserverVisible = await mpage.$eval(
-      'td.col-observer',
-      el => window.getComputedStyle(el).display !== 'none'
-    ).catch(() => false);
-    assert(!rowObserverVisible,
-      'observer column should be hidden in rows at 375px (tier-3, desktop-only per #1415 spec)');
+    // Query and read the cells in one evaluate: the list re-renders its rows
+    // after data-loaded, and $eval's element, read in a second round trip,
+    // can be detached by then. A detached <td> has computed display "" and
+    // read as visible (#567).
+    const observerCells = await mpage.evaluate(() =>
+      Array.from(document.querySelectorAll('#pktTable tbody td.col-observer'), td => getComputedStyle(td).display));
+    assert(observerCells.length > 0, 'no observer cell in the packets table at 375px');
+    assert(observerCells.every(d => d === 'none'),
+      `observer column should be hidden in rows at 375px (tier-3, desktop-only per #1415 spec), got display ${JSON.stringify(observerCells)}`);
 
-    // (b) tap first row → detail panel renders observer + IATA badge
-    const firstRow = await mpage.$('table tbody tr[data-hash]');
-    assert(firstRow, 'no packet row found to tap');
-    await firstRow.click();
+    // (b) tap the row → detail panel renders observer + IATA badge. The list
+    // re-renders its rows after data-loaded (hop and observer decoration), so
+    // tap through a locator, which re-resolves a replaced row, rather than a
+    // handle that can be detached by then (#567).
+    await mpage.locator(`table tbody tr[data-hash="${pinned.hash}"]`).click();
     await mpage.waitForSelector('.detail-meta', { timeout: 10000 });
-    const detailIata = await mpage.$('.detail-meta .badge-iata');
-    assert(detailIata, '.badge-iata must appear in .detail-meta after tapping a row at 375px');
-    const box = await detailIata.boundingBox();
-    assert(box && box.width > 0 && box.height > 0,
-      `.detail-meta .badge-iata has zero/no dimensions: ${box && (box.width + 'x' + box.height)}`);
+    // One evaluate again, so the badge is read from a single render.
+    const badge = await mpage.evaluate(() => {
+      const el = document.querySelector('.detail-meta .badge-iata');
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { width: r.width, height: r.height, text: el.textContent.trim() };
+    });
+    assert(badge, '.badge-iata must appear in .detail-meta after tapping a row at 375px');
+    assert(badge.width > 0 && badge.height > 0,
+      `.detail-meta .badge-iata has zero/no dimensions: ${badge.width}x${badge.height}`);
+    const detailText = badge.text;
+    assert(detailText === pinned.observer_iata,
+      `.detail-meta .badge-iata shows "${detailText}", want the observer's IATA "${pinned.observer_iata}"`);
     await mobile.close();
   });
 

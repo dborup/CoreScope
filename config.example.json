@@ -1,18 +1,28 @@
 {
   "port": 3000,
+  "maxHopDist": 1.8,
+  "_comment_maxHopDist": "Optional. Longest hop, in degrees of lat/lon (not km; 1.8 is about 200 km), the browser accepts when it guesses a path's hops itself (route view, packet feed, node paths). A guessed hop farther than this from both neighbours, or from its only neighbour, is marked unreliable and not drawn. Accepted: above 0 up to 10; a number outside that range logs one warning and keeps 1.8. A non-number (e.g. \"abc\") is a JSON type error and the whole config file is rejected, as for any mistyped key. Hops the server already resolved (resolved_path) are not affected. Key is case-sensitive. Read at startup.",
   "apiKey": "your-secret-api-key-here",
   "nodeBlacklist": [],
   "_comment_nodeBlacklist": "Public keys of nodes to hide from all API responses. Use for trolls, offensive names, or nodes reporting false data that operators refuse to fix.",
   "hiddenNamePrefixes": ["🚫"],
   "_comment_hiddenNamePrefixes": "Node name prefixes that mark a node as hidden from this dashboard (#1181). Mirrors a convention used by other MeshCore map dashboards: an operator who wants their node hidden renames it to start with one of these prefixes and sends an advert; the next advert is dropped from /api/nodes, /api/nodes/search and /api/nodes/{pubkey}. DB rows are preserved so observation history (paths, hops, distances) stays intact for analytics. The node is NOT hidden from the mesh itself — only from this dashboard. Set to [] to disable. Default: [\"🚫\"].",
   "observerIATAWhitelist": [],
-  "_comment_observerIATAWhitelist": "Global IATA region whitelist. When non-empty, only observers whose IATA code (from MQTT topic) matches are processed. Case-insensitive. Empty = allow all. Unlike per-source iataFilter, this applies across all MQTT sources.",
+  "_comment_observerIATAWhitelist": "Global IATA region whitelist. When non-empty, only observers whose IATA code (from MQTT topic) matches are processed. Case-insensitive. Empty = allow all. Unlike per-source iataFilter, this applies across all MQTT sources. A dropped region is logged by the ingestor as one '[region-filter] dropping region \"XYZ\"' line, repeated at most every iataWarnIntervalSec while it keeps arriving.",
+  "iataWarnIntervalSec": 21600,
+  "_comment_iataWarnIntervalSec": "Optional (ingestor). Seconds between repeated '[region-filter]' warnings for a region dropped by observerIATAWhitelist. Default 21600 (6h); 0 or omitted = default; maximum 86400 (24h), larger values are capped. At most 512 regions are tracked individually (region codes come from the MQTT topic, so this is bounded); beyond that, drops share one overflow warning with the same interval.",
   "retention": {
     "nodeDays": 7,
     "observerDays": 14,
     "packetDays": 30,
+    "channelDays": 0,
     "clientRxDays": 30,
-    "_comment": "nodeDays: nodes not seen in N days moved to inactive_nodes (default 7). observerDays: observers not sending data in N days are removed (-1 = keep forever, default 14). packetDays: transmissions older than N days are deleted (0 = disabled). clientRxDays: mobile client-RX coverage rows (client_receptions/client_observers) older than N days are deleted (0 = disabled) — bounds the opt-in coverage tables (#1727). NOTE (#1283): all retention fields are consumed by the INGESTOR process. The server is read-only and never prunes."
+    "clientRegionsDays": 0,
+    "inactiveNodeDays": 0,
+    "nodeChangeDays": 0,
+    "observerPurgeDays": 0,
+    "_comment_tableRetention": "Opt-in (ingestor, #329) retention for the tables nothing else prunes; each is in days, 0 or omitted = keep forever (the default). Applied at ingestor startup and daily with the observer retention pass, in batches. inactiveNodeDays: inactive_nodes rows whose last advert is older than N days are deleted, unless the node has come back or is an observer still uploading; a deleted node that adverts again later counts as new (no 'resurrected' change, listed in New Nodes). Set it above nodeDays. nodeChangeDays: node_changes rows (Tools > Node Changes) detected more than N days ago are deleted. observerPurgeDays: observers already marked inactive by observerDays AND not seen in N days are hard-deleted with their observer_neighbors snapshot, but only when no observation, observer_metrics, observer_neighbor_metrics or dropped_packets row still references them. Set it above observerDays, packetDays (and channelDays) and metricsDays; below those an observer waits until that data has aged out. Example: an operator honouring a 30-day retention period sets all three to 30. ping_triggers (Ping Scores triggers, with sender names) has no window and is kept forever, because the all-time Ping Scores records need it.",
+    "_comment": "nodeDays: nodes not seen in N days moved to inactive_nodes (default 7). observerDays: observers not sending data in N days are removed (-1 = keep forever, default 14). packetDays: transmissions older than N days are deleted (0 = disabled). channelDays: channel messages (GRP_TXT) and their observations are kept until they are N days old instead of packetDays; only takes effect when packetDays is set and channelDays is larger (0 = channel messages follow packetDays, default) (#296). The server's in-memory window (packetStore.retentionHours) is separate; channel history is read from the database. clientRxDays: mobile client-RX coverage rows (client_receptions/client_observers) older than N days are deleted (0 = disabled) — bounds the opt-in coverage tables (#1727). clientRegionsDays: declared-region reports (client_declared_regions, by reported_at) older than N days are deleted, and reports older than that are refused at ingest; 0 or omitted follows clientRxDays, and 30 days when that is 0 too — this table is never unbounded (#126, docs/client-regions.md). NOTE (#1283): all retention fields are consumed by the INGESTOR process. The server is read-only and never prunes."
   },
   "db": {
     "vacuumOnStartup": false,
@@ -23,6 +33,20 @@
     },
     "_comment": "vacuumOnStartup: run one-time full VACUUM to enable incremental auto-vacuum on existing DBs. Executed by the INGESTOR at startup, BEFORE the MQTT subscriber starts (#1283), so there is no contention with concurrent writes. Blocks ingestor startup for minutes on large DBs; requires 2x DB file size in free disk space. incrementalVacuumPages: free pages returned to OS after each retention reaper cycle (default 1024). See #919. load.chunkSize: see nested _comment (#1009).",
     "_comment_slowWriterMs": "#1340 — SQLite writer-lock log threshold (default 500). Any wrapped writer call (tagged neighbor_builder, mqtt_handler, prune_packets, prune_observers, prune_metrics, vacuum) whose hold_ms exceeds this emits a single [db-slow-writer] log line. Configured per-process via the CORESCOPE_DB_SLOW_WRITER_MS environment variable on the INGESTOR (e.g. CORESCOPE_DB_SLOW_WRITER_MS=200 for tighter alerting). Per-component wait_ms / hold_ms / contention_total histograms are surfaced via /api/perf/write-sources under .writer_perf regardless of this threshold."
+  },
+  "resolvedPathBackfill": {
+    "disabled": false,
+    "batchSize": 500,
+    "pauseMs": 250,
+    "_comment": "Optional (ingestor, #188). Once per ingestor start, re-resolves observations stored with resolved_path = NULL, from a persisted watermark up to the newest observation at the start of the pass. It waits until a neighbour-edge build has caught up with the stored observations and found at least one edge, then works in batches: each batch reads batchSize rows, resolves them outside any lock, and writes the results and the new watermark in one short write transaction, then sleeps pauseMs. Rows that still do not resolve stay NULL and are not retried. disabled: true skips the pass. batchSize: rows per batch, default 500. pauseMs: milliseconds between batches, default 250, which caps the pass at about 2,000 rows/s. For both numbers, 0 or omitted means the default, so the pause cannot be turned off; the smallest pause is 1. The server sees backfilled values only after its next restart."
+  },
+  "decodeBackfill": {
+    "disabled": false,
+    "batchSize": 300,
+    "idWindow": 20000,
+    "pauseMs": 250,
+    "pollSeconds": 30,
+    "_comment": "Optional (ingestor, #380). Re-decodes historical rows whenever the effective key set grows: a hashChannels/channelKeys addition plus a SIGHUP or restart, an approved shared channel, or an approved region scope. Stored enc_<HEX> GRP_TXT rows and transport-scoped rows whose region is unknown are re-decoded through the normal decode path, so a rewritten channel_hash, decoded_json or scope_name is byte-identical to the same packet ingested fresh. Already-resolved rows are never touched and an ambiguous region match abstains. One run at a time, resumed from a persisted watermark after a crash or a restart: each batch scans at most idWindow transmission ids and at most batchSize matching rows, writes them in one short transaction together with the new watermark, then sleeps pauseMs. disabled: true runs no pass; it only keeps forgetting keys that are revoked or removed, so turning the pass back on re-reads what arrived while they were gone. A key is its name and its value: a new value under a configured name starts a pass of its own. pollSeconds: how often the effective key set is checked for growth, default 30. For every number, 0 or omitted means the default, so the pause cannot be turned off. Progress is on /api/healthz under decode_backfill and in /api/perf/write-sources as backfill_decode_channel / backfill_decode_scope. Measure first: scripts/decode-backfill-estimate.sh prints the candidate counts and the estimated cost of one pass, read-only. A running server picks the rewrites up on its next poll for the SQL-backed channel and scope surfaces; its in-memory copies of rows loaded earlier refresh at its next start."
   },
   "listLimits": {
     "packetsMax": 10000,
@@ -35,6 +59,36 @@
   "_comment_ingestorStats": "Ingestor publishes a 1-Hz stats snapshot consumed by the server's /api/perf/io and /api/perf/write-sources endpoints (#1120). Path is configured via the CORESCOPE_INGESTOR_STATS environment variable on the INGESTOR process. Default: /tmp/corescope-ingestor-stats.json. The writer uses O_NOFOLLOW + 0o600, so a pre-planted symlink in /tmp cannot be used to clobber an arbitrary file. SECURITY: in shared-tmp environments (multi-tenant hosts), point CORESCOPE_INGESTOR_STATS at a private directory like /var/lib/corescope/ingestor-stats.json that only the corescope user can write to.",
   "corsAllowedOrigins": [],
   "_comment_corsAllowedOrigins": "Cross-origin allowlist for embed scenarios (#1369) AND for /ws WebSocket upgrades (#1793 — CSWSH defense per OWASP WebSocket Security Cheat Sheet). Exact-match origins, e.g. [\"https://blog.example.com\", \"https://embed.example.com\"]. Same-origin requests (Origin host == request Host) and non-browser clients (no Origin header) are always allowed for /ws. When empty (default), no Access-Control-* headers are sent and browsers enforce same-origin; cross-origin /ws upgrades are rejected. When non-empty, only the listed origins receive CORS headers, and Access-Control-Allow-Methods is limited to GET, HEAD, OPTIONS (the cross-domain surface is read-only — same-origin admin writes are unaffected). Use [\"*\"] to allow any origin for CORS XHR (NOT recommended for write-capable deployments); note that \"*\" is deliberately NOT honored for /ws upgrades — list explicit origins to permit cross-origin WebSocket clients (OWASP guidance: avoid wildcards in CSWSH defense). Operators can override per-deployment with the CORS_ALLOWED_ORIGINS environment variable (comma-separated). No credentialed CORS is enabled. To embed the map or channels pages cross-domain, add the embedding origin here and use the URL pattern '/#/map?embed=1' or '/#/channels?embed=1' — embed mode hides the top-nav, bottom-nav, and side drawer for full-bleed iframe rendering.",
+  "radio": {
+    "defaultFreqMHz": null,
+    "_comment_defaultFreqMHz": "#681 - frequency in MHz used for the terrain profile's Fresnel zone. null = automatic: the most common frequency in the radio string of observers seen in the last 7 days, else the MeshCore firmware default 869.618 MHz. Set it to pin the value (150-2500). A request's own freq parameter still wins.",
+    "kFactor": null,
+    "_comment_kFactor": "#681 - effective earth-radius factor for the curvature bulge (0.5-10). null = 4/3, the standard atmosphere; 1 is geometric, 0.6 a pessimistic sub-refraction case.",
+    "antennaHeightsM": {},
+    "_comment_antennaHeightsM": "#681 - antenna heights above ground in metres (0-100) for the terrain profile, keyed by role (repeater, room, companion, sensor, point = a free map point) or by a node's 64-hex public key, e.g. {\"repeater\": 12, \"<public key>\": 18}. Built-in role defaults are repeater 10, room 5, companion 2, sensor 2, point 2. A per-node value counts as known; role values are shown as assumed. Mesh adverts carry no height, so these are always estimates unless you set them. The predicted reach (map.coverage) uses the same heights for its transmitter.",
+    "txPowerDbm": 22,
+    "_comment_txPowerDbm": "#941 - transmit power in dBm (-10 to 30) the Predicted reach panel starts from: 22 is the most common LORA_TX_POWER in the MeshCore firmware variants. Together with the four values below it is the link budget, margin = power + antennaGainDbi + rxGainDbi - path loss - lossDb - sensitivityDbm, minus the environment loss (map.coverage.environmentLossDb). The server computes only the path loss; the browser applies the budget, so a viewer can move these in the panel without a new computation. A later milestone exposes them in the customizer.",
+    "antennaGainDbi": 3,
+    "_comment_antennaGainDbi": "#941 - transmitter antenna gain in dBi (-10 to 20) for the predicted reach: a typical small whip or dipole.",
+    "rxGainDbi": 3,
+    "_comment_rxGainDbi": "#941 - receiver antenna gain in dBi (-10 to 20) for the predicted reach.",
+    "lossDb": 0,
+    "_comment_lossDb": "#941 - cable and connector loss in dB (0-30) for the predicted reach.",
+    "sensitivityDbm": -130,
+    "_comment_sensitivityDbm": "#941 - receiver sensitivity in dBm (-150 to -80) for the predicted reach: about SF8 at 62.5 kHz, the firmware's default preset (thermal noise -174 + 10*log10(62500) + a 6 dB noise figure + the SF8 SNR limit). Interim until validation against observed links calibrates it."
+  },
+  "webSocket": {
+    "maxClients": 512,
+    "_comment_maxClients": "#369 - GLOBAL ceiling on concurrent /ws clients, across every address. On by default at 512, because unlike the per-IP limits below it still works behind a reverse proxy: it counts connections, not clients. Sizing: the web UI opens exactly one socket per browser tab, and each accepted client costs roughly 12 KB of server heap, two goroutines, one file descriptor and a 256-message send queue (the queue is the part worth bounding — a stalled client can hold a quarter of a megabyte of pending broadcasts). 512 therefore sits far above any realistic tab count for a regional mesh while capping the worst case at a few hundred MB and keeping descriptors to half of the common 1024 soft limit. Excess clients get 503 with Retry-After before the handshake, and the refusals are counted in /api/stats under websocket.rejectedGlobalCap - watch that together with websocket.clients and raise this if real visitors are being turned away. Set 0 to remove the ceiling entirely (not recommended on a public instance).",
+    "maxConnsPerIP": 0,
+    "_comment_maxConnsPerIP": "#1794 - concurrent /ws connections allowed from one client address. 0 = off, and that is the shipped default ON PURPOSE: carrier-grade NAT puts thousands of unrelated mobile subscribers behind one public IPv4, so a low cap refuses real visitors while a scraper simply rents more addresses. Set it only if you know your audience is not behind shared NAT.",
+    "upgradesPerMinPerIP": 30,
+    "_comment_upgradesPerMinPerIP": "#1794 - handshakes per minute from one client address. On by default. Safe under CGNAT: a real client upgrades a handful of times per minute even while reconnecting, so 30 leaves ordinary traffic alone while flattening a scraper reconnect loop. Set 0 to disable.",
+    "trustedProxies": [],
+    "_comment_trustedProxies": "#1794 - addresses or CIDRs of YOUR reverse proxy (and of any CDN or load balancer in front of it). REQUIRED for the per-IP limits to do anything behind nginx/Caddy/Traefik/ingress: without it every visitor shares the proxy's address, so the limits are skipped and one warning is logged at startup. X-Forwarded-For is believed only when the request comes from one of these addresses, because anyone else can forge it. It is read from the RIGHT (#691): entries that are themselves listed here are skipped, and the first address that is not listed is the client, so it works whether your proxy appends to X-Forwarded-For (e.g. nginx $proxy_add_x_forwarded_for) or replaces it, and a client cannot pick its own address by prefixing forged entries. List every proxy hop you run, or the inner hop is taken for the client and all visitors share its budget. A malformed or empty entry stops the walk at the nearest listed hop, which then counts as the client. Never list an address you do not control.",
+    "deny": [],
+    "_comment_deny": "#1794 - addresses or CIDRs refused at the /ws upgrade, before the handshake. Accepts both \"1.2.3.4\" and \"1.2.3.0/24\". Applies even behind an unconfigured proxy, since it is your explicit instruction. Rejections are counted in /api/stats under websocket.rejectedDeny."
+  },
   "https": {
     "cert": "/path/to/cert.pem",
     "key": "/path/to/key.pem",
@@ -46,7 +100,9 @@
     "logoUrl": null,
     "faviconUrl": null,
     "homeUrl": null,
-    "_comment": "Customize site name, tagline, logo, and favicon. logoUrl/faviconUrl can be absolute URLs or relative paths. homeUrl (#1518) overrides the navbar logo link target — set to an absolute http(s):// URL for operators embedding CoreScope inside a larger site, or a '#'-prefixed app route (e.g. '#/home') to keep it in-app. Validator rejects javascript:, data:, vbscript:, file:, about:, protocol-relative '//', and bare paths to block XSS. Cross-origin URLs open in the SAME tab (no target=_blank); wrap with your own anchor if you need new-tab behavior. The mobile bottom-nav 🏠 button is intentionally NOT overridden — it stays in-app to preserve SPA back-stack on phones."
+    "ogImageUrl": null,
+    "publicBaseUrl": null,
+    "_comment": "Customize site name, tagline, logo, and favicon. logoUrl/faviconUrl can be absolute URLs or relative paths. homeUrl (#1518) overrides the navbar logo link target — set to an absolute http(s):// URL for operators embedding CoreScope inside a larger site, or a '#'-prefixed app route (e.g. '#/home') to keep it in-app. Validator rejects javascript:, data:, vbscript:, file:, about:, protocol-relative '//', and bare paths to block XSS. Cross-origin URLs open in the SAME tab (no target=_blank); wrap with your own anchor if you need new-tab behavior. The mobile bottom-nav 🏠 button is intentionally NOT overridden — it stays in-app to preserve SPA back-stack on phones. Link previews (#646): siteName and tagline are rendered server-side once at startup (changes to config.json or theme.json take effect on restart; theme.json overrides config.json) into <title>, og:*/twitter:* tags (HTML-escaped; defaults apply when unset). ogImageUrl is an absolute http(s) URL or a path of an image under public/ (e.g. og-image-meshview.png); default og-image.png; github hosts are refused. publicBaseUrl (e.g. https://meshview.example) is the origin used to make og:image absolute; when unset it is derived from the request Host, with the scheme taken from X-Forwarded-Proto only if the peer is listed in webSocket.trustedProxies. Behind a TLS-terminating proxy, SET publicBaseUrl in production, otherwise og:image is emitted as http://. An unusable value is ignored with a startup warning. TODO: expose in the customizer (AGENTS rule 8)."
   },
   "theme": {
     "accent": "#4a9eff",
@@ -74,13 +130,157 @@
     "_comment": "#1488/#1506 — outline around each map marker (live + map pages). Defaults restored to v3.7.2 visual (solid white, 2px). 'color' accepts any CSS color (hex, rgb, rgba); use rgba() or drop 'opacity' below ~0.5 to soften the outline when hundreds of nodes feel overwhelming. 'width' is the SVG stroke width (0 hides the outline entirely). Operators can override per-browser via the in-app Theme Customizer (Colors tab → Marker Stroke)."
   },
   "map": {
+    "_comment": "Key matching: the block names directly under map (tiles, dhm, heritage, coverage, ...) must be spelled exactly as documented. The server reads them exactly (a case variant such as \"DHM\" or \"Heritage\" is ignored, with a warning for the typed blocks), and the browser reads the map.tiles keys exactly. Field names inside the typed blocks (map.dhm, map.heritage, map.dhm.profile.share) are decoded by Go JSON and also match a different case, but use the documented spelling anyway.",
+    "dhm": {
+      "_comment": "#680 — optional 'Terrain (DHM hillshade)' overlay on the Map and Live pages (Denmark only). Needs a personal Dataforsyningen token (free, from dataforsyningen.dk). The token stays on the server: browsers fetch tiles from /api/map/dhm/wms, which adds it, and it is never sent to clients, written to responses or logged. Off unless enabled is true and token is non-empty; otherwise the overlay is not offered and the endpoint returns 404.",
+      "_comment_layer": "#687 — which DHM hillshade the server fetches: 'exaggerated' (default; the clearer quickDHM_skyggekort_terraen_overdrevet from wms/dhm_temp) or 'terrain' (dhm_terraen_skyggekort from dhm_DAF). With 'exaggerated', any tile that fails upstream is served from the terrain layer instead. Any other value logs a warning and uses 'terrain'. Browsers are unaffected either way.",
+      "_comment_overlays": "#734 - the tile proxy serves DHM overlays by id: 'terrain' (the hillshade 'layer' picks, as above), 'surface' (dhm_overflade_skyggekort, the surface hillshade with buildings and trees, zoom 7-19) and 'contours' (dhm_kurve_traditionel in the red style, 2.5 m contour lines, zoom 14-19). Browsers send the id, never an upstream layer name. surface and contours have no fallback, and every overlay draws on the same tileRateLimitPerMin budget and upstream limits. /api/config/client offers all three whenever map.dhm is enabled with a token: the Map and Live layer control shows terrain and surface as an either-or hillshade pair and contours as its own toggle. There is no key to set.",
+      "enabled": false,
+      "token": "",
+      "layer": "exaggerated",
+      "tileRateLimitPerMin": 2400,
+      "_comment_tileRateLimitPerMin": "#682/#681 - tiles one client address may pull from upstream per minute; beyond it the proxy answers 429 with Retry-After. Tiles already in the server cache and tiles outside Denmark are not counted. One budget covers every DHM overlay. Measured on a large 1920x1080 map: with one overlay, looking around (load, a few zoom steps and pans) takes about 300 tiles and zooming through the whole range and back with 16 pans about 800; with a hillshade and the contour lines on from zoom 15 (#734), the geometric ceiling of looking around at 2.5 s per view with 1.3x headroom is 2288 tiles a minute, and zooming 15-19 and back with 16 pans is at most 1692 as one burst, so people never meet 2400; a script walking DHM's ~97 million tiles on your token is held to 40 per second. 0-60000 (0 = off); out of range warns and uses the default, like profile.rateLimitPerMin. 60000 is 25x the shipped default, comfortably under the point where perMin/minute arithmetic would silently stop limiting. Like the /ws limits it needs webSocket.trustedProxies behind a reverse proxy, otherwise every visitor shares one address and the limit is skipped with a warning.",
+      "ortho": {
+        "_comment": "#728 - optional Danish spring orthophoto (GeoDanmark 'Ortofoto forår', WMTS orto_foraar_webm_DAF) as a base-map tile at /api/map/dhm/ortho/{z}/{x}/{y}, on the same token as map.dhm. Off unless enabled is true AND map.dhm is enabled with a token; otherwise the endpoint returns 404 and /api/config/client has no dhm.ortho. Ortho tiles draw on the same per-client budget (tileRateLimitPerMin) and the same upstream limits as the hillshade, and are cached apart from it (2048 tiles / 96 MB / 7 days). The token is never sent to clients.",
+        "enabled": false
+      },
+      "profile": {
+        "_comment": "#681 - GET /api/terrain/profile: terrain, line of sight and first Fresnel zone between two nodes or map points, from the DHM elevation model (WCS) on the same token. Off unless enabled is true AND map.dhm is enabled with a token. Public, but each client address may only start rateLimitPerMin uncached profiles per minute, since every one spends upstream requests on your token. All values are bounded; an out-of-range value logs a warning and uses the default shown here.",
+        "enabled": false,
+        "maxPathKm": 80,
+        "_comment_maxPathKm": "Longest path in km, at most 80 (the largest raster the WCS client requests). Longer paths are refused with 400 before any upstream call.",
+        "maxSamples": 3200,
+        "_comment_maxSamples": "Most elevation samples computed along a path (16-3200). The step is 10 m, growing to 25 m on long paths; at most 1024 samples are returned, always including the worst point.",
+        "chunkKm": 2.5,
+        "_comment_chunkKm": "Path length per upstream raster. WCS rasters are axis-aligned, so smaller chunks fetch fewer pixels for a diagonal path; a profile never uses more than 16 rasters per elevation model (32 with both DTM and DSM). 0 = one raster per model below about 79 km; every raster edge must stay inside the 80 km WCS span, so a path at the 80 km maximum splits into 2. Cheaper in requests but coarser (about 39 m per pixel at 20 km, 156 m at 80 km).",
+        "cacheEntries": 256,
+        "_comment_cacheEntries": "Profiles kept in memory (1-4096), about 25.6 KB each at most (model=both, maxSamples=3200), or 28.8 KB with buildings.enabled (a class byte per sample, plus 2): about 105 MB worst case at the documented maxima of both settings, about 118 MB with buildings.enabled. Antenna heights, k and frequency are computed per request, so changing them is a cache hit.",
+        "cacheTTLHours": 24,
+        "_comment_cacheTTLHours": "How long a cached profile is reused (up to 168). DHM is re-flown every few years.",
+        "upstreamTimeoutMs": 10000,
+        "_comment_upstreamTimeoutMs": "Timeout per upstream raster, 500-10000 ms (the shared DHM client's own limit is 10 s). A whole profile is also cut off after 25 s.",
+        "rateLimitPerMin": 10,
+        "_comment_rateLimitPerMin": "Uncached profiles one client address may request per minute; beyond it 429 with Retry-After. Cache hits are not counted. 0 = off. Needs webSocket.trustedProxies behind a reverse proxy, like tileRateLimitPerMin.",
+        "maxInFlight": 4,
+        "_comment_maxInFlight": "Uncached profiles fetched at once across all clients (1-16); beyond it 503 with Retry-After: 5, before any upstream request; such a refusal is not charged to the per-client budget, and is counted and logged (at most one line a minute). Requests for a profile already being fetched share it and are not counted, but are refused with it if its fetch is. Each profile runs up to 32 rasters, and the shared DHM upstream budget is 4 requests at a time, so a higher value mostly queues work; 16 is 4x that budget, and each blocked profile holds about 20 goroutines.",
+        "share": {
+          "_comment": "#727 - shareable profile links. With enabled true (and the profile above on), the panel's copy button hands out /p?profile=... links instead of #/map?profile=..., and the server answers /p with link-preview tags for that profile (title with the distance, the two endpoint names, the elevation model and an 'antenna heights assumed' caveat), plus og:url and robots noindex. Endpoint names follow the same visibility rule as the profile itself: a hidden, blacklisted or unpositioned node is 'not found'. A browser opening /p moves straight on to the #/map link. Click-tracking keys that apps append to shared links (fbclid, gclid, dclid, msclkid, igshid, mc_eid, utm_*) are ignored; any other unknown key is refused with 400. Set branding.publicBaseUrl when you enable this: og:url is built from it, and without it from the request's Host header. Off by default; /p links that already exist keep opening the profile either way.",
+          "enabled": false,
+          "upstreamPerMin": 2,
+          "_comment_upstreamPerMin": "#727 shareUpstreamPerMin - the server-wide number of upstream profile fetches per minute that shared links may cause, 0-60 (0 = sharing never goes upstream). Only the share card (GET /api/terrain/profile.png, the og:image of /p) spends it, and only when the profile's elevations are not cached: a link measured in a browser before it was shared costs nothing. Per-client limits do not bound a crawler fleet that fetches from many addresses; this does. When it is spent, or upstream fails or takes over 10 s, the card is served degraded (no verdict, re-fetched by crawlers within a minute) and one log line a minute says how many. A slow fetch is not wasted: it runs on to the profile's 25 s deadline and is cached, so the re-fetched card is complete."
+        },
+        "card": {
+          "_comment": "#727 - the share card, GET /api/terrain/profile.png: a 1200x630 PNG of the profile (both endpoints, the chart, the verdict, the antenna heights and the DHM credit), drawn on the server and used as og:image of /p. Served only with share.enabled. Colours come from theme.json (terrainFill, terrainClutter, losLine, fresnel100, fresnel60, profileBlocked and the base colours), as the site uses them; a viewer's own customizer colours stay in their browser.",
+          "theme": "dark",
+          "_comment_theme": "dark (default: previews mostly sit on dark chat backgrounds) or light: which theme.json palette the card uses; dark merges theme and themeDark as the site's dark mode does.",
+          "names": true,
+          "_comment_names": "Node names on the card and in its alt text. false draws 'Node A' and 'Node B'. Hidden, blacklisted or unpositioned nodes are never named either way: they are 'not found'.",
+          "cacheEntries": 64,
+          "_comment_cacheEntries": "Rendered cards kept in memory (1-1024), for 24 h; a card is 80-100 KB, and the cache is also bounded at 128 KiB per entry (8 MiB at the default). A cached card costs nothing; a card that is not cached is charged to the per-client rateLimitPerMin."
+        },
+        "foreignFill": {
+          "_comment": "#738 - cross-border profiles. DHM covers Denmark only, so a path into Germany or across Øresund is partial with no verdict. With enabled true, the samples DHM does not cover (Swedish, German, Polish and Norwegian land, the 1.25 km off their coasts, and everything outside DHM's raster extent) are filled from Copernicus DEM GLO-30, and the profile gets a verdict on the mixed terrain model. Only a profile with at least one DHM sample is filled. GLO-30 is a ~30 m surface model: forests and towns read high, which can only make a verdict more pessimistic; the surface (DSM) verdict of a mixed profile stays unknown. The response marks it mixed, lists the filled stretches and their resolution, and carries the Copernicus credit. At most 16 upstream calls per profile; a path that needs more at full resolution uses the 1/2 overview (~60 m), and one that needs more still is not filled. If the fill fails, the profile is partial with no verdict, as without it; its DHM part is cached as usual and a later request tries only the fill again. Heights abroad are EGM2008 next to DHM's DVR90 and are not corrected (a sub-metre step). With maxPathKm at most 80, Sweden and Germany are in reach, Norway and Poland in practice not.",
+          "_comment_traffic": "Off unless enabled is true, because it sends requests to a third party: anonymous HTTPS range requests to the AWS Open Data bucket copernicus-dem-30m.s3.amazonaws.com, the only host the fill ever contacts (no token, no account, no redirects followed). One header read per 1x1 degree tile and one read per 1024x1024 block: 5 requests and about 6.4 MB for a cold 80 km profile from Copenhagen into Skåne, nothing for a cached one. No client data is sent, but the bucket sees which tiles and byte ranges are read, i.e. the coarse area being profiled. The DHM token is never sent there.",
+          "_comment_licence": "Copernicus DEM GLO-30: free of charge, worldwide, with attribution (https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/DEM/resources/license/License-COPDEM-30.pdf). The organisations in charge of the Copernicus programme by law or by delegation do not incur any liability for any use of the Copernicus WorldDEM-30",
+          "enabled": false,
+          "blockCacheMB": 32,
+          "_comment_blockCacheMB": "Compressed GLO-30 blocks kept in memory, 1-256 MB (a block is about 0.04 to 2.8 MB). Tile headers are cached on their own, at most 64 of at most 64 KB.",
+          "timeoutMs": 10000,
+          "_comment_timeoutMs": "Timeout per upstream request to the bucket, 500-10000 ms; a whole profile is still cut off after 25 s."
+        },
+        "buildings": {
+          "_comment": "#730 - tell buildings from trees in the surface model (DSM). With enabled true, where the surface stands more than 2.5 m above the terrain on a model=both profile, the server asks Dataforsyningen's INSPIRE - Bygninger OGC API (no token; credited 'INSPIRE - Bygninger (GeoDanmark, @geodanmark)', CC BY 4.0) for the building footprints within 15 m of the path, one request per 10 km of path that has such samples, and the answer says per sample whether it is a building or trees/other, and what blocks the surface verdict. This runs inside the same profile fetch: no extra per-client charge, the same maxInFlight slot, at most 4 footprint requests at once server-wide and 5 s per profile, and a cached profile asks nothing. If the service fails, the profile is still answered, marked unclassified, and cached for 10 minutes only; within those, a request for it at least 2 minutes after the last try asks the footprint service again (charged and admitted like a miss) on the cached DHM data, and the requests in between, and those that arrive while that retry runs, are plain cache hits. A retry that classifies is cached like any profile; once the 10 minutes run out unclassified, the next request fetches the profile afresh, DHM data included. Off by default; the radius, threshold and limits are fixed in code for now.",
+          "enabled": false
+        }
+      }
+    },
+    "heritage": {
+      "_comment": "#723 — optional 'Protected ancient monuments' overlay on the Map and Live pages (Denmark only): the Slots- og Kulturstyrelsen register of protected monuments (points) and their protection zones (polygons), credited '© Slots- og Kulturstyrelsen'. No token or account: browsers fetch the tiles directly from the agency's public WMS (https://www.kulturarv.dk/ffgeoserver/public/wms), which allows cross-origin use. The service, layers, credit and zoom range are fixed in code. Tiles exist from zoom 12 in, so the overlay draws nothing further out. Off unless enabled is true; when off the overlay is not offered and neither browsers nor this server contact the service. Viewers switch it on per browser, and it is remembered there and in the link (?heritage=1).",
+      "_comment_info": "#723 M2 — with enabled true this server also answers GET /api/terrain/heritage: a click on the Map or Live page with the overlay on (zoom 12+) shows the protection zone at that point, or the nearest one within radiusM, with the register's own type, dating, status and numbers. For that the SERVER asks the agency's public WFS (https://www.kulturarv.dk/ffgeoserver/public/wfs) for one fixed 250 m cell around the click, never more; the agency's terms forbid harvesting the register, so the limits below are there to keep it that way. All values are bounded; an out-of-range value logs a warning and uses the default shown here.",
+      "_comment_profile": "#723 M3 — with enabled true the Map page's Path profile (map.dhm.profile) asks the same endpoint about both ends of a measured path, once per end, and shows a neutral advisory note beside the verdict when an end is inside or within radiusM of a protection zone. The verdict itself is unchanged, and a failed lookup shows nothing. Height edits and model switches ask nothing new, so a profile costs at most two lookups, charged to rateLimitPerMin only when not cached.",
+      "enabled": false,
+      "radiusM": 100,
+      "_comment_radiusM": "How far from a clicked point a protection zone is still reported, 0-250 m (0 = only a zone holding the point). Each upstream request covers the 250 m cell grown by this on every side.",
+      "cacheEntries": 256,
+      "_comment_cacheEntries": "Cells kept in memory (1-4096), a few KB each; the cache is also capped at 32 MB whatever this says.",
+      "cacheTTLHours": 168,
+      "_comment_cacheTTLHours": "How long a cached cell is reused (up to 168). Protection zones change rarely.",
+      "upstreamTimeoutMs": 10000,
+      "_comment_upstreamTimeoutMs": "Timeout of one upstream request, 500-10000 ms; beyond it the click gets 504.",
+      "rateLimitPerMin": 20,
+      "_comment_rateLimitPerMin": "Uncached lookups one client address may make per minute; beyond it 429 with Retry-After. Cache hits are not counted. 0 = off. Needs webSocket.trustedProxies behind a reverse proxy, like map.dhm.profile.rateLimitPerMin.",
+      "maxInFlight": 4,
+      "_comment_maxInFlight": "Upstream lookups running at once across all clients (1-16); beyond it 503 with Retry-After: 5 before any upstream request, not charged to the per-client budget, and counted and logged (at most one line a minute). Clicks in a cell already being looked up share that lookup."
+    },
+    "masts": {
+      "_comment": "#724 — optional antenna sites layer (Denmark only): existing antenna positions from Mastedatabasen (Digitaliseringsstyrelsen, CC0), served by GET /api/masts?cell=E,N for one fixed 2 km grid cell at a time. No key or account. The server fetches a cell from the agency's documented WFS only when a viewer's map needs it and it is not in the server cache (7 days); it never prefetches or walks the country, because the data's catalogue record forbids scraping. Viewer addresses are not sent to the agency. The service and cell size are fixed in code. Off unless enabled is true; when off the layer is not offered and the endpoint returns 404.",
+      "enabled": false,
+      "cellRateLimitPerMin": 120,
+      "_comment_cellRateLimitPerMin": "Uncached cells one client address may make the server fetch per minute; beyond it the endpoint answers 429 with Retry-After. Cached cells are not counted. A first look at zoom 13 is about 70 cells, at zoom 14 about 18. 0-6000 (0 = off); out of range warns and uses the default. Like the /ws limits it needs webSocket.trustedProxies behind a reverse proxy, otherwise every visitor shares one address and the limit is skipped with a warning.",
+      "maxInFlight": 16,
+      "_comment_maxInFlight": "Distinct uncached cells fetched at once, server-wide (1-256); beyond it a request is 503 with Retry-After and is not charged to its client. Of these, at most upstreamSlots talk to Mastedatabasen at the same time. It is never below upstreamSlots: a lower value warns and is raised to it. Out of range warns and uses the default.",
+      "upstreamSlots": 16,
+      "_comment_upstreamSlots": "#872 — requests open towards Mastedatabasen at the same time, server-wide (1-256). A first look at zoom 13 is about 70 uncached cells; admitted fetches beyond this wait for a slot, up to 30 s. maxInFlight always admits at least this many. Out of range warns and uses the default.",
+      "minZoom": 13,
+      "_comment_minZoom": "#724 M5 — the zoom the map starts fetching antenna sites at (13-18). 13 is also the lowest: the browser paces one view against the per-client budget at zoom 13. Viewers may raise it for themselves in the customizer (Display tab), never lower it. Out of range warns and uses the default.",
+      "hintDistanceM": 500,
+      "_comment_hintDistanceM": "#724 M5 — the Path profile hint names a 700/800/900 MHz antenna site within this many metres of an end (100-990; at most four 2 km cells per end). Viewers may change it for themselves in the customizer, within the same bounds. Out of range warns and uses the default.",
+      "hintStrongM": 100,
+      "_comment_hintStrongM": "#724 M5 — within this many metres the hint says the transmitter may be on the same building or mast (0 = no strong tier, up to hintDistanceM). A value past hintDistanceM warns and uses the default.",
+      "breakerFailures": 3,
+      "_comment_breakerFailures": "#872 — circuit breaker: after this many consecutive upstream failures (timeouts, connection errors or 5xx answers from Mastedatabasen) the server stops asking Mastedatabasen for breakerCooldownSec. Meanwhile an uncached cell answers at once with 503, header X-CoreScope-Masts-Source: down and Retry-After the remaining cool-down, not charged to its client; cached cells are still served (also stale ones, see maxStaleDays), and the map says the source is not responding. After the cool-down one request probes: success resumes, failure pauses again. One log line per change. 1-20; out of range warns and uses the default.",
+      "breakerCooldownSec": 300,
+      "_comment_breakerCooldownSec": "#872 — how long the breaker pauses requests to Mastedatabasen before probing again, in seconds (30-3600). Out of range warns and uses the default.",
+      "maxStaleDays": 90,
+      "_comment_maxStaleDays": "#872 — stale-if-error: a cell older than the 7-day cache time stays in the server cache (within its existing entry and byte limits, least recently used first out) until this many days after it was fetched. While Mastedatabasen fails (a timeout, connection error or 5xx) or the breaker is open, that copy is served instead of an error, marked with header X-CoreScope-Masts-Stale: 1 and never cached by the browser, and the map says 'Antenna data may be out of date'. An older cell gets the error as before. 7-365 (7 = no stale copies); out of range warns and uses the default."
+    },
+    "coverage": {
+      "_comment": "#941 - optional Predicted reach: pick a node or a map point and see where a radio there is predicted to be heard, shaded by signal margin. The server computes the path loss on a raster: free-space loss plus ITU-R P.526 Bullington diffraction over the terrain (DHM's terrain model inside Denmark; with map.dhm.profile.foreignFill.enabled Copernicus GLO-30 elsewhere in its region), with the earth bulge (radio.kFactor) and the terrain profile's antenna heights (radio.antennaHeightsM); the browser colours it with the link budget in radio.txPowerDbm and its neighbours. Off unless enabled is true AND there is terrain: map.dhm enabled with a token, or the foreign fill on. Served as GET /api/terrain/coverage and /api/terrain/coverage/raster; when off both return 404 and nothing is contacted. A cold 40 km reach fetches about 33-49 DHM rasters (512 px at 30 m) on the operator's token; they are cached as elevation tiles, so neighbouring and repeated reaches reuse them. All values are bounded; an out-of-range value logs a warning and uses the default shown here.",
+      "enabled": false,
+      "maxRadiusKm": 40,
+      "_comment_maxRadiusKm": "Largest radius a request may ask for, in km (5-60). The default request radius is 40 km, or this if lower. Cost grows about with the cube of the radius: 60 km is about 3.4x the work of 40 km.",
+      "resolutionM": 30,
+      "_comment_resolutionM": "Elevation grid and radial step in metres (20-60). 30 m resolves the first Fresnel zone of 869 MHz links (about 59 m mid-path at 40 km); 20 m costs about 2.4x the compute and 1.8x the DHM rasters.",
+      "maxInFlight": 1,
+      "_comment_maxInFlight": "Computations running at once, server-wide (1-4). Each uses half the CPUs and up to about 64 MB; beyond it 503 with Retry-After: 5, not charged to the client. Identical requests share one computation.",
+      "rateLimitPerMin": 2,
+      "_comment_rateLimitPerMin": "Computations not in the cache one client address may start per minute (0-600, 0 = off); beyond it 429 with Retry-After. Cached reaches and the power, gain and sensitivity sliders cost nothing. Needs webSocket.trustedProxies behind a reverse proxy, like the other per-client limits.",
+      "upstreamPerMin": 240,
+      "_comment_upstreamPerMin": "DHM rasters the predicted reach may fetch per minute, server-wide (0-6000; 0 = cached tiles only). A cold computation the budget cannot pay is refused with 503 and Retry-After before any request; one larger than the whole budget runs only when it is full. The reach also never uses more than 2 of the shared DHM client's 4 upstream slots, so map tiles and profiles keep the rest.",
+      "cacheEntries": 32,
+      "_comment_cacheEntries": "Computed reaches kept in memory (1-256), each about 0.1-1 MB, for cacheTTLHours. Changing power, gains or sensitivity reuses the cached loss.",
+      "cacheTTLHours": 24,
+      "_comment_cacheTTLHours": "How long a computed reach and an elevation tile are reused, in hours (above 0, at most 168).",
+      "elevationCacheMB": 64,
+      "_comment_elevationCacheMB": "Memory for cached elevation tiles (8-1024 MB), 512 KB each: 64 MB holds about three 40 km disks.",
+      "model": "delta",
+      "_comment_model": "#941 M2 - the default propagation model: \"bullington\" (ITU-R P.526 section 4.5.1) or \"delta\" (the complete method of section 4.5.2, delta-Bullington: adds the smooth-earth diffraction beyond the radio horizon, about 1.4x the compute). A request or the panel may pick the other; each model is cached on its own. The default is delta, as the validation report on real links decided (docs/predicted-reach-validation.md); set \"bullington\" to keep the cheaper model.",
+      "environmentLossDb": 25,
+      "_comment_environmentLossDb": "#962 - environment loss in dB (0-60, default 25 dB) that the Predicted reach panel subtracts from the link budget: buildings, trees and other clutter the terrain model does not include (inside Denmark the terrain is DHM's bare-earth model). The #941 validation found the observed SNR a median of about 27 dB below the bare-terrain prediction, most on short links. Like the radio budget it only shifts the margin, so the browser applies it to the cached loss and a viewer can change it in the panel (the renv link parameter) without a new computation; 0 gives the bare-terrain prediction. The server's own reach counts (budgetDb) and the validation harness stay raw. A later milestone exposes it in the customizer."
+    },
+    "skraafoto": {
+      "_comment": "#737 — optional Skråfoto: the oblique aerial photos of Denmark from Klimadatastyrelsen (north, east, south, west and straight down), credited 'Klimadatastyrelsen, Skråfotos, CC BY 4.0'. With enabled true this server answers GET /api/skraafoto/search?lat=&lon=[&year=] (the photos of a point, newest year by default, 2017 not offered) and GET /api/skraafoto/preview/{collection}/{item} (one photo as a JPEG of at most 1024 px). The search needs a Dataforsyningen token: it uses map.dhm.token, which stays on the server (a token alone does not switch this on, and map.dhm.enabled is not needed). The previews are read from the agency's image CDN, which needs no token and is never sent one; only one small overview of each photo is read, by range requests. Off unless enabled is true; when off, or without a map.dhm.token, both endpoints return 404 and nothing is contacted. All values are bounded; an out-of-range value logs a warning and uses the default shown here.",
+      "enabled": false,
+      "searchRateLimitPerMin": 30,
+      "_comment_searchRateLimitPerMin": "Uncached searches one client address may make per minute (0-6000, 0 = off); beyond it 429 with Retry-After. Cached answers are not counted. Needs webSocket.trustedProxies behind a reverse proxy, like the other per-client limits.",
+      "previewRateLimitPerMin": 120,
+      "_comment_previewRateLimitPerMin": "Uncached previews one client address may fetch per minute (0-6000, 0 = off); a click shows up to five.",
+      "dailyCap": 2000,
+      "_comment_dailyCap": "Uncached searches and previews per UTC day, server-wide (0-1000000, 0 = off), so many clients together cannot exhaust the shared token; beyond it 503 with Retry-After until 00:00 UTC, cached photos are still served, and one line a minute is logged.",
+      "maxInFlight": 8,
+      "_comment_maxInFlight": "Distinct uncached searches and previews being fetched at once, server-wide (1-16); beyond it 503 with Retry-After: 5, not charged to the client or the daily budget.",
+      "cacheMB": 64,
+      "_comment_cacheMB": "Memory for cached previews (1-512 MB), some 50-150 KB each, kept 7 days. Searches are cached 24 hours on top of this, within 16 MB."
+    },
     "tiles": {
-      "darkDefault": "carto-dark",
-      "lightDefault": "carto-light",
+      "_comment_defaults": "#332 — the built-in defaults are 'osm-dark' / 'osm-standard' (keyless OpenStreetMap, tiles to zoom 18). Set darkDefault/lightDefault to any enabled style id to override; they take priority over the built-in fallback. A default whose provider is not enabled (opentopomap, usgs and esri are opt-in) is skipped, as if it were not set. Carto is opt-in too (#845), but a Carto default is not skipped: while carto is off it is migrated to its nearest keyless map (see _comment_carto). Either way the browser console names the configured id and why it is not used (#859). Carto is NOT the default any more: since August 2026 keyless Carto raster tiles come back HTTP 200 with 'API KEY REQUIRED' stamped into the PNG, and CoreScope has no Carto basemap-key plumbing.",
+      "_comment_legacy": "Legacy raw tile-URL overrides — \"tiles.dark\" / \"tiles.light\" at the top level, or \"darkUrl\" / \"lightUrl\" here — are still honoured: they apply when no provider was chosen in the browser and no darkDefault/lightDefault is set, i.e. precedence is browser choice > darkDefault/lightDefault > raw URL > built-in fallback. A raw URL carries no vendor metadata, so such a map shows the generic \"\u00a9 OpenStreetMap contributors\" credit (no vendor-specific or licence attribution), is never CSS-inverted in dark mode, and is capped at zoom 18 like the built-in OpenStreetMap default. Prefer darkDefault/lightDefault with a registered style id when you need the correct credit, licence link or a different zoom ceiling.",
+      "darkDefault": "osm-dark",
+      "lightDefault": "osm-standard",
       "providers": {
-        "_comment_carto": "Carto is the default free-tier provider. Optional: specify 'domain' for Carto enterprise (e.g. 'mycompany' for 'https://{s}.mycompany.cartocdn.com').",
+        "_comment_carto": "#845 — Carto is OFF unless enabled is the JSON boolean true: since August 2026 keyless Carto raster tiles are watermarked 'API KEY REQUIRED' (see _comment_defaults) and CoreScope has no Carto basemap-key plumbing. While it is off, a viewer's saved Carto choice (and a Carto darkDefault/lightDefault) is shown as the nearest keyless map: Positron and Voyager as OSM Standard, Carto Dark as Esri Dark Gray Canvas when esri is enabled, otherwise OSM Standard (dark); the browser console then warns once, naming the configured Carto id and the map used instead (#859). Set enabled: true only if you have a Carto arrangement; optional: specify 'domain' for Carto enterprise (e.g. 'mycompany' for 'https://{s}.mycompany.cartocdn.com').",
         "carto": {
-          "enabled": true,
+          "enabled": false,
           "domain": ""
         },
         "_comment_osm": "OSM providers: 'mapbox', 'thunderforest', 'maptiler'. WARNING: Tokens are sent to the browser. Apply origin/referrer restrictions in your provider dashboard.",
@@ -89,12 +289,39 @@
           "provider": "",
           "token": ""
         },
+        "_comment_opentopomap": "OpenTopoMap topographical tile provider. Enabling this makes USERS' BROWSERS fetch tiles from tile.opentopomap.org, exposing their IP and approximate viewing area to that third party. Tiles are CC-BY-SA: the credit and licence link must stay on the map. Limited to zoom level 17, and it is a small volunteer-run service with informal fair-use expectations.",
+        "opentopomap": {
+          "enabled": false
+        },
         "_comment_stamen": "Stamen (hosted by Stadia). WARNING: Tokens are sent to the browser. Apply origin/referrer restrictions.",
         "stamen": {
           "enabled": false,
           "token": ""
+        },
+        "_comment_usgs": "USGS topographical tile providers (USGS Topo, USGS Imagery). Enabling these makes USERS' BROWSERS fetch tiles from basemap.nationalmap.gov, exposing their IP and approximate viewing area to that third party. Limited to zoom level 16, and The National Map only serves the United States and its territories — elsewhere these layers render blank with no on-screen explanation.",
+        "usgs": {
+          "enabled": false
+        },
+        "_comment_esri": "Esri tile providers (Esri Dark Gray Canvas, Esri World Imagery). Off unless enabled is true. Since #728 this also gates Esri Dark Gray Canvas, which used to be offered unconditionally: a config whose darkDefault or lightDefault names an esri-* style must set enabled to true, otherwise browsers skip that default (and log a console warning), and the server logs a warning at startup. The map then uses the next fallback (a legacy darkUrl/lightUrl, else osm-dark / osm-standard). Enabling these makes USERS' BROWSERS fetch tiles from server.arcgisonline.com, exposing their IP and approximate viewing area to Esri. The tiles are licensed under the Esri Master License Agreement, and Esri says this public endpoint is for licensed ArcGIS use; check that your use is covered before enabling. The credit must stay on the map. World Imagery is an aerial photo, never inverted in dark mode; style ids esri-imagery (light) and esri-imagery-dark (dark), tiles to zoom 19.",
+        "esri": {
+          "enabled": false
+        },
+        "_comment_dataforsyningen": "Danish base maps from Klimadatastyrelsen / Dataforsyningen (#741): Skærmkort in the standard, grå (grey) and dæmpet (muted) variants, through the topo_skaermkort_DAF WMS in EPSG:3857, as style ids dataforsyningen-skaermkort, dataforsyningen-skaermkort-graa and dataforsyningen-skaermkort-daempet (light) and dataforsyningen-skaermkort-graa-dark (dark: the grey map under the dark-mode invert filter); and Natur- og Friluftskort (#741 M2), the Natur_Friluft_basis layer of the wms/natur_friluftskort WMS in EPSG:3857, as style id dataforsyningen-natur-friluft, light only (no inverted dark variant; picked in the dark theme it shows as published). The same switch and the same token cover both maps. Off unless enabled is true AND token is a non-empty string. WARNING: while it is on, this token is sent to the browser on purpose (with enabled not true, the server leaves it out of the client config) — every viewer can read it, as Dataforsyningen intends for tokens used in public web applications. Create a NEW, separately named token for it in your Dataforsyningen account; never reuse map.dhm.token, which stays server-only (the server refuses to ship a value that contains map.dhm.token and logs it). If the token is copied and misused, Dataforsyningen can block it: only the base map is affected, never DHM, and you rotate it. Enabling these makes USERS' BROWSERS fetch tiles from api.dataforsyningen.dk, exposing their IP and approximate viewing area to the agency, as with Carto and Esri today. Coverage is Denmark only: elsewhere the layers render blank with no on-screen explanation. Tiles from zoom 6 to 19; the credits (Klimadatastyrelsen and GeoDanmark for Skærmkort, Klimadatastyrelsen for Natur- og Friluftskort, CC BY 4.0) must stay on the map. Natur- og Friluftskort is slower upstream (about 1 s a tile cold).",
+        "dataforsyningen": {
+          "enabled": false,
+          "token": ""
         }
       }
+    }
+  },
+  "share": {
+    "nodes": {
+      "_comment": "#811 - shareable node links with link previews. With enabled true, /p?node=<64-hex public key> answers link-preview crawlers with that node's name and role, the configured area it is in (from areas, only when it is in one), when it was last heard, its relays and seen airtime (repeaters and rooms) and its neighbour count, and a 1200x630 card, GET /api/nodes/{pubkey}/card.png, as og:image. Cards exist for repeaters, rooms and sensors only: a companion link gets the plain site preview. No position, map or packet content is shown. Hidden nodes (nodeBlacklist, observerBlacklist, hiddenNamePrefixes), unknown and inactive nodes get the plain site preview with 404. Only full 64-hex keys are accepted. A browser opening /p?node= moves straight on to the node page, and Copy URL on the node page and in the nodes side pane hands out /p?node= links for those roles (#811 M4; a viewer can turn that off in the customizer). The card uses the theme and names settings of map.dhm.profile.card, is cached for 10 minutes (64 cards) and, when not cached, is charged to map.dhm.profile.rateLimitPerMin per client. It needs no upstream service and works without map.dhm. Set branding.publicBaseUrl when you enable this. Off by default.",
+      "enabled": false
+    },
+    "packets": {
+      "_comment": "#812 - shareable packet links with link previews. With enabled true, /p?packet=<16-hex packet hash> answers link-preview crawlers with the packet's payload type, route and hop count, the observer that heard it first and how many did, its spread, farthest observer and estimated flood airtime, the touched areas' names, and a 1200x630 card, GET /api/packets/{hash}/card.png, as og:image: the path drawn as a schematic with no basemap. Every payload type gets a card, but nothing of the payload is shown: no message text, no channel and no sender. Only an advert names its origin. Branches through hidden nodes or observers (nodeBlacklist, observerBlacklist, hiddenNamePrefixes) are removed whole, a hidden first observer leaves counts only, and adverts from hidden nodes, unknown packets and packets no longer stored get the plain site preview with 404. A browser opening /p?packet= moves straight on to the packet page. The card uses the theme and names settings of map.dhm.profile.card, is cached (64 cards) for 2 minutes while the packet is under 10 minutes old and 24 hours after that and, when not cached, is charged to map.dhm.profile.rateLimitPerMin per client. It needs no upstream service. Set branding.publicBaseUrl when you enable this. Off by default.",
+      "enabled": false
     }
   },
   "home": {
@@ -211,6 +438,35 @@
     "#bookclub",
     "#shtf"
   ],
+  "channelProposals": {
+    "enabled": false,
+    "autoApprove": false,
+    "maxPending": 100,
+    "maxApproved": 128,
+    "maxQueuedRequests": 256,
+    "retentionDays": 30,
+    "submissionsPerHour": 20
+  },
+  "_comment_channelProposals": "Shared hashtag channels: visitors suggest public hashtag channels (names only, never keys) on the Channels page. Submissions open only when enabled is true AND apiKey is strong (16+ characters, not a placeholder). By default an administrator approves or rejects suggestions at #/channels?view=proposals with the apiKey. Opt-in autoApprove immediately approves only brand-new names; existing pending, rejected and revoked names are not auto-approved. Approved channels are decrypted by the ingestor and listed for everyone, even before they carry traffic; they stay active if enabled is later set to false. Limits: maxPending/maxApproved bound the table, maxQueuedRequests bounds the request queue next to the database, submissionsPerHour is a global sliding window, and rejected or unreviewed suggestions are deleted after retentionDays. Read by both server and ingestor; changing this policy requires an ingestor restart.",
+  "antennaClaims": {
+    "enabled": false,
+    "detailsEnabled": false,
+    "autoApproveProven": false,
+    "autoApproveDetails": false,
+    "submissionsPerHour": 20,
+    "maxPending": 256,
+    "maxPendingPerNode": 3,
+    "maxQueuedRequests": 256,
+    "retentionDays": 30,
+    "staleMoveM": 50,
+    "reviewDeltaM": 60,
+    "pollInitialMs": 2000,
+    "pollBackoff": 1.5,
+    "pollMaxMs": 30000,
+    "pollMaxAttempts": 60,
+    "adminDefaultFilter": "proven"
+  },
+  "_comment_antennaClaims": "Owner antenna heights (#789): a node's owner claims its antenna height with POST /api/nodes/{pubkey}/antenna-claims, gets a 6-character code, puts it into the node's advert name (appended, within the first 23 bytes) and sends an advert. A new advert with a valid signature from that key proves the claim; the code is single-use and expires after 24 h. Claims open only when enabled is true AND apiKey is strong. A proven height waits for an administrator (GET/POST /api/admin/antenna-claims) unless autoApproveProven is true, and even then a height far from the surface estimate waits. Only repeater and room claims with a cached surface estimate can be flagged, so with autoApproveProven on every companion and sensor claim, and every claim whose surface is not cached yet, is approved without review at any height from 0 to 100 m. An approval of a proof older than the node's claim already in force is refused (409). A proven clear removes the owner's height at once. detailsEnabled (#898, default false; needs enabled) also lets owners set station details in the same claim: antenna type, gain (-5 to 20 dBi), power, installation and two optional contacts, contactPublic (shown to everyone on the node page and by GET /api/nodes/{pubkey}/station) and contactAdmin (admin queue only, never public, never logged). A claim that sets details waits for an administrator unless autoApproveDetails is true (#1007, default false; needs detailsEnabled): then a proven claim that sets details is approved without an administrator, height, details and both contacts included, unless it is flagged for review (a flagged claim always waits). WARNING: with autoApproveDetails on, the contactPublic free text goes public without review; revoke is the only remedy. autoApproveProven and autoApproveDetails are independent: autoApproveProven covers claims without details, autoApproveDetails claims with them, so both must be true for every unflagged claim to be approved without an administrator. Turning a switch on does not approve claims that are already proven. One approval decides the whole claim. Both contacts are deleted when the details are removed, replaced, rejected, revoked or expire, and when retention deletes the claim; admin database backups (GET /api/backup, scripts/backup-sqlite.sh) and SQLite free pages can still hold a deleted contact, because deletion is logical. With detailsEnabled off, setting details is refused (403) but removing them still works. All four switches are read by their exact spelling. Approved heights rank below radio.antennaHeightsM per node and above the surface estimate, and are ignored once the node moves more than staleMoveM (default 50 m, at most 5000) from where the height was proven. reviewDeltaM (default 60 m, at most 1000) is how far above the surface estimate + 2 m a height may be before it is flagged for review (more than 2 m below the surface is always flagged). Limits: maxPending (all nodes) and maxPendingPerNode bound unproven claims (a claim over a limit is refused, never evicts another), maxQueuedRequests bounds the request queue next to the database, submissionsPerHour is a global sliding window, and finished claims are deleted after retentionDays (the approved one is kept). Read by both server and ingestor; changing this policy requires an ingestor restart. Owner page and admin queue (server only, sent to the browser by GET /api/antenna-claims/config): the claim status is checked after pollInitialMs (default 2000, 500-60000), each later wait grows by pollBackoff (default 1.5, 1-4) up to pollMaxMs (default 30000, at most 600000) per wait, for at most pollMaxAttempts checks (default 60, at most 1000) before the page offers Check again; adminDefaultFilter (default proven; pending, approved, rejected, revoked, expired or superseded) is the admin queue's first view. A value out of its range is the default. Owner guide: docs/user-guide/antenna-height-claims.md.",
   "healthThresholds": {
     "infraDegradedHours": 24,
     "infraSilentHours": 72,
@@ -246,8 +502,8 @@
   },
   "geoFilterExemptNodeList": false,
   "_comment_geoFilterExemptNodeList": "Optional, default false. When geo_filter is configured, GET /api/nodes (and therefore the live map) excludes out-of-polygon nodes by default — the long-standing #730 declutter behavior, preserved automatically for every deployment upgrading from before this field existed. Set to true if you want geo_filter purely for foreign_advert classification/analytics (e.g. a 'Foreign Traffic' investigation) WITHOUT also hiding out-of-polygon nodes from the node list/map. Per-request ?geoFilter=0 / ?geoFilter=1 on /api/nodes overrides either default for a single call. Has no effect on ingestion (foreignAdverts.mode) or the prune-geo-filter admin flow, both of which are unaffected by this flag.",
+  "_comment_areas": "Optional. GPS-based display filter. Each entry defines a geographic area by polygon ([lat, lon] pairs) or bounding box (latMin/latMax/lonMin/lonMax). Packets and nodes are attributed to an area based on the transmitting node's own GPS coordinates — not the observer's location. Areas appear as a filter pill bar in the dashboard. Remove this section to disable the area filter UI. NOTE: every key under \"areas\" must be an area object, so this note lives outside the block (#694) — a string in there makes the whole file fail to decode and the server ignores it.",
   "areas": {
-    "_comment": "Optional. GPS-based display filter. Each entry defines a geographic area by polygon ([lat, lon] pairs) or bounding box (latMin/latMax/lonMin/lonMax). Packets and nodes are attributed to an area based on the transmitting node's own GPS coordinates — not the observer's location. Areas appear as a filter pill bar in the dashboard. Remove this section to disable the area filter UI.",
     "BAY": {
       "label": "Bay Area",
       "polygon": [
@@ -270,6 +526,18 @@
     "SFO": "San Francisco, US",
     "OAK": "Oakland, US",
     "MRY": "Monterey, US"
+  },
+  "_comment_regionGroups": "Optional (#416). Named quick picks over the region codes above: each group renders as one button next to the region filter that selects exactly those codes in one click. Omit the key, or leave it [], and the region filter behaves exactly as it did before the option existed. These are convenience labels over region codes, NOT verified geographic boundaries. Limits: at most 12 groups, at most 24 distinct codes per group, names at most 40 characters. A group that breaks one of those limits, has no name or lists no code is dropped with one log line at startup — a truncated code list or a shortened name would mislabel the filter, so the whole entry is refused instead. Repeated group names (case-insensitive) keep the first one; repeated codes inside a group are de-duplicated. Codes are matched case-insensitively against the served region list (config entries plus every observer IATA in the database), so a code no observer reports is dropped from the group and a group left with no code is not offered at all — an operator can list an observer that is not up yet without creating a dead button. Served by GET /api/config/regions/groups; the flat GET /api/config/regions map is unchanged.",
+  "regionGroups": [
+    { "name": "Bay Area", "codes": ["SFO", "SJC", "OAK"] },
+    { "name": "Central Coast", "codes": ["MRY"] }
+  ],
+  "regionPlacement": {
+    "_comment": "Optional (server, #488). Which nodes /api/nodes?region= returns. mode: \"heard\" (default, today's rule) puts a node in every region whose observers heard any of its adverts, so flooded adverts list distant nodes too. \"placed\" uses direct evidence first: a node is in every region that heard its own transmission (hash count 0 on the observation's own frame; contact re-shares never count), else in the regions that heard it in the fewest relays up to maxHops, else in no region (it stays in the unfiltered list). A legacy row without a stored frame counts an explicit [] path only as a 0-hop fallback. This is an inference from reception, not a verified location. maxHops: cap of the relayed fallback, 0-7, default 3. lifetimeDays: evidence older than this before the node's own newest hearing is ignored, default 30, 0 = no window. persistSpanHours: when set, a region whose direct hearings span less than this is dropped if another region's span at least this (one-off long-distance reception); default 0 = off. Read at startup. Before switching to placed, run the read-only dry-run on a copy of the database: corescope-server -db <copy> -config-dir <dir> -region-placement-dryrun prints counts per basis and region and the unplaced share for several maxHops values, and exits. These values are meant for the customizer in a later release.",
+    "mode": "heard",
+    "maxHops": 3,
+    "lifetimeDays": 30,
+    "persistSpanHours": 0
   },
   "cacheTTL": {
     "stats": 10,
@@ -305,7 +573,7 @@
     "formatPreset": "iso",
     "customFormat": "",
     "allowCustomFormat": false,
-    "_comment": "defaultMode: ago|local|iso. timezone: local|utc. formatPreset: iso|us|eu. customFormat: strftime-style (requires allowCustomFormat: true)."
+    "_comment": "The browser's default timestamp display (#969); a viewer's own Customize -> Display choice still wins. defaultMode: ago|absolute. timezone: local|utc. formatPreset: iso|iso-seconds|locale. customFormat: tokens YYYY MM DD HH mm ss SSS Z, offered only with allowCustomFormat: true. Keys are case-sensitive; an invalid value logs a warning and takes the default (ago/local/iso)."
   },
   "packetStore": {
     "maxMemoryMB": 1024,
@@ -325,11 +593,21 @@
   },
   "ingestBufferSize": 50000,
   "_comment_ingestBufferSize": "Number of MQTT messages held in memory while the single SQLite writer is blocked by a startup migration/prune (#1608). Drained once the write path is ready; bounded memory (small closure per item). 0 / omit / negative => default 50000 (applied by IngestBufferSizeOrDefault before NewIngestBuffer). A positive value below the default is honored as-is; sub-1 values reaching NewIngestBuffer directly clamp to 1 with a WARN log.",
+  "neighborEdgeCountHalfLifeDays": 0,
+  "_comment_neighborEdgeCountHalfLifeDays": "Ingestor only (#544). OPT-IN and IRREVERSIBLE. 0 / omit / negative = disabled (the default): neighbor_edges.count is a lifetime total that only grows. N > 0 = half-life in days: once per whole day every count is multiplied by 0.5^(1/N) and rounded, never below 3, so old credit (for example bridge TX copies counted before #540) halves every N days and an edge credited r times a day settles near r * 1.44 * N (7 matches the affinity score's half-life). Once enabled, the decayed lifetime counts are gone: setting it back to 0 stops further decay and resets the decay clock, but nothing restores the old counts. Decay changes hop disambiguation: affinity then follows recent traffic, so an edge with large old credit can lose a hop to one with a recent burst. Measure on a copy of your database first with scripts/neighbor-edge-decay-replay.sh. Edges and last_seen never change (retention still decides which edges exist). The stored counts also weight bridge/coverage scores, estimated positions and the GPS sanity check; the neighbour list and neighbour graph are built from packets and are not affected. The clock is stored in the database: missed days are applied after downtime, the first decay is one day after the feature is first enabled, and a clock more than a day in the future is reset. See docs/deployment.md.",
   "neighborGraph": {
     "maxAgeDays": 5,
     "maxEdgeKm": 500,
     "cacheRecomputeIntervalSeconds": 300,
-    "_comment": "maxAgeDays: neighbor edges older than this many days are pruned on startup and daily. Default 5. maxEdgeKm: geo-implausibility filter — when both endpoints have GPS, edges with haversine distance > maxEdgeKm are rejected at build time to prevent disambiguator self-reinforcement on wide-geo MQTT deployments. Default 500 km (well above any plausible terrestrial LoRa hop). 0 ⇒ use default; set negative to disable the filter. Rejected count surfaces in /api/analytics/neighbor-graph stats. Issue #1228. cacheRecomputeIntervalSeconds: how often the background recomputer rebuilds the default-shape /api/analytics/neighbor-graph response (#1481 P0-1). Default 300 (5 min). Lower = fresher data, more CPU per minute. Issue #1483."
+    "_comment": "maxAgeDays: neighbor edges older than this many days are pruned on startup and daily. Default 5. maxEdgeKm: geo-implausibility filter — when both endpoints have GPS, edges with haversine distance > maxEdgeKm are rejected at build time to prevent disambiguator self-reinforcement on wide-geo MQTT deployments. Default 500 km (well above any plausible terrestrial LoRa hop). 0 ⇒ use default; set negative to disable the filter. Rejected count surfaces in /api/analytics/neighbor-graph stats. Issue #1228. cacheRecomputeIntervalSeconds: how often the background recomputer refreshes the cached default-shape /api/analytics/neighbor-graph responses (#1481 P0-1). Default 300 (5 min). The graph itself is rebuilt at most once per 5 minutes, so a lower value refreshes the cached responses more often without extra graph-build CPU; a higher value makes the graph older: at most roughly one TTL plus one interval (a non-divisor interval rebuilds every ceil(TTL/interval) ticks, e.g. 90 s gives 360 s). Requests keep the published graph until the next build finishes. Issue #1483, #545."
+  },
+  "estimatedPositions": {
+    "enabled": true,
+    "_comment": "Operator policy for neighbor-derived position estimates. Omit this section or enabled to preserve the default (true). Set false to disable estimates in node details, packet/Ping Scores paths, maps, and estimate-dependent analytics. Reported GPS, ordinary neighbor graphs, and independent IATA/name-based fallbacks are unchanged. Requires a Go server restart and browser refresh; not reloaded by SIGHUP."
+  },
+  "dagi": {
+    "enabled": true,
+    "_comment": "#740: the DAGI filters ?kommune=, ?landsdel=, ?dkregion= and ?postnr= (Klimadatastyrelsen's administrative boundaries, embedded in the server) on /api/nodes, /api/packets and every endpoint that takes area, plus GET /api/config/dagi and /api/config/dagi/polygons. Omit this section or enabled to keep the default (true); only the exact key dagi.enabled is read. false turns the filters and both endpoints off and skips the in-memory index (about 7 MB). Requires a server restart."
   },
   "observersCache": {
     "ttlSeconds": 30,
@@ -343,7 +621,9 @@
     "criticalMv": 3000,
     "_comment": "Voltage cutoffs (millivolts) for the per-node battery trend chart on /node-analytics. Latest sample below lowMv shows the node as ⚠️ Low; below criticalMv shows 🪫 Critical. Both default to 3300 / 3000 if omitted. Source data: observer_metrics.battery_mv populated from observer status messages; only nodes that are themselves observers (matching pubkey ↔ observer id) yield a series. Issue #663."
   },
-  "_comment_mqttSources": "Each source connects to an MQTT broker. Supported schemes: mqtt:// (plain TCP), mqtts:// (TLS), ws:// (WebSocket), wss:// (WebSocket TLS). topics: what to subscribe to. iataFilter: only ingest packets from these regions (optional). region: default IATA region for this source — used when packet/topic doesn't specify one (optional, priority: payload > topic > this field).",
+  "dutyCycleWarnPct": 10,
+  "_comment_dutyCycleWarnPct": "TX airtime share (percent) over the last hour at which RF Health and the observer list flag an observer. Default 10, the EU 868 MHz g3 sub-band limit; raise it (e.g. 50) elsewhere. Repeater firmware defaults to a 50% budget (airtime_factor 1.0), so the device does not enforce this itself. Issue #479.",
+  "_comment_mqttSources": "Each source connects to an MQTT broker. Supported schemes: mqtt:// (plain TCP), mqtts:// (TLS), ws:// (WebSocket), wss:// (WebSocket TLS). topics: what to subscribe to. iataFilter: only ingest packets from these regions (optional). region: default IATA region for this source — used when packet/topic doesn't specify one (optional, priority: payload > topic > this field). clientId: MQTT client ID, used verbatim (optional; must be unique among the broker's concurrent clients, and at most 23 characters of [0-9A-Za-z] for strict MQTT 3.1 brokers). When omitted, each ingestor start generates corescope-<name>-<8 random hex>, so copies of this file never share an ID — do not add a fixed clientId here.",
   "compression": {
     "gzip": false,
     "websocket": false,
@@ -360,8 +640,41 @@
     ]
   },
   "_comment_compression": "Opt-in HTTP gzip middleware + WebSocket permessage-deflate. Both default to false — enable ONLY when your upstream reverse proxy is NOT already compressing. gzip: enables the gzipMiddleware wrapper around the HTTP handler. websocket: sets gorilla websocket Upgrader.EnableCompression. level: gzip compression level 1..9 (1=BestSpeed, 9=BestCompression, default 6). minSizeBytes: advisory minimum response size below which compression would not pay off. contentTypes: MIME allow-list — only responses with these Content-Type values are compressed. Already-compressed types (image/*, video/*, audio/*, application/zip, application/x-gzip, application/pdf, application/octet-stream) are always skipped, as are responses whose handler already set Content-Encoding. Omit contentTypes to use the built-in default allow-list.",
+  "clientRegions": { "enabled": false },
+  "_comment_clientRegions": "Opt-in declared-region reports (#126): a mobile companion asks a repeater in direct range which regions it lets flood and relays the answer on meshcore/client/<pubkey>/regions; each answer is kept as a report in client_declared_regions with its collector, reported time, ingest time and the repeater's own clock. Default OFF and independent of clientRxCoverage. SINGLE FLAG, BOTH PROCESSES: it gates the ingest write path and GET /api/nodes/{pubkey}/declared-regions (404 when off), which serves reports without collector keys or positions. The clientRxCoverage.sources allowlist and observerBlacklist apply to this topic too. TRUST: requires a broker ACL binding meshcore/client/{pubkey}/regions to that publisher; target and regions are the collector's claim, never authoritative. Retention: retention.clientRegionsDays. Erasure: admin delete-client-rx also deletes the reports a key collected. See docs/client-regions.md.",
   "clientRxCoverage": { "enabled": false },
+  "moments": {
+    "enabled": false,
+    "backOnlineHours": 24,
+    "recordWindowHours": 24,
+    "recordMinKm": 5,
+    "busyWindowMinutes": 10,
+    "busyMinRelays": 20,
+    "maxPerMinute": 6,
+    "historySize": 50,
+    "display": {
+      "enabled": true,
+      "visibleCards": 3,
+      "dwellSeconds": 8,
+      "showNewNode": true,
+      "showBackOnline": true,
+      "showRecordLink": true,
+      "showBusiest": true
+    }
+  },
+  "_comment_moments": "Live \"Moments\" (#881): the server detects a few noteworthy events and broadcasts them on the WebSocket as {\"type\":\"moment\"}; GET /api/moments lists the newest. Default OFF: no detector runs, nothing is broadcast and /api/moments returns an empty list. Kinds: new_node (a repeater, room or sensor key first seen in retained history), back_online (a repeater heard again after at least backOnlineHours of silence; 24 = 2x the firmware's 12 h flood-advert default), record_link (a new longest confident direct neighbor link inside the rolling recordWindowHours, at least recordMinKm and at most neighborGraph.maxEdgeKm), busiest_repeater (most distinct non-advert relays in the last busyWindowMinutes, at least busyMinRelays). Detection runs on existing timers only (node delta every 15 s, neighbor-graph reload every 60 s, the relay recompute), never per packet. maxPerMinute is the global rate (burst 3) on top of fixed per-kind caps; historySize is how many moments /api/moments keeps (in memory, lost on restart). display (#969, optional) is the default of each viewer's Customize -> Display -> Live Moments settings, the same keys: enabled (Live starts with Moments), visibleCards 1-5, dwellSeconds 3-30, showNewNode/showBackOnline/showRecordLink/showBusiest; a viewer's own value and a ?moments= link still win, set only the keys you want to change, out-of-range numbers are clamped and wrong kinds ignored with a log line. Companions never appear; nodeBlacklist, observerBlacklist, hiddenNamePrefixes and the node-list geo_filter apply; positions are advertised GPS only. Ranges: backOnlineHours 1-720, recordWindowHours 1-168, recordMinKm 0.1-1000, busyWindowMinutes 1-1440, busyMinRelays 1-1000000, maxPerMinute 1-60, historySize 1-500; out-of-range values are clamped with a log line, 0 or missing takes the default.",
+  "kiosk": {
+    "tour": [],
+    "everySeconds": 60,
+    "theme": "dark",
+    "tiles": ["rate", "active", "records"],
+    "remountHours": 6,
+    "scale": "auto",
+    "safeInsetVmin": 3
+  },
+  "_comment_kiosk": "Operator preset for Live kiosk screens (#968), served on /api/config/client. It fills what a #/live?kiosk=1 link does not say: the link's own tour=, every= and theme= win, then this block, then the built-in default. It never turns kiosk on; only kiosk=1 in the link does. tour: area keys from `areas`, at most 12 (a link with an empty tour= is a static view). everySeconds: seconds per tour step, whole number 15-3600 (default 60). theme: dark, light or auto (default dark; auto keeps the screen's own theme). tiles: the big-number tiles shown, any of rate, active, records (default all; without active the screen makes no network-status or analytics/areas requests). remountHours: in-place remount interval for long-running screens, 1-24 (default 6). scale: the kiosk text and tile size, \"auto\" (default: by the screen's size) or one of 1, 1.25, 1.5, 2. safeInsetVmin: the margin kept clear at the screen edges for TV overscan, in % of the short side, 0-10 (default 3). A viewer can set both per browser in Customize > Display > Live kiosk, which wins in that browser. Keys are case-sensitive; a value out of range logs one warning and takes its default. Omit the block for the built-in defaults.",
   "_comment_clientRxCoverage": "Opt-in mobile client-RX coverage (corescope-rx companions publishing GPS-tagged receptions to meshcore/client/<pubkey>/packets). Default OFF: when disabled the ingestor writes no client_receptions, the /api/rx-coverage|rx-leaderboard|nodes/{pubkey}/rx-coverage endpoints 404, and the UI hides the Coverage dashboard + Reach overlay. Set enabled=true to turn it on. SINGLE FLAG, BOTH PROCESSES: the ingestor and server each parse this same config.json, so this one clientRxCoverage.enabled entry gates both the ingest write path and the read endpoints — set it once, not per-process. TRUST: the feature requires an ACL-capable broker binding meshcore/client/{pubkey}/packets to that publisher; without ACLs the companion GPS is spoofable (see docs/client-rx-coverage.md). Retention: see retention.clientRxDays. Companion app + setup: https://github.com/efiten/corescope-rx.",
+  "_comment_clientRxCoverage_sources": "OPTIONAL allow-list of mqttSources[].name entries that may contribute client RX coverage. Omitted or empty (the default) = every source is accepted, unchanged behaviour. Set it when this instance reads MORE THAN ONE broker and they do not all bind meshcore/client/<pubkey>/packets to the publisher holding that key: coverage is only as trustworthy as the weakest broker, so on a mixed deployment (one broker with per-device identity + one legacy username/password broker where many accounts may write meshcore/#) any account on the weak broker could otherwise inject coverage under any companion pubkey with any GPS position. Listing the trusted source names keeps the client namespace on those sources — a client message from any other source is dropped before any write (no client_receptions, no client_observers, no observer row), logged per source with throttling and a line cap. Matching is on the source name, trimmed and case-insensitive; a source with no name can never be listed. A name matching no configured source is logged once at startup. Example: \"clientRxCoverage\": { \"enabled\": true, \"sources\": [\"device-auth\"] }. See docs/client-rx-coverage.md.",
   "_comment_channelKeys": "Hex keys for decrypting channel messages. Key name = channel display name. public channel key is well-known.",
   "_comment_hashChannels": "Channel names whose keys are derived via SHA256. Key = SHA256(name)[:16]. Listed here so the ingestor can auto-derive keys.",
   "hashRegions": [
@@ -369,12 +682,15 @@
     "#eu"
   ],
   "_comment_hashRegions": "Region names for scope matching on transport-route packets. Key = SHA256('#name')[:16]. Add any region names used by nodes in your network.",
+  "_comment_hashRegionsPath": "OPTIONAL path to an external JSON file holding region names as a plain array, e.g. [\"dk\", \"dk-aarhus\"] (issue #360). Omitted or empty (the default) = inline hashRegions only, exactly as before; there is no auto-discovered default file. When set, the effective set is the UNION of the inline hashRegions list above and the file, normalized the same way ('#' prefix added, whitespace trimmed, blank entries dropped) and deduplicated after normalization. Set it when the region list is large and machine-maintained: a real deployment carries ~1100 names, which is a third of config.json once hashChannels and areas are counted, and moving it out makes the rest reviewable. SINGLE KEY, BOTH PROCESSES: the ingestor (which derives one HMAC key per region) and the server (which reports unknown scopes in Observer Neighbors and unusedRegions in /api/scope-stats) read it through the same loader, so they cannot disagree about which scopes are configured. A RELATIVE path resolves against the directory holding THIS config.json, never the process working directory, so both processes find the same file. Env override: HASH_REGIONS_PATH, which wins over this key. If the path is set but the file is missing or not a JSON array of strings, the error is logged and the inline hashRegions list is used; on the ingestor's SIGHUP reload the previous keys are kept instead. A SIGHUP re-reads the file, so adding a region needs no restart. Names are case-sensitive: \"#dk\" and \"#DK\" are different scopes with different keys.",
   "_comment_defaultRegion": "IATA code shown by default in region filters.",
   "_comment_mapDefaults": "Initial map center [lat, lon] and zoom level.",
   "_comment_regions": "IATA code → display name mapping for the region filter UI. Each key is a 3-letter IATA code that an observer is tagged with (resolved priority: MQTT payload `region` field > topic-derived region > mqttSources.region). Observers without an IATA tag will not appear under any region filter — only under 'All Regions'. The region filter dropdown shows one entry per code listed here PLUS any extra IATA codes the server discovers from observers at runtime (so you can omit codes here and they will still be selectable, just labelled with the bare IATA code instead of a friendly name). Selecting 'All Regions' (or no region) returns results from every observer including those with no IATA tag; selecting one or more codes restricts results to packets observed by observers tagged with those codes. The reserved value 'All' (case-insensitive) is treated as 'no filter' on the server, so the URL ?region=All behaves identically to omitting the param. Issue #770.",
 
   "analytics": {
     "defaultIntervalSeconds": 300,
+    "pauseWhenIdle": false,
+    "_comment_pauseWhenIdle": "Issue #492. Opt-in, default false (every analytics snapshot is recomputed on its interval whether read or not). When true, a scheduled recompute is skipped if nothing read that endpoint's default snapshot since the previous recompute, so an instance whose analytics pages are rarely open stops recomputing and allocating for them. Freshness trade-off: the first read after a pause is served the existing snapshot at once — it can be much older than the interval — and wakes one refresh; reads after that see fresh data. While pauseWhenIdle is on, responses served from a snapshot carry X-Analytics-Snapshot (current|stale) and X-Analytics-Snapshot-Age-Seconds, so a stale snapshot is never presented as freshly computed. Startup load, warm-up gates and failed recomputes are unaffected: a recomputer only pauses after a successful pass that started once the startup load finished.",
     "recomputeIntervalSeconds": {
       "topology": 300,
       "rf": 300,
@@ -384,7 +700,8 @@
       "hashSizes": 300,
       "roles": 300,
       "observersClockSkew": 300,
-      "nodesClockSkew": 300
+      "nodesClockSkew": 300,
+      "advertIntervals": 300
     },
     "loraPreset": {
       "freq": 869600000,
@@ -394,7 +711,7 @@
       "_comment_": "Issue #1768. LoRa PHY preset assumed by the Relay Airtime Share metric to compute true Time-on-Air. Share numbers are only meaningful relative to one preset, so operators MUST set this to match their mesh — freq is informational (surfaces in the chart caption) and does not affect ToA; bw is bandwidth in kHz (e.g. 62.5, 125, 250); sf is spreading factor (6..12); cr is the denominator of the 4/N coding rate (5 ⇒ 4/5 … 8 ⇒ 4/8). Defaults reproduce the typical EU MeshCore deployment 869.6 MHz / BW 62.5 kHz / SF 8 / CR 4/5. CRC=1, IH=0, DE (T_sym ≥ 16 ms), and preamble (32 for SF≤8, 16 otherwise, per firmware preambleLengthForSF) are firmware-fixed and intentionally not exposed as config."
     }
   },
-  "_comment_analytics": "Issue #1240 + #1256 + #1265. Each analytics endpoint (topology, rf, distance, channels, hashCollisions, hashSizes, roles, observersClockSkew, nodesClockSkew) is recomputed in the background on the configured interval and served from an atomic-pointer cache. Reads never block on compute. Default 300s (5 min) per endpoint reflects the operator principle: serving slightly stale data quickly beats real-time data slowly. Lower values = fresher data at higher CPU cost. Only the default query (no region/window) is precomputed; region- and window-filtered requests fall back to the legacy on-request compute + 60s TTL cache.",
+  "_comment_analytics": "Issue #1240 + #1256 + #1265. Each analytics endpoint (topology, rf, distance, channels, hashCollisions, hashSizes, roles, observersClockSkew, nodesClockSkew, advertIntervals) is recomputed in the background on the configured interval and served from an atomic-pointer cache. Reads never block on compute. Default 300s (5 min) per endpoint reflects the operator principle: serving slightly stale data quickly beats real-time data slowly. Lower values = fresher data at higher CPU cost. Only the default query (no region/window) is precomputed; region- and window-filtered requests fall back to the legacy on-request compute + 60s TTL cache.",
   "customizer": {
     "disabledTabs": [],
     "_comment_disabledTabs": "Issue #1508. List of customizer-modal tab ids to hide from end users. Useful when operators want to expose only daily-use viewer controls and keep one-shot admin chrome out of the way. Recognized ids: branding, theme, nodes, home, display, geofilter, export. Example: [\"branding\", \"geofilter\", \"export\"] hides the admin tabs and leaves theme/colors/home/display visible. Default [] keeps the legacy behavior (all tabs visible). Operators edit this in config.json directly — there is no in-app UI for this list (by design)."

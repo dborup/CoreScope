@@ -194,12 +194,16 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     assert(result.count === 1500, 'count: ' + result.count);
   });
 
-  await step('cacheMessages / getCachedMessages roundtrip', async () => {
+  await step('setCache / getCache roundtrip under channelCacheKey()', async () => {
     const out = await page.evaluate(() => {
-      window.ChannelDecrypt.cacheMessages('hash42', [{ a: 1 }, { a: 2 }]);
-      return window.ChannelDecrypt.getCachedMessages('hash42');
+      const key = window.ChannelDecrypt.channelCacheKey('hash42', 'SJC');
+      window.ChannelDecrypt.setCache(key, [{ a: 1 }, { a: 2 }], 'ts', 2);
+      const entry = window.ChannelDecrypt.getCache(key);
+      return { key: key, messages: entry && entry.messages, bareName: window.ChannelDecrypt.getCache('hash42') };
     });
-    assert(Array.isArray(out) && out.length === 2, 'cache roundtrip failed: ' + JSON.stringify(out));
+    assert(out.key === 'hash42|SJC', 'channelCacheKey: ' + out.key);
+    assert(Array.isArray(out.messages) && out.messages.length === 2, 'cache roundtrip failed: ' + JSON.stringify(out));
+    assert(out.bareName === null, 'nothing is cached under the bare channel name: ' + JSON.stringify(out.bareName));
   });
 
   await step('buildKeyMap indexes stored keys by computed hash byte', async () => {

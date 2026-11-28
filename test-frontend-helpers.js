@@ -104,6 +104,51 @@ function loadInCtx(ctx, file) {
 }
 
 // ===== APP.JS TESTS =====
+console.log('\n=== app.js: column resize handle positioning (#596) ===');
+{
+  function resizeFixture(positions, saved) {
+    const ctx = makeSandbox();
+    loadInCtx(ctx, 'public/roles.js');
+    loadInCtx(ctx, 'public/app.js');
+    const ths = positions.map(position => ({
+      style: { position: '' }, dataset: {}, scrollWidth: 80,
+      computedPosition: position, children: [],
+      appendChild(handle) { this.children.push(handle); },
+    }));
+    const table = {
+      style: {}, dataset: {}, parentElement: { clientWidth: 400 },
+      querySelector: sel => sel === 'thead' ? { querySelectorAll: () => ths } : null,
+      querySelectorAll: () => ths,
+    };
+    ctx.document.querySelector = () => table;
+    ctx.document.createElement = () => ({ addEventListener: () => {} });
+    ctx.getComputedStyle = th => ({ position: th.style.position || th.computedPosition });
+    if (saved) ctx.localStorage.setItem('column-widths', JSON.stringify(ths.map(() => 100 / ths.length)));
+    return { ctx, table, ths };
+  }
+
+  for (const saved of [false, true]) {
+    test('static headers anchor handles with ' + (saved ? 'saved' : 'measured') + ' widths', () => {
+      const { ctx, table, ths } = resizeFixture(['static', 'static', 'static'], saved);
+      ctx.makeColumnsResizable('#table', 'column-widths');
+      assert.strictEqual(ths[0].style.position, 'relative', 'first handle needs its own header as containing block');
+      assert.strictEqual(ths[1].style.position, 'relative', 'each handle needs its own containing block');
+      assert.strictEqual(ths[2].style.position, '', 'last header has no handle and needs no change');
+      delete table.dataset.resizable;
+      ctx.makeColumnsResizable('#table', 'column-widths');
+      assert.strictEqual(ths[0].style.position, 'relative');
+    });
+
+    test('already positioned headers are preserved with ' + (saved ? 'saved' : 'measured') + ' widths', () => {
+      const { ctx, ths } = resizeFixture(['sticky', 'relative', 'absolute', 'fixed', 'static'], saved);
+      ctx.makeColumnsResizable('#table', 'column-widths');
+      assert.deepStrictEqual(ths.map(th => th.style.position), ['', '', '', '', ''],
+        'computed CSS positioning must not be overridden by an inline style');
+      assert.deepStrictEqual(ths.map(th => th.children.length), [1, 1, 1, 1, 0]);
+    });
+  }
+}
+
 console.log('\n=== app.js: timeAgo ===');
 {
   const ctx = makeSandbox();
@@ -134,6 +179,20 @@ console.log('\n=== app.js: timeAgo ===');
   test('future timestamp returns in-format', () => {
     const d = new Date(Date.now() + 120000).toISOString();
     assert.strictEqual(timeAgo(d), 'in 2m');
+  });
+}
+
+console.log('\n=== app.js: CLIENT_TTL (#384) ===');
+{
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/app.js');
+  const ttl = vm.runInContext('CLIENT_TTL', ctx);
+  // home.js says My Mesh's cadence (nodeHealth) is cached as long as node
+  // detail's advertRoutes estimate (nodeDetail), so the two views agree.
+  test('nodeHealth default TTL matches nodeDetail (240 s)', () => {
+    assert.strictEqual(ttl.nodeHealth, 240000);
+    assert.strictEqual(ttl.nodeHealth, ttl.nodeDetail);
   });
 }
 
@@ -518,6 +577,38 @@ console.log('\n=== nodes.js: getStatusTooltip / getStatusInfo (extracted) ===');
       }, '#16a34a');
       assert.ok(html.includes('room'));
       assert.ok(!html.includes('variable hash size'));
+    });
+    // #353: a node advertising a 1-byte path hash gets a warning badge.
+    const nodeWithHash = (hash_size) => ({
+      role: 'repeater', public_key: 'abcdef1234567890', hash_size,
+      last_heard: new Date().toISOString()
+    });
+    test('renderNodeBadges adds the 1-byte path hash recommendation badge (#353)', () => {
+      for (const size of [1, '1']) {
+        const html = ex.renderNodeBadges(nodeWithHash(size), '#dc2626');
+        assert.match(html, /class="badge node-path-hash-badge node-path-hash-badge--warn path-hash-warn"/);
+        assert.match(html, /#ph-warning/);
+        // #353 round 3: the standalone badge shows the recommendation as its
+        // visible label (no duplicate sr-only clause); amber, not red.
+        assert.match(html, />Recommended: 2- or 3-byte path hash<\/span>/);
+        assert.ok(!/Warning: /.test(html), 'must not read as an error');
+        assert.match(html, /title="Recommended: [^"]*2- or 3-byte[^"]*path\.hash\.mode/);
+        assert.ok(!html.includes('multibyte-badge'), '1-byte must not claim Multibyte');
+      }
+    });
+    test('renderNodeBadges adds no path hash warning for 2/3-byte nodes (#353)', () => {
+      for (const size of [2, 3]) {
+        const html = ex.renderNodeBadges(nodeWithHash(size), '#dc2626');
+        assert.ok(!html.includes('node-path-hash-badge'), size + '-byte got the warning badge');
+        assert.ok(!html.includes('path-hash-warn'), size + '-byte got the warn class');
+        assert.ok(html.includes('multibyte-badge'), size + '-byte lost the Multibyte badge');
+      }
+    });
+    test('renderNodeBadges adds no path hash warning when hash_size is missing/invalid (#353)', () => {
+      for (const size of [null, undefined, 0, 4]) {
+        const html = ex.renderNodeBadges(nodeWithHash(size), '#dc2626');
+        assert.ok(!html.includes('node-path-hash-badge'), 'for ' + size);
+      }
     });
     test('renderNodeBadges handles string hash_sizes_seen gracefully', () => {
       const html = ex.renderNodeBadges({
@@ -1667,6 +1758,53 @@ console.log('\n=== live.js: pruneStaleNodes ===');
     assert.strictEqual(activity['existingNode'], 2, 'existing node activity preserved');
     assert.ok(!activity['ghostNode'], 'orphaned activity entry removed');
   });
+
+  // #901: the Live node popup takes its health from the shared last-heard
+  // evidence, not from last_seen alone.
+  const H = 3600000;
+  const agoIso = h => new Date(Date.now() - h * H).toISOString();
+  function popupHealth(n, stats) {
+    const { ctx } = makeLiveSandbox();
+    const fn = ctx.window._liveNodeHealthView;
+    assert.ok(fn, '_liveNodeHealthView must be exposed');
+    return { view: fn(n, stats), ctx };
+  }
+
+  test('live popup health: stats.lastHeard newer than last_seen wins', () => {
+    const n = { role: 'repeater', last_seen: agoIso(100) };
+    const stats = { lastHeard: agoIso(2) };
+    const { view, ctx } = popupHealth(n, stats);
+    assert.strictEqual(view.status, 'healthy');
+    assert.strictEqual(view.status, ctx.getHealthStatus(n.role, ctx.getHealthLastHeard(n, stats)));
+    assert.strictEqual(view.heardAt, stats.lastHeard, 'last heard shown is the timestamp the status uses');
+    assert.strictEqual(view.label, 'Online');
+  });
+
+  test('live popup health: explicit lastHeard null is unknown, not last_seen', () => {
+    const n = { role: 'repeater', last_seen: agoIso(1), last_heard: agoIso(1) };
+    const { view } = popupHealth(n, { lastHeard: null });
+    assert.strictEqual(view.status, null);
+    assert.strictEqual(view.heardAt, null);
+    assert.strictEqual(view.label, 'Unknown', 'labelled Unknown like Favorites, never Offline');
+    // Shared convention: Favorites paints null status-err, My Mesh and
+    // Analytics count it as silent, so the popup uses its silent (red) class.
+    const silent = popupHealth({ role: 'repeater', last_seen: agoIso(100) }, null).view;
+    assert.strictEqual(view.dotClass, 'health-red');
+    assert.strictEqual(view.dotClass, silent.dotClass, 'null status paints like silent');
+  });
+
+  test('live popup health: missing stats falls back to last_heard then last_seen', () => {
+    let r = popupHealth({ role: 'repeater', last_seen: agoIso(100), last_heard: agoIso(2) }, undefined).view;
+    assert.strictEqual(r.status, 'healthy');
+    r = popupHealth({ role: 'repeater', last_seen: agoIso(30) }, {}).view;
+    assert.strictEqual(r.status, 'degraded');
+    assert.strictEqual(r.label, 'Degraded');
+    assert.strictEqual(r.dotClass, 'health-yellow');
+    r = popupHealth({ role: 'repeater', last_seen: agoIso(100) }, null).view;
+    assert.strictEqual(r.status, 'silent');
+    assert.strictEqual(r.label, 'Offline');
+    assert.strictEqual(r.dotClass, 'health-red');
+  });
 }
 
 // ===== live.js: vcrFormatTime respects UTC/local setting =====
@@ -1818,6 +1956,7 @@ console.log('\n=== nodes.js: WS handler runtime behavior ===');
           style: {}, dataset: {},
           classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
           addEventListener() {},
+          contains() { return false; }, // nodes.js renderRows() asks tbody.contains(document.activeElement) (#1616)
           querySelectorAll() { return []; },
           querySelector() { return null; },
           getAttribute() { return null; },
@@ -2189,7 +2328,7 @@ console.log('\n=== compare.js: comparePacketSets ===');
       pktRight: { addEventListener() {}, classList: { add() {}, remove() {}, contains() { return false; } }, innerHTML: '' },
     };
     ctx.document.getElementById = (id) => {
-      if (id === 'fTimeWindow') return null; // Simulate first fetch before filter controls are rendered
+      if (id === 'fTimeWindow') return staleControlValue === undefined ? null : { value: staleControlValue, addEventListener() {} }; // Simulate first fetch before filter controls are rendered
       return dom[id] || null;
     };
     ctx.document.addEventListener = () => {};
@@ -2236,6 +2375,85 @@ console.log('\n=== app.js: computeBreakdownRanges ===');
   loadInCtx(ctx, 'public/roles.js');
   loadInCtx(ctx, 'public/app.js');
   const computeBreakdownRanges = ctx.computeBreakdownRanges;
+
+  test('senderPathHashSize reads 0-hop flood width but not direct marker', () => {
+    assert.strictEqual(ctx.senderPathHashSize('1540DEADBEEF'), 2);
+    assert.strictEqual(ctx.senderPathHashSize('1580DEADBEEF'), 3);
+    assert.strictEqual(ctx.senderPathHashSize('1600DEADBEEF'), null);
+    // #322 (1): the direct zero-hop marker is also valid on TRANSPORT_DIRECT
+    // (route 3), where the path byte sits at offset 5 behind the transport
+    // codes. Header 0x17 = route 3, 4 transport bytes (aabbccdd), path byte
+    // 0x00. The shared width helper must treat route 3 like route 2 → null,
+    // killing the `(route === 2 || route === 3)` → `(route === 2)` mutant here.
+    assert.strictEqual(ctx.senderPathHashSize('17aabbccdd00DEADBEEF'), null);
+    assert.strictEqual(ctx.senderPathHashSize('141122334440DEADBEEF'), 2);
+    assert.strictEqual(ctx.senderPathHashSize('2540DEADBEEF'), null);
+    assert.strictEqual(ctx.senderPathHashSize('15C0DEADBEEF'), null);
+    assert.strictEqual(ctx.senderPathHashSize('15'), null);
+  });
+
+  // #594 (port of upstream Kpa-clawbot/CoreScope#2234): path_length follows
+  // the 4 transport-code bytes on routes 0/3 (firmware docs/packet_format.md;
+  // src/Packet.cpp Packet::readFrom, src/Packet.h hasTransportCodes()). One
+  // golden frame per route type; each transport frame's first code byte
+  // differs from its path byte, so reading offset 1 returns the wrong byte.
+  test('rawPathLenByte reads path_length at the offset the header route implies', () => {
+    assert.strictEqual(ctx.rawPathLenByte('10AABBCCDD41EEDEADBEEF'), 0x41); // route 0, offset 5
+    assert.strictEqual(ctx.rawPathLenByte('1141EEDEADBEEF'), 0x41); // route 1, offset 1
+    assert.strictEqual(ctx.rawPathLenByte('1200DEADBEEF'), 0x00); // route 2, offset 1
+    assert.strictEqual(ctx.rawPathLenByte('13AABBCCDD00DEADBEEF'), 0x00); // route 3, offset 5
+    assert.strictEqual(ctx.rawPathLenByte('13aabbccdd80deadbeef'), 0x80);
+    assert.strictEqual(ctx.rawPathLenByte('13AABBCCDD'), null);
+    assert.strictEqual(ctx.rawPathLenByte('11ZZ'), null);
+    assert.strictEqual(ctx.rawPathLenByte('11'), null);
+    assert.strictEqual(ctx.rawPathLenByte(''), null);
+    assert.strictEqual(ctx.rawPathLenByte(null), null);
+  });
+
+  test('rawPayloadOffset skips header, transport codes and hash_count x hash_size path bytes', () => {
+    // route 0: header + 4 codes + path_len 0x41 (one 2-byte hop) → payload at 8.
+    assert.strictEqual(ctx.rawPayloadOffset('10AABBCCDD41EEFF' + '42'), 8);
+    // route 1: path_len 0x02 (two 1-byte hops) → payload at 4.
+    assert.strictEqual(ctx.rawPayloadOffset('1102AABB' + '42'), 4);
+    // route 2: zero hops → payload at 2.
+    assert.strictEqual(ctx.rawPayloadOffset('1200' + '42'), 2);
+    // route 3: path_len 0x82 (two 3-byte hops) → payload at 6 + 6 = 12.
+    assert.strictEqual(ctx.rawPayloadOffset('13AABBCCDD82' + '111111222222' + '42'), 12);
+    // Firmware Packet::isValidPathLen: hash size 4 is reserved, path at most
+    // MAX_PATH_SIZE (64) bytes; Packet::readFrom needs a payload byte.
+    assert.strictEqual(ctx.rawPayloadOffset('11C1AABBCCDD42'), null);
+    assert.strictEqual(ctx.rawPayloadOffset('1160' + 'AA'.repeat(64) + '42'), 66); // 32 x 2 = 64 bytes
+    assert.strictEqual(ctx.rawPayloadOffset('1161' + 'AA'.repeat(66) + '42'), null); // 33 x 2 = 66 bytes
+    assert.strictEqual(ctx.rawPayloadOffset('1102AABB'), null);
+    assert.strictEqual(ctx.rawPayloadOffset('13AABBCCDD'), null);
+    assert.strictEqual(ctx.rawPayloadOffset(undefined), null);
+  });
+
+  // #608: the ONE place rawPathLenByte/rawPayloadOffset/senderPathHashSize
+  // derive a frame's route from its own header byte, instead of each
+  // re-deriving `parseInt(...) & 0x03` separately (follow-up on #600, N6).
+  test('routeTypeFromRawHex reads the low 2 header bits, independent of payload type', () => {
+    assert.strictEqual(ctx.routeTypeFromRawHex('10AABB'), 0); // TRANSPORT_FLOOD
+    assert.strictEqual(ctx.routeTypeFromRawHex('11AABB'), 1); // FLOOD
+    assert.strictEqual(ctx.routeTypeFromRawHex('12AABB'), 2); // DIRECT
+    assert.strictEqual(ctx.routeTypeFromRawHex('13AABB'), 3); // TRANSPORT_DIRECT
+    assert.strictEqual(ctx.routeTypeFromRawHex('FD'), 1); // high payload-type bits ignored
+    assert.strictEqual(ctx.routeTypeFromRawHex('1'), null); // too short
+    assert.strictEqual(ctx.routeTypeFromRawHex('ZZ'), null); // not hex
+    assert.strictEqual(ctx.routeTypeFromRawHex(''), null);
+    assert.strictEqual(ctx.routeTypeFromRawHex(null), null);
+  });
+
+  // #608: firmware Packet::readFrom also rejects payload_len >
+  // MAX_PACKET_PAYLOAD (184) -- rawPayloadOffset's doc comment used to claim
+  // full parity with readFrom without actually enforcing this cap.
+  test('rawPayloadOffset rejects a payload over MAX_PACKET_PAYLOAD (184 bytes)', () => {
+    // route 1, zero hops (path_len 0x00): payload starts at offset 2.
+    const okPayload = 'AA'.repeat(184); // exactly 184 bytes: still accepted
+    assert.strictEqual(ctx.rawPayloadOffset('1100' + okPayload), 2);
+    const tooLong = 'AA'.repeat(185); // 185 bytes: over the cap
+    assert.strictEqual(ctx.rawPayloadOffset('1100' + tooLong), null);
+  });
 
   function findRange(ranges, label) {
     return ranges.find(r => r.label === label);
@@ -2367,6 +2585,23 @@ console.log('\n=== app.js: isTransportRoute + transportBadge ===');
   test('isTransportRoute(null) is false', () => assert.strictEqual(isTransportRoute(null), false));
   test('isTransportRoute(undefined) is false', () => assert.strictEqual(isTransportRoute(undefined), false));
 
+  test('transportBadge keeps scope case through CSS (#458 F1)', () => {
+    const fs = require('fs');
+    const css = fs.readFileSync(__dirname + '/public/style.css', 'utf8');
+    const html = transportBadge(0, '#dk-oj');
+    assert(html.includes('T·#dk-oj'), 'label keeps case in markup: ' + html);
+    const classes = html.match(/class="([^"]+)"/)[1].split(/\s+/);
+    // Effective text-transform: last matching declaration wins (single-class selectors).
+    let eff = 'none';
+    const re = /([^{}]+)\{([^}]*)\}/g; let m;
+    while ((m = re.exec(css))) {
+      const sels = m[1].replace(/\/\*[\s\S]*?\*\//g, '').split(',').map(x => x.trim());
+      const hit = sels.some(s => /^\.[\w-]+$/.test(s) && classes.includes(s.slice(1)));
+      const t = hit && m[2].match(/text-transform:\s*([a-z-]+)/);
+      if (t) eff = t[1];
+    }
+    assert.notStrictEqual(eff, 'uppercase', 'transport badge would render uppercased (' + classes.join(' ') + ')');
+  });
   test('transportBadge(0) contains badge-transport class', () => {
     const html = transportBadge(0);
     assert.ok(html.includes('badge-transport'), 'should contain badge-transport class');
@@ -2500,9 +2735,11 @@ console.log('\n=== analytics.js: sortChannels ===');
       { name: 'B', hash: 1, messages: 1, senders: 1, lastActivity: '', encrypted: false },
       { name: null, hash: 2, messages: 2, senders: 2, lastActivity: '', encrypted: false },
     ];
-    const r = sortChannels(data, 'name', 'asc');
-    assert.strictEqual(r[0].name, null);
-    assert.strictEqual(r[1].name, 'B');
+    for (const dir of ['asc', 'desc']) {
+      const r = sortChannels(data, 'name', dir);
+      assert.strictEqual(r[0].name, 'B');
+      assert.strictEqual(r[1].name, null);
+    }
   });
 
   test('sort handles missing lastActivity', () => {
@@ -2936,8 +3173,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3058,8 +3294,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3153,8 +3388,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3251,8 +3485,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3345,8 +3578,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3441,8 +3673,9 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
 // ===== PACKETS.JS: savedTimeWindowMin default guard =====
 console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
 {
-  async function captureInitialPacketsRequest(storageValue, innerWidth) {
+  async function captureInitialPacketsRequest(storageValue, innerWidth, urlQuery, staleControlValue) {
     const ctx = makeSandbox();
+    if (urlQuery) ctx.location.hash = '#/packets?' + urlQuery;
     const apiCalls = [];
     if (storageValue !== undefined) ctx.localStorage.setItem('meshcore-time-window', storageValue);
     ctx.window.localStorage = ctx.localStorage;
@@ -3451,7 +3684,7 @@ console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
       pktRight: { addEventListener() {}, classList: { add() {}, remove() {}, contains() { return false; } }, innerHTML: '' },
     };
     ctx.document.getElementById = (id) => {
-      if (id === 'fTimeWindow') return null;
+      if (id === 'fTimeWindow') return staleControlValue === undefined ? null : { value: staleControlValue, addEventListener() {} };
       return dom[id] || null;
     };
     ctx.document.addEventListener = () => {};
@@ -3493,12 +3726,56 @@ console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
     assert.ok(deltaMin > 10 && deltaMin < 25, `expected default ~15m window, got ${deltaMin.toFixed(2)}m`);
   });
 
-  test('savedTimeWindowMin defaults to 15 when localStorage returns "0"', async () => {
+  test('desktop: saved "0" is All time, so the request has no since (#559)', async () => {
     const r = await captureInitialPacketsRequest('0', 1366);
+    assert.strictEqual(r.params.get('since'), null, 'All time must not send since');
+    assert.strictEqual(r.params.get('limit'), '50000');
+  });
+
+  test('desktop: a not-yet-initialised dropdown (still 15) does not override saved All time (#559)', async () => {
+    const r = await captureInitialPacketsRequest('0', 1366, undefined, '15');
+    assert.strictEqual(r.params.get('since'), null);
+  });
+
+  test('desktop: empty saved value keeps the 15 minute default (#559)', async () => {
+    const r = await captureInitialPacketsRequest('', 1366);
     const since = r.params.get('since');
-    assert.ok(since, 'initial packets request should include since parameter');
+    assert.ok(since, 'an empty saved value must not become All time');
     const deltaMin = (Date.now() - Date.parse(since)) / 60000;
     assert.ok(deltaMin > 10 && deltaMin < 25, `expected default ~15m window, got ${deltaMin.toFixed(2)}m`);
+  });
+
+  test('desktop: ?timeWindow=0 in the link is All time (#559)', async () => {
+    const r = await captureInitialPacketsRequest('60', 1366, 'timeWindow=0');
+    assert.strictEqual(r.params.get('since'), null);
+  });
+
+  test('desktop: empty or invalid ?timeWindow= gives the 15 minute default, never All time (#559)', async () => {
+    for (const q of ['timeWindow=', 'timeWindow=abc', 'timeWindow=-5']) {
+      for (const saved of ['60', undefined]) {
+        const r = await captureInitialPacketsRequest(saved, 1366, q);
+        const since = r.params.get('since');
+        assert.ok(since, q + ' must not become All time');
+        const deltaMin = (Date.now() - Date.parse(since)) / 60000;
+        assert.ok(deltaMin > 10 && deltaMin < 25, `${q}: expected default ~15m, got ${deltaMin.toFixed(2)}m`);
+      }
+    }
+  });
+
+  test('desktop: no ?timeWindow= keeps the saved window (#559)', async () => {
+    const r = await captureInitialPacketsRequest('60', 1366, 'region=SJC');
+    const deltaMin = (Date.now() - Date.parse(r.params.get('since'))) / 60000;
+    assert.ok(deltaMin > 45 && deltaMin < 75, `expected saved ~60m, got ${deltaMin.toFixed(2)}m`);
+  });
+
+  test('mobile: ?timeWindow=0 and oversized link windows obey the mobile cap (#559)', async () => {
+    for (const q of ['timeWindow=0', 'timeWindow=1440']) {
+      const r = await captureInitialPacketsRequest('60', 375, q);
+      const since = r.params.get('since');
+      assert.ok(since, q + ' must not be All time on mobile');
+      const deltaMin = (Date.now() - Date.parse(since)) / 60000;
+      assert.ok(deltaMin > 10 && deltaMin < 25, `${q}: expected capped ~15m, got ${deltaMin.toFixed(2)}m`);
+    }
   });
 
   test('savedTimeWindowMin preserves valid value (60)', async () => {
@@ -3605,6 +3882,165 @@ console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
   test('handles null/empty decoded_json gracefully', () => {
     const result = filterMyNodes(testPackets, ['abc123']);
     assert.strictEqual(result.length, 2);
+  });
+}
+
+// ===== Packets page: observer filter in grouped mode (issue #1748) =====
+{
+  console.log('\n--- Observer filter — grouped vs. flat mode (#1748) ---');
+
+  // Load the REAL applyObserverFilter from packets.js via sandbox, rather
+  // than testing a hand-copied reimplementation of its logic. Per #1748 PR
+  // review (kent-beck): a test that only checks a copy doesn't fail if the
+  // actual production function regresses. Mirrors the same loadInCtx
+  // pattern used below for _calcVisibleRange.
+  const obsFilterCtx = makeSandbox();
+  obsFilterCtx.registerPage = (name, handlers) => {};
+  obsFilterCtx.onWS = () => {};
+  obsFilterCtx.offWS = () => {};
+  obsFilterCtx.api = () => Promise.resolve({});
+  obsFilterCtx.window.getParsedPath = () => [];
+  obsFilterCtx.window.getParsedDecoded = () => ({});
+  loadInCtx(obsFilterCtx, 'public/packets.js');
+  const applyObserverFilter = obsFilterCtx.window._packetsTestAPI.applyObserverFilter;
+
+  // A transmission the server correctly returned for observer "B" (it was
+  // one of several observers of this hash) but whose displayed
+  // "representative" observer is "A" (longest path) — exactly the shape
+  // QueryGroupedPackets returns. `_children` is undefined, matching the
+  // state on initial load (only fetched lazily on expand/obs-sort-change).
+  const groupedRowRepresentativeNotFiltered = {
+    hash: 'hash1', observer_id: 'A', observer_count: 3, _children: undefined,
+  };
+  // A single-observer transmission whose only observer is NOT in the filter —
+  // must still be excluded (it genuinely wasn't observed by the filtered
+  // observer; the server wouldn't have returned it in the first place, but
+  // the client function must not accidentally let everything through).
+  const groupedRowGenuinelyExcludedByServer = {
+    hash: 'hash2', observer_id: 'C', observer_count: 1, _children: undefined,
+  };
+  // A flat/expanded-mode row: single observation, own observer_id.
+  const flatRowMatching = { hash: 'hash3', observer_id: 'B' };
+  const flatRowNonMatching = { hash: 'hash4', observer_id: 'A' };
+  // A flat/expanded-mode row with already-loaded children, only one of
+  // which matches — the pre-existing children-aware fallback path.
+  const flatRowWithMatchingChild = {
+    hash: 'hash5', observer_id: 'A',
+    _children: [{ observer_id: 'A' }, { observer_id: 'B' }],
+  };
+
+  // --- #1900: the VCR replay mapping must carry observer_id ---
+  // Same rationale as applyObserverFilter above: exercise the real
+  // production mapping. Dropping observer_id here previously passed every
+  // test in the suite, because the only coverage lived in
+  // test-live-region-filter.js and only reached live.js's half of the fix.
+  const buildReplayPackets = obsFilterCtx.window._packetsTestAPI.buildReplayPackets;
+  const replayCtx = {
+    typeName: 'ADVERT', decoded: { t: 1 }, pathHops: ['AA'],
+    obsName: (id) => 'Name of ' + id,
+  };
+
+  test('#1900 replay carries observer_id for a single-observation packet', () => {
+    const out = buildReplayPackets(
+      { id: 5, hash: 'h5', raw_hex: 'CAFE', timestamp: '2026-01-01T00:00:00Z', observer_id: 'obs1', observer_iata: 'BRU' },
+      { observations: [{ id: 9 }] }, replayCtx);
+    assert.strictEqual(out.length, 1);
+    assert.strictEqual(out[0].observer_id, 'obs1', 'the Live region filter matches on observer_id');
+    assert.strictEqual(out[0].observer_iata, 'BRU');
+    assert.strictEqual(out[0].observer, 'Name of obs1', 'the resolved name is still carried too');
+  });
+
+  test('#1900 replay carries observer_id for every observation of a multi-observer packet', () => {
+    const out = buildReplayPackets(
+      { id: 5, hash: 'h5', raw_hex: 'CAFE', timestamp: '2026-01-01T00:00:00Z', observer_id: 'obs1' },
+      { observations: [
+        { id: 1, observer_id: 'obsA', observer_iata: 'BRU', timestamp: '2026-01-01T00:00:00Z' },
+        { id: 2, observer_id: 'obsB', observer_iata: 'LAX', timestamp: '2026-01-01T00:00:01Z' },
+      ] }, replayCtx);
+    assert.strictEqual(out.length, 2, 'one replay packet per observation');
+    // deepEqual, not deepStrictEqual: the array comes from the vm sandbox's
+    // realm, so its prototype differs from this one and a STRICT deep compare
+    // fails on identical contents ("same structure but not reference-equal").
+    // The loose form compares across realms and is stronger than joining.
+    assert.deepEqual(out.map((p) => p.observer_id), ['obsA', 'obsB'],
+      'each observation must carry its OWN observer_id, not the transmission representative');
+    assert.deepEqual(out.map((p) => p.observer_iata), ['BRU', 'LAX']);
+  });
+
+  test('grouped mode: keeps a multi-observer row whose representative is not the filtered observer (#1748 core bug)', () => {
+    const result = applyObserverFilter([groupedRowRepresentativeNotFiltered], { observer: 'B' }, true, false);
+    assert.strictEqual(result.length, 1, 'server already guaranteed observer B saw this transmission');
+  });
+
+  test('grouped mode: does not need _children to keep a valid server-filtered row', () => {
+    // The defining regression: _children is undefined (not yet fetched),
+    // and observer_id (the representative) does not match — pre-fix this
+    // returned zero rows.
+    const result = applyObserverFilter([groupedRowRepresentativeNotFiltered], { observer: 'B' }, true, false);
+    assert.strictEqual(result.length, 1);
+  });
+
+  test('grouped mode: passes through rows unfiltered (server EXISTS filter is authoritative)', () => {
+    // The client no longer second-guesses the server in grouped mode at all —
+    // this row would never have been returned by the server if observer C
+    // weren't a match, so the client trusts it.
+    const result = applyObserverFilter([groupedRowGenuinelyExcludedByServer], { observer: 'B' }, true, false);
+    assert.strictEqual(result.length, 1, 'grouped mode does not re-filter; server already applied the correct filter');
+  });
+
+  test('flat mode: keeps a row whose own observer_id matches', () => {
+    const result = applyObserverFilter([flatRowMatching], { observer: 'B' }, false, false);
+    assert.strictEqual(result.length, 1);
+  });
+
+  test('flat mode: excludes a row whose own observer_id does not match and has no children', () => {
+    const result = applyObserverFilter([flatRowNonMatching], { observer: 'B' }, false, false);
+    assert.strictEqual(result.length, 0);
+  });
+
+  test('flat mode: falls back to matching children when representative does not match', () => {
+    const result = applyObserverFilter([flatRowWithMatchingChild], { observer: 'B' }, false, false);
+    assert.strictEqual(result.length, 1, 'observer B is among the already-loaded children');
+  });
+
+  // groupByHash MUST be false here: with it true the grouped early-return
+  // would return everything anyway, so the assertion would hold even with the
+  // hashOnly guard deleted and would pin nothing. Pinning a hash and then
+  // toggling "Group by Hash" off is a reachable state, and is exactly the
+  // case buildPacketsParams's hash short-circuit (which suppresses the
+  // `observer` param server-side) relies on.
+  test('hashOnly bypasses the observer filter entirely in FLAT mode (pinned-hash view)', () => {
+    const result = applyObserverFilter([flatRowNonMatching, { hash: 'hash6', observer_id: 'C' }], { observer: 'B' }, false, true);
+    assert.strictEqual(result.length, 2, 'hashOnly must return every row unfiltered, matching renderTableRows()');
+  });
+
+  // The children fallback coerces with String() because an observation's
+  // observer_id arrives as a number on some payloads while filters.observer is
+  // always a comma-joined string. A fixture with string ids only would make
+  // the coercion a no-op and let its removal go unnoticed.
+  test('flat mode: numeric child observer_id still matches the string filter', () => {
+    const numericChildRow = { hash: 'hash7', observer_id: 'A', _children: [{ observer_id: 7 }] };
+    const result = applyObserverFilter([numericChildRow], { observer: '7' }, false, false);
+    assert.strictEqual(result.length, 1, 'String(c.observer_id) must bridge a numeric child id to the string filter');
+  });
+
+  test('no observer filter set: all rows pass through unchanged', () => {
+    const result = applyObserverFilter([groupedRowGenuinelyExcludedByServer, flatRowNonMatching], {}, false, false);
+    assert.strictEqual(result.length, 2);
+  });
+
+  // The grouped early-return is only safe because changing the observer
+  // filter refetches from the server. If that handler ever stops calling
+  // loadPackets(), the filter silently becomes a no-op in grouped mode (the
+  // default view) until the next page load — the regression this pins.
+  test('the observer multi-select handler refetches instead of only re-rendering', () => {
+    const src = fs.readFileSync('public/packets.js', 'utf8');
+    const handler = src.slice(src.indexOf("obsMenu.addEventListener('change'"));
+    const body = handler.slice(0, handler.indexOf('\n    });'));
+    assert.ok(body.includes('loadPackets()'),
+      'observer filter changes must refetch from the server (grouped rows are server-filtered)');
+    assert.ok(!/\brenderTableRows\(\)/.test(body),
+      'a bare renderTableRows() would only re-filter the already-loaded page');
   });
 }
 
@@ -4087,7 +4523,7 @@ console.log('\n=== channels.js: formatHashHex (issue #465) ===');
   });
 
   test('packets array is trimmed to PACKET_LIMIT after WS update in flat mode', () => {
-    assert.ok(/packets = filtered\.concat\(packets\)[\s\S]{0,100}packets\.length = PACKET_LIMIT/.test(src),
+    assert.ok(/packets = accepted\.concat\(packets\)[\s\S]{0,100}packets\.length = PACKET_LIMIT/.test(src),
       'flat mode must truncate packets to PACKET_LIMIT after prepend');
   });
 
@@ -4487,6 +4923,109 @@ console.log('\n=== nodes.js: renderNodeTimestampHtml / renderNodeTimestampText =
     const ctx = makeNodesSandbox();
     const text = ctx.window._nodesRenderNodeTimestampText(null);
     assert.strictEqual(text, '—');
+  });
+}
+
+console.log('\n=== nodes.js: own advert freshness ===');
+{
+  test('advert timestamp ignores recent arbitrary health traffic and relay-touched last_seen', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const stale = new Date(Date.now() - 96 * 3600000).toISOString();
+    const recent = new Date().toISOString();
+    const n = { public_key: key, role: 'repeater', last_seen: stale, last_heard: stale };
+    const advert = { payload_type: 4, timestamp: stale, decoded_json: JSON.stringify({ pubKey: key }) };
+    const lastAdvert = ctx.window._nodesGetLastAdvert(n, { lastHeard: recent, lastAdvert: stale }, [advert]);
+    assert.strictEqual(lastAdvert, stale);
+    n._lastHeard = lastAdvert;
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(n).status, 'stale');
+  });
+  test('legacy API fallback uses only exact-owned adverts, never ACKs or another origin', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const old = new Date(Date.now() - 96 * 3600000).toISOString();
+    const recent = new Date().toISOString();
+    const adverts = [
+      { payload_type: 4, timestamp: old, decoded_json: JSON.stringify({ pubKey: key.toUpperCase() }) },
+      { payload_type: 4, timestamp: recent, decoded_json: JSON.stringify({ pubKey: 'bb' + '22'.repeat(31) }) },
+      { payload_type: 3, timestamp: recent, decoded_json: JSON.stringify({ pubKey: key }) },
+      { payload_type: 4, timestamp: recent, decoded_json: JSON.stringify({ pubKey: key, signatureValid: false }) },
+    ];
+    assert.strictEqual(ctx.window._nodesGetLastAdvert({ public_key: key, last_seen: recent }, { lastHeard: recent }, adverts), old);
+  });
+  test('explicit unknown advert is null, even if legacy packet evidence or last_seen is fresh', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const recent = new Date().toISOString();
+    assert.strictEqual(ctx.window._nodesGetLastAdvert({ public_key: key, last_seen: recent }, { lastAdvert: null, lastHeard: recent }, []), null);
+    assert.strictEqual(ctx.window._nodesGetLastAdvert({ public_key: key, last_seen: recent }, { lastHeard: recent }, []), null);
+  });
+  test('safe health activity outranks polluted directory timestamps without mutating the node', () => {
+    const ctx = makeNodesSandbox();
+    const old = new Date(Date.now() - 96 * 3600000).toISOString();
+    const recent = new Date().toISOString();
+    const node = { role: 'repeater', last_seen: recent, last_heard: recent, _liveSeen: Date.now() };
+    const safe = ctx.window._nodesWithHealthActivity(node, { lastAdvert: old, lastHeard: old }, []);
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(safe).status, 'stale');
+    assert.strictEqual(node.last_seen, recent);
+    const unknown = ctx.window._nodesWithHealthActivity(node, { lastAdvert: null, lastHeard: null }, []);
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(unknown).status, 'stale');
+  });
+  test('relay-only safe general activity is active but the advert timestamp remains unknown', () => {
+    const ctx = makeNodesSandbox();
+    const stats = { lastAdvert: null, lastHeard: new Date().toISOString() };
+    const node = { role: 'repeater' };
+    const safe = ctx.window._nodesWithHealthActivity(node, stats, []);
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(safe).status, 'active');
+    assert.strictEqual(ctx.window._nodesGetLastAdvert(node, stats, []), null);
+  });
+  // #848: a repeater quiet longer than the packet-store window. The server
+  // now sends its newest own ADVERT from the database (lastAdvertSource
+  // "db"); the node page must read it like any other advert, and its status
+  // must match the nodes list and map, which use the directory last_seen
+  // (here that same advert).
+  test('#848 advert from the database outside the window: status follows thresholds, list agrees', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const cases = [
+      // [hours ago, silent threshold h or null (default 72h), status, explanation]
+      [33, null, 'active', /^Last activity /],
+      [100, null, 'stale', /^No activity for 4d — repeaters typically advertise every 12-24h$/],
+      // getStatusInfo shows whole days from 24h on, so 33h reads "1d".
+      [33, 30, 'stale', /^No activity for 1d — repeaters typically advertise every 12-24h$/],
+    ];
+    for (const [hours, silentH, wantStatus, wantExpl] of cases) {
+      if (silentH) ctx.window.HEALTH_THRESHOLDS.infraSilentMs = silentH * 3600000;
+      else ctx.window.HEALTH_THRESHOLDS.infraSilentMs = 72 * 3600000;
+      const at = new Date(Date.now() - hours * 3600000 - 60000).toISOString();
+      const listNode = { public_key: key, role: 'repeater', last_seen: at, last_heard: at };
+      const stats = { lastAdvert: at, lastHeard: at, lastAdvertSource: 'db' };
+      const pageNode = ctx.window._nodesWithHealthActivity(listNode, stats, []);
+      const info = ctx.window._nodesGetStatusInfo(pageNode);
+      const label = hours + 'h/' + (silentH || 72) + 'h';
+      assert.strictEqual(info.status, wantStatus, label + ' status');
+      assert.ok(wantExpl.test(info.explanation), label + ' explanation: ' + info.explanation);
+      assert.ok(!/unknown/.test(info.explanation), label + ' must not say unknown');
+      assert.strictEqual(ctx.window._nodesGetLastAdvert(pageNode, stats, []), at, label + ' Last Heard (advert)');
+      // Nodes list and map both use getNodeStatus on the /api/nodes row.
+      assert.strictEqual(ctx.window.getNodeStatus(listNode), info.status, label + ' list/map status agrees');
+    }
+  });
+  test('#848 without the database fallback the node page still says unknown (pre-fix response)', () => {
+    const ctx = makeNodesSandbox();
+    const at = new Date(Date.now() - 33 * 3600000).toISOString();
+    const listNode = { public_key: 'aa' + '11'.repeat(31), role: 'repeater', last_seen: at, last_heard: at };
+    const info = ctx.window._nodesGetStatusInfo(ctx.window._nodesWithHealthActivity(listNode, { lastAdvert: null, lastHeard: null }, []));
+    assert.strictEqual(info.explanation, 'Last activity unknown');
+    assert.strictEqual(info.status, 'stale');
+  });
+  test('absent or historical relays do not claim the node is alive', () => {
+    const ctx = makeNodesSandbox();
+    for (const node of [{}, { last_relayed: new Date(Date.now() - 96 * 3600000).toISOString(), relay_active: false }]) {
+      const html = ctx.window._nodesRenderRelayActivity(node);
+      assert.ok(html.includes('no recent confirmed relay'));
+      assert.ok(!html.includes('alive'));
+    }
   });
 }
 
@@ -5026,16 +5565,20 @@ console.log('\n=== app.js: favorites ===');
   test('favStar returns filled star for favorite', () => {
     ctx.localStorage.setItem('meshcore-favorites', '["pk1"]');
     const html = ctx.favStar('pk1');
-    assert.ok(html.includes('★'));
-    assert.ok(html.includes('on'));
+    // Phosphor migration (#1648 M2): the glyph is now an SVG sprite reference.
+    assert.ok(html.includes('#ph-star-fill'));
+    assert.ok(/class="fav-star[^"]* on"/.test(html));
+    assert.ok(html.includes('aria-pressed="true"'));
     assert.ok(html.includes('Remove from favorites'));
   });
 
   test('favStar returns empty star for non-favorite', () => {
     ctx.localStorage.setItem('meshcore-favorites', '[]');
     const html = ctx.favStar('pk1');
-    assert.ok(html.includes('☆'));
-    assert.ok(!html.includes(' on'));
+    assert.ok(html.includes('#ph-star"'));
+    assert.ok(!html.includes('#ph-star-fill'));
+    assert.ok(!/class="fav-star[^"]* on"/.test(html));
+    assert.ok(html.includes('aria-pressed="false"'));
     assert.ok(html.includes('Add to favorites'));
   });
 
@@ -5457,6 +6000,10 @@ console.log('\n=== region-filter.js: setSelected ===');
     removeEventListener: () => {},
   });
 
+  // region-filter.js escapes codes/labels with app.js's global escapeHtml
+  // (#333), as on the page, where app.js is always loaded.
+  loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/app.js');
   loadInCtx(ctx, 'public/area-filter.js');
   loadInCtx(ctx, 'public/region-filter.js');
 
@@ -5602,8 +6149,8 @@ console.log('\n=== packets.js: buildPacketsQuery ===');
     test('buildPacketsQuery: timeWindow + region', () => {
       assert.strictEqual(buildPacketsQuery(30, 'US-SFO,US-LAX'), '?timeWindow=30&region=US-SFO%2CUS-LAX');
     });
-    test('buildPacketsQuery: timeWindow=0 treated as default', () => {
-      assert.strictEqual(buildPacketsQuery(0, ''), '');
+    test('buildPacketsQuery: timeWindow=0 is All time and stays in the URL (#559)', () => {
+      assert.strictEqual(buildPacketsQuery(0, ''), '?timeWindow=0');
     });
   } else {
     console.log('  ⚠️ buildPacketsQuery not exposed — skipping');
@@ -5907,11 +6454,25 @@ console.log('\n=== packets.js: buildFieldTable transport offsets (#765) ===');
   ftCtx.window.isTransportRoute = ftCtx.isTransportRoute;
   ftCtx.getPathLenOffset = (rt) => ftCtx.isTransportRoute(rt) ? 5 : 1;
   ftCtx.window.getPathLenOffset = ftCtx.getPathLenOffset;
+  const hashHelperCtx = makeSandbox();
+  loadInCtx(hashHelperCtx, 'public/roles.js');
+  loadInCtx(hashHelperCtx, 'public/app.js');
+  ftCtx.senderPathHashSize = hashHelperCtx.senderPathHashSize;
+  // #322 (1): buildFieldTable's Path Length row now reads its width through the
+  // shared pathHashSizeFromByte() helper, so the sandbox must expose it too.
+  ftCtx.pathHashSizeFromByte = hashHelperCtx.pathHashSizeFromByte;
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable, fieldRow } = ftCtx.window._packetsTestAPI;
 
   // Helper: build a hex string with specific bytes
   function makeHex(bytes) { return bytes.map(b => b.toString(16).padStart(2, '0')).join(''); }
+
+  test('packet hex breakdown shows the encoded width for a zero-hop flood', () => {
+    const html = buildFieldTable({ raw_hex: '1540DEADBEEF', route_type: 1, payload_type: 5 }, {}, [], {});
+    assert.ok(html.includes('hash_size=2 bytes, hash_count=0'), 'flood width missing from breakdown');
+    const direct = buildFieldTable({ raw_hex: '1600DEADBEEF', route_type: 2, payload_type: 5 }, {}, [], {});
+    assert.ok(direct.includes('no encoded hash size'), 'direct marker must stay unknown');
+  });
 
   test('FLOOD (route_type=1): path_length at byte 1, no transport codes', () => {
     // header=0x05 (route_type=1, payload=1), path_length=0x41 (hash_size=2, count=1), hop=AABB
@@ -5997,6 +6558,15 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
   ftCtx.window.isTransportRoute = ftCtx.isTransportRoute;
   ftCtx.getPathLenOffset = (rt) => ftCtx.isTransportRoute(rt) ? 5 : 1;
   ftCtx.window.getPathLenOffset = ftCtx.getPathLenOffset;
+  const secondHashHelperCtx = makeSandbox();
+  loadInCtx(secondHashHelperCtx, 'public/roles.js');
+  loadInCtx(secondHashHelperCtx, 'public/app.js');
+  ftCtx.senderPathHashSize = secondHashHelperCtx.senderPathHashSize;
+  // #322 (1): buildFieldTable now reads its width via the shared helper.
+  ftCtx.pathHashSizeFromByte = secondHashHelperCtx.pathHashSizeFromByte;
+  // The byte table now reads this observation's canonical path. Load the
+  // real helper dependency rather than duplicating or bypassing its parser.
+  loadInCtx(ftCtx, 'public/packet-helpers.js');
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable } = ftCtx.window._packetsTestAPI;
 
@@ -6029,13 +6599,13 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
       'Public Key should be at offset 6');
   });
 
-  test('#844: hashCountVal=0 (direct advert) skips Path section', () => {
+  test('#844: zero-hop flood skips Path section but retains encoded width', () => {
     // path_len = 0x00 → hash_size=1, hash_count=0
     const raw = '1100' + '0'.repeat(200);
     const pkt = { raw_hex: raw, route_type: 1, payload_type: 0 };
     const html = buildFieldTable(pkt, {}, [], {});
-    assert.ok(!html.includes('section-path'), 'Should not render Path section for direct advert');
-    assert.ok(html.includes('direct advert'), 'Should note direct advert in path_length description');
+    assert.ok(!html.includes('section-path'), 'Should not render Path section without relay hops');
+    assert.ok(html.includes('hash_size=1 byte, hash_count=0'), 'Should retain flood width in path_length description');
   });
 }
 
@@ -7100,18 +7670,19 @@ console.log('\n=== live.js: node-filter URL update preserves lat/lon/zoom (#1709
   const liveSrc = fs.readFileSync('public/live.js', 'utf8');
 
   test('node-filter URL update does not unconditionally drop lat/lon/zoom', () => {
-    // The two history.replaceState call sites in the node-filter flow must
-    // either (a) build params from getHashParams() so unrelated keys survive,
-    // or (b) explicitly re-add lat/lon/zoom. We assert (a): both sites must
-    // seed `params` from getHashParams() rather than a fresh URLSearchParams.
-    // Grep for the two blocks; both must contain getHashParams within ~6 lines
-    // before a history.replaceState call that mutates the `node` key.
-    const idx = liveSrc.indexOf("params.set('node'");
-    assert.ok(idx >= 0, "expected params.set('node', val) in live.js node-filter logic");
-    // Scan 200 chars before to find a getHashParams() seeding
-    const before = liveSrc.slice(Math.max(0, idx - 400), idx);
-    assert.ok(/getHashParams\s*\(/.test(before),
-      'node-filter URL update must seed params from getHashParams() to preserve lat/lon/zoom');
+    // Every live.js hash rewrite (node filter, #660 "Last heard") goes
+    // through setLiveHashParam(), which must seed params from
+    // getHashParams() so unrelated keys (lat/lon/zoom) survive. Both
+    // node-filter call sites must use it.
+    const m = liveSrc.match(/function setLiveHashParam\(name, value\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, 'expected function setLiveHashParam(name, value) in live.js');
+    assert.ok(/const params = getHashParams \? getHashParams\(\)/.test(m[1]),
+      'setLiveHashParam must seed params from getHashParams() to preserve lat/lon/zoom');
+    assert.ok(/params\.set\(name, value\)/.test(m[1]) && /params\.delete\(name\)/.test(m[1]),
+      'setLiveHashParam must set or delete only its own key');
+    assert.ok(/history\.replaceState\(/.test(m[1]), 'setLiveHashParam must not trigger hashchange');
+    assert.strictEqual((liveSrc.match(/setLiveHashParam\('node', (val|key)\)/g) || []).length, 2,
+      'both node-filter URL updates must go through setLiveHashParam');
   });
 
   test('node-filter URL update has no fresh URLSearchParams() with only node key (would clobber viewport)', () => {
@@ -7120,6 +7691,57 @@ console.log('\n=== live.js: node-filter URL update preserves lat/lon/zoom (#1709
     const bad = /const\s+params\s*=\s*new\s+URLSearchParams\s*\(\s*\)\s*;\s*[^\n]*params\.set\(['"]node['"]/;
     assert.ok(!bad.test(liveSrc),
       'node-filter URL update must not start with empty URLSearchParams (would clobber viewport)');
+  });
+}
+
+// ===== analytics.js: Wardriving "Coverage by Observer" IATA badge (#381 review round 2, finding 5) =====
+console.log('\n=== analytics.js: Wardriving observer table IATA badge ===');
+{
+  function makeAnalyticsSandbox381() {
+    const ctx = makeSandbox();
+    loadInCtx(ctx, 'public/roles.js');
+    loadInCtx(ctx, 'public/app.js');
+    try { loadInCtx(ctx, 'public/analytics.js'); } catch (e) {
+      for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
+    }
+    return ctx;
+  }
+  const ctx = makeAnalyticsSandbox381();
+  const iataPositionBadgeHtml = ctx.window._analyticsIataPositionBadgeHtml;
+
+  test('iataPositionBadgeHtml is exposed', () => assert.ok(iataPositionBadgeHtml, '_analyticsIataPositionBadgeHtml must be exposed'));
+
+  // This is the exact snippet the Wardriving tab's observersHtml() appends
+  // next to a coordinate whenever positionSource === 'iata' -- it's a
+  // self-contained pure function (no closure over tab-local state), so
+  // testing it directly exercises the real markup the badge renders.
+  test('badge markup uses the existing var(--border)/var(--text) pattern, no hardcoded colors', () => {
+    const html = iataPositionBadgeHtml();
+    assert.ok(html.includes('class="badge"'), 'should be a .badge element');
+    assert.ok(html.includes('var(--border)') && html.includes('var(--text)'), 'should use theme CSS vars, not hardcoded hex colors');
+    assert.ok(!/#[0-9a-fA-F]{3,6}/.test(html), 'should contain no hardcoded hex color');
+  });
+
+  test('badge renders the IATA label and an explanatory tooltip', () => {
+    const html = iataPositionBadgeHtml();
+    assert.ok(/>IATA</.test(html), 'should render the IATA label');
+    assert.ok(/title="[^"]*no real node position[^"]*"/.test(html), 'should explain via title that this is an approximate, not a real, position');
+  });
+
+  // analytics.js source-level check: the badge call site is gated on
+  // positionSource === 'iata' and lives inside observersHtml's per-row
+  // mapping, so a real position or no position never gets the badge.
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const observersHtmlSrc = src.slice(src.indexOf('function observersHtml('), src.indexOf('function mapLinkHtml('));
+
+  test('observersHtml only calls the IATA badge when positionSource is "iata"', () => {
+    assert.ok(/positionSource === 'iata'[\s\S]{0,80}iataPositionBadgeHtml\(\)/.test(observersHtmlSrc),
+      'the badge call must be gated on positionSource === "iata"');
+  });
+
+  test('observersHtml does not render a coordinate (and so no badge) when lat/lon are missing', () => {
+    assert.ok(/o\.lat != null && o\.lon != null/.test(observersHtmlSrc),
+      'a missing position must fall through to the dash, never reach the badge branch');
   });
 }
 

@@ -111,11 +111,13 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       // .live-overlay[data-position="…"] rules (see public/live.css ~1200).
       const VCR = parseInt(getComputedStyle(document.documentElement)
         .getPropertyValue('--vcr-bar-height')) || 58;
+      // #728: bottom corners also clear Live's map credit (set on .live-page).
+      const CREDIT = parseInt(getComputedStyle(el).getPropertyValue('--live-credit-height')) || 0;
       const anchors = {
         tl: { top: 64, left: 12 },
         tr: { top: 64, right: 12 },
-        bl: { bottom: VCR + 10, left: 12 },
-        br: { bottom: VCR + 10, right: 12 },
+        bl: { bottom: VCR + CREDIT + 10, left: 12 },
+        br: { bottom: VCR + CREDIT + 10, right: 12 },
       };
       return {
         dragged: el.dataset.dragged,
@@ -200,7 +202,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       const r = el.getBoundingClientRect();
       const VCR = parseInt(getComputedStyle(document.documentElement)
         .getPropertyValue('--vcr-bar-height')) || 58;
-      // PANEL_DEFAULTS.liveFeed = 'bl' → anchor bottom: VCR+10, left: 12
+      // #728: bottom corners also clear Live's map credit (set on .live-page).
+      const CREDIT = parseInt(getComputedStyle(el).getPropertyValue('--live-credit-height')) || 0;
+      // PANEL_DEFAULTS.liveFeed = 'bl' → anchor bottom: VCR+CREDIT+10, left: 12
       return {
         pos: el.getAttribute('data-position'),
         dragged: el.dataset.dragged,
@@ -212,7 +216,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         ls: localStorage.getItem('panel-drag-liveFeed'),
         rect: { top: r.top, left: r.left, right: r.right, bottom: r.bottom },
         vw: window.innerWidth, vh: window.innerHeight,
-        anchor: { bottom: VCR + 10, left: 12 },
+        anchor: { bottom: VCR + CREDIT + 10, left: 12 },
       };
     });
 

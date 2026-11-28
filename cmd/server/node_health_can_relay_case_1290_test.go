@@ -48,13 +48,20 @@ func TestNodeHealth_CanRelayCaseInsensitive_Issue1290(t *testing.T) {
 	if srv.store.byNode == nil {
 		srv.store.byNode = make(map[string][]*StoreTx)
 	}
+	// #76: the badge rides on the Heard By row, so seed a genuine direct
+	// reception — the node's own advert with an empty flood path.
+	pt, rt := PayloadADVERT, RouteFlood
 	srv.store.byNode[nodePubkey] = append(srv.store.byNode[nodePubkey], &StoreTx{
 		Hash:             "1290casebadge00",
 		FirstSeen:        now,
+		PayloadType:      &pt,
+		RouteType:        &rt,
+		DecodedJSON:      `{"pubKey":"` + nodePubkey + `"}`,
 		SNR:              &snr,
 		ObservationCount: 1,
 		ObserverID:       obsIDMixed,
 		ObserverName:     "ListenerOnly",
+		Observations:     []*StoreObs{{ObserverID: obsIDMixed, ObserverName: "ListenerOnly", SNR: &snr, PathJSON: "[]"}},
 	})
 	srv.store.mu.Unlock()
 
@@ -69,9 +76,9 @@ func TestNodeHealth_CanRelayCaseInsensitive_Issue1290(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("json: %v", err)
 	}
-	obs, ok := body["observers"].([]interface{})
+	obs, ok := body["directObservers"].([]interface{})
 	if !ok {
-		t.Fatalf("expected observers array, got %T", body["observers"])
+		t.Fatalf("expected directObservers array, got %T", body["directObservers"])
 	}
 	var found bool
 	for _, raw := range obs {

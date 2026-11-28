@@ -138,7 +138,7 @@ func createTestDBSpreadOverDays(t *testing.T, dbPath string, numTx, spanDays int
 // (adv #11: prior code carried a duplicated annotation on every line)."
 func seedTestDBRows(t *testing.T, dbPath string, numTx, obsPerTx int, rowTimes func(i int) (string, int64)) {
 	t.Helper()
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}

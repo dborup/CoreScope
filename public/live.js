@@ -42,12 +42,18 @@
   let packetCount = 0;
   let activeAnims = 0;
   const MAX_CONCURRENT_ANIMS = 20;
+  // #912 M1: an uncertain segment is lighter than a certain one (0.8), as the
+  // route view's redacted edges are (route-render.js: 0.6 against 0.92).
+  const UNCERTAIN_SEGMENT_OPACITY = 0.5;
   // Perf caps for the animation overlay (see updateAnimCanvas / renderAnimations).
   const ANIM_MAX_DPR = 1.5;       // cap backing-store pixels on hi-DPI displays
   const ANIM_MIN_FRAME_MS = 15;   // don't redraw faster than ~60fps (high-refresh guard)
   let _lastAnimFrame = 0;
   let nodeActivity = {};
   let recentPaths = [];
+  // Heat is a mirror like the toggles below (#125): wireLiveControls()
+  // restores from it and its change handler writes it back.
+  let heatEnabled = localStorage.getItem('meshcore-live-heatmap') !== 'false';
   let showGhostHops = localStorage.getItem('live-ghost-hops') !== 'false';
   let realisticPropagation = localStorage.getItem('live-realistic-propagation') === 'true';
   let showOnlyFavorites = localStorage.getItem('live-favorites-only') === 'true';
@@ -55,6 +61,15 @@
   let matrixMode = localStorage.getItem('live-matrix-mode') === 'true';
   let matrixRain = localStorage.getItem('live-matrix-rain') === 'true';
   let colorByHash = localStorage.getItem('meshcore-color-packets-by-hash') !== 'false';
+  // #882 — "Color by scope" (takes precedence over hash colouring; the saved
+  // hash preference is left alone) and "Scoped only" (skip route 1/2 packets).
+  // Resolved from ?color= / ?scoped=, then localStorage, in resolveScopeParams().
+  let colorByScope = localStorage.getItem('meshcore-color-packets-by-scope') === 'true';
+  let scopedOnly = localStorage.getItem('live-scoped-only') === 'true';
+  // #660 "Last heard" filter key (live-heard-filter.js). Resolved from the
+  // hash, then localStorage, in wireHeardFilter() on every mount.
+  let heardKey = 'all';
+  let _heardReapplyTimer = null;
   // Color a path's connecting lines red instead of by packet type when the
   // packet's origin node is flagged foreign (nodes.foreign_advert — GPS
   // outside the configured geo_filter region). Darker red = more hops
@@ -75,12 +90,156 @@
   }
   /** Current theme string for hash-color functions. */
   function _liveTheme() { return document.documentElement.dataset.theme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
+
+  // === #882 Color by scope (logic in live-scope-color.js) ===
+  // One registry per page load, so a scope keeps its colour while the
+  // viewer stays (session-sticky). Bounded by LiveScopeColor.CAP.
+  let _scopeRegistry = null;
+  function scopeRegistry() {
+    if (!_scopeRegistry) _scopeRegistry = window.LiveScopeColor.createRegistry();
+    return _scopeRegistry;
+  }
+  // The canvas needs concrete colour strings: the --scope-* variables are
+  // resolved once and cached per theme; a customizer change ('theme-changed')
+  // drops the cache.
+  let _scopePalette = null;
+  let _scopePaletteTheme = '';
+  function scopePalette() {
+    const theme = _liveTheme();
+    if (!_scopePalette || _scopePaletteTheme !== theme) {
+      const cs = getComputedStyle(document.documentElement);
+      _scopePalette = window.LiveScopeColor.readPalette(function(v) { return cs.getPropertyValue(v); });
+      _scopePaletteTheme = theme;
+    }
+    return _scopePalette;
+  }
+  function invalidateScopePalette() { _scopePalette = null; }
+  let _scopeThemeListening = false;
+  // Scope colour of one transmission, or null when "Color by scope" is off.
+  // touch: register the scope in the legend (live packets only; a VCR
+  // replay only reads, its timestamps are not "now"). O(1) per packet.
+  function scopeColorFor(pkt, touch) {
+    const S = window.LiveScopeColor;
+    if (!S || !pkt) return null;
+    const cls = S.classify(pkt.route_type, pkt.scope_name);
+    let slot = S.OTHER;
+    if (cls.kind === 'named') {
+      if (touch) { slot = scopeRegistry().touch(cls.name, Date.now()); scheduleScopeLegend(); }
+      else slot = scopeRegistry().slotOf(cls.name);
+    }
+    if (!colorByScope) return null;
+    return scopePalette()[S.paletteVar(cls, slot)];
+  }
+  // "Scoped only": hide route 1/2 (and route-less) packets; an unknown scope
+  // (route 0/3 without a resolved name) still counts as scoped.
+  function isScopedHidden(pkt) {
+    return scopedOnly && !!window.LiveScopeColor && !window.LiveScopeColor.isScoped(pkt && pkt.route_type);
+  }
+  // Feed-item stripe: scope colour in scope mode, else the hash colour.
+  function feedStripeColor(pkt, hash) {
+    if (colorByScope && window.LiveScopeColor) return scopeColorFor(pkt, false);
+    if (colorByHash && hash && window.HashColor) return HashColor.hashToHsl(hash, _liveTheme());
+    return null;
+  }
+
+  // Legend section "SCOPES (last 15 min)": re-rendered at most once a second
+  // while packets arrive, on the shared 60 s tick (expiry) and on a toggle,
+  // and only touches the DOM when its rows changed. Names are untrusted
+  // (node/config strings), so rows are built with textContent.
+  let _scopeLegendTimer = null;
+  let _scopeLegendSig = '';
+  function scheduleScopeLegend() {
+    if (!colorByScope || _scopeLegendTimer) return;
+    _scopeLegendTimer = setTimeout(function() { _scopeLegendTimer = null; renderScopeLegend(); }, 1000);
+  }
+  function scopeLegendRow(cssVar, label, cls) {
+    const li = document.createElement('li');
+    if (cls) li.className = cls;
+    if (cssVar) {
+      const sw = document.createElement('span');
+      sw.className = 'live-scope-swatch';
+      sw.setAttribute('aria-hidden', 'true');
+      sw.style.background = 'var(' + cssVar + ')';
+      li.appendChild(sw);
+    }
+    const name = document.createElement('span');
+    name.className = 'live-scope-name';
+    name.textContent = label;
+    li.appendChild(name);
+    return li;
+  }
+  function renderScopeLegend() {
+    const S = window.LiveScopeColor;
+    const sec = document.getElementById('scopeLegendSection');
+    const list = document.getElementById('scopeLegendList');
+    const menu = document.getElementById('scopeLegendMenu');
+    const menuList = document.getElementById('scopeLegendMenuList');
+    if (!S || !sec || !list) return;
+    sec.hidden = !colorByScope;
+    if (menu) menu.hidden = !colorByScope;
+    if (!colorByScope) { _scopeLegendSig = ''; return; }
+    const L = scopeRegistry().legend(Date.now());
+    const sig = L.sig + '|' + scopedOnly;
+    if (sig === _scopeLegendSig) return;
+    _scopeLegendSig = sig;
+    const frag = document.createDocumentFragment();
+    if (!L.rows.length) frag.appendChild(scopeLegendRow(null, 'No named scopes yet', 'live-scope-empty'));
+    for (const r of L.rows) frag.appendChild(scopeLegendRow(S.paletteVar({ kind: 'named' }, r.slot), r.name));
+    if (L.more > 0) frag.appendChild(scopeLegendRow(null, '+' + L.more + ' more', 'live-scope-more'));
+    frag.appendChild(scopeLegendRow('--scope-unknown', 'Unknown scope (T?)'));
+    if (!scopedOnly) frag.appendChild(scopeLegendRow('--scope-none', 'No scope'));
+    if (menuList) menuList.replaceChildren(frag.cloneNode(true));
+    list.replaceChildren(frag);
+  }
+  // Hash colouring is inert while scope colouring is on: say so on the
+  // checkbox instead of silently ignoring it.
+  function syncScopeControls() {
+    const hashEl = document.getElementById('liveColorHashToggle');
+    if (hashEl) {
+      hashEl.disabled = colorByScope;
+      hashEl.setAttribute('aria-describedby', colorByScope ? 'colorHashDesc colorHashScopeNote' : 'colorHashDesc');
+      const lbl = hashEl.closest('label');
+      if (lbl) lbl.title = colorByScope ? 'Color by scope is on and takes precedence' : '';
+    }
+    renderScopeLegend();
+  }
+  // A valid ?color= / ?scoped= wins over the saved value and is saved
+  // (same rule as ?heard=, #660).
+  function resolveScopeParams() {
+    const S = window.LiveScopeColor;
+    if (!S) {
+      ['liveColorScopeToggle', 'liveScopedOnlyToggle'].forEach(function(id) {
+        const el = document.getElementById(id);
+        const lbl = el && el.closest('label');
+        if (lbl) lbl.style.display = 'none';
+      });
+      return;
+    }
+    const params = getHashParams ? getHashParams() : new URLSearchParams();
+    const m = S.resolveColorMode(params.get(S.COLOR_PARAM), { scope: colorByScope, hash: colorByHash });
+    if (m.fromHash) {
+      colorByScope = m.scope;
+      colorByHash = m.hash;
+      try {
+        localStorage.setItem(S.STORAGE_KEY, colorByScope);
+        localStorage.setItem('meshcore-color-packets-by-hash', colorByHash);
+      } catch (_) { /* quota */ }
+    }
+    const so = S.resolveScopedOnly(params.get(S.SCOPED_PARAM), scopedOnly);
+    if (so.fromHash) {
+      scopedOnly = so.on;
+      try { localStorage.setItem(S.SCOPED_STORAGE_KEY, scopedOnly); } catch (_) { /* quota */ }
+    }
+  }
   let nodeFilterKeys = (localStorage.getItem('live-node-filter') || '').split(',').map(s => s.trim()).filter(Boolean);
   let nodeFilterTotal = 0;
   let nodeFilterShown = 0;
   // Region filter (#1045): observer_id → IATA code, populated from /api/observers
   let observerIataMap = {};
   let regionFilterChangeHandler = null;
+  // #531: AreaFilter subscriptions, removed in destroy() like the region one.
+  let areaNodesChangeHandler = null;
+  let areaOutlineChangeHandler = null;
 
   /**
    * Returns true if the packet group matches the selected regions.
@@ -146,7 +305,39 @@
   const _initialSpeed = [0.25, 0.5, 1, 2, 4, 8].includes(_savedSpeed) ? _savedSpeed : 1;
   let rainCanvas = null, rainCtx = null, rainDrops = [], rainRAF = null;
   const propagationBuffer = new Map(); // hash -> {timer, packets[]}
+  function clearPropagationBuffer() {
+    for (const entry of propagationBuffer.values()) clearTimeout(entry.timer);
+    propagationBuffer.clear();
+  }
+  // #883 M3: one-shot timeouts that reach this mount's layers or state go
+  // through liveLater(), and destroy() clears them, so none fires into a
+  // torn-down map or into the next mount (kiosk remounts Live in place).
+  // Bounded: each entry leaves the set when it fires.
+  const liveTimeouts = new Set();
+  function liveLater(fn, ms) {
+    const id = setTimeout(() => { liveTimeouts.delete(id); fn(); }, ms);
+    liveTimeouts.add(id);
+    return id;
+  }
   let _onResize = null;
+  // #428 — refs for document/window listeners bound in init() that must be
+  // removed in destroy(); see their bind sites for why each can't just move
+  // to .live-page (teardown/leak notes at each).
+  let _onOrientationChange = null;
+  let _onTileProviderChanged = null;
+  // #883 M3: the #1532 F / Escape handler, bound per mount so it closes over
+  // this mount's button (a once-per-page binding kept the first mount's).
+  let _fullscreenKeyHandler = null;
+  let _onDragManagerResize = null;
+  let _feedResizeHandlers = null;
+  let _moreMenuDocClickHandler = null;
+  let _timelineScrubHandlers = null;
+  // #839 — Live's data-theme MutationObserver, the DragManager's media-query
+  // listener and an open feed card's outside-click listener: none of them
+  // go with #app's subtree, so destroy() disconnects/removes them.
+  let _themeObs = null;
+  let _dragMediaHandlers = null;
+  let _feedCardDismiss = null;
   let _navCleanup = null;
   let _timelineRefreshInterval = null;
   let _lcdClockInterval = null;
@@ -173,6 +364,20 @@
   // animation we want to play). The handoff sets this true, then clears it
   // after the replay window has elapsed.
   let suppressLive = false;
+  // #880 — "Follow a packet". One follow at a time; every timer, frame,
+  // listener and layer it owns hangs off followState and is released by
+  // stopFollow(), which destroy() calls. While it is set, live packets are
+  // buffered but not animated (the suppressLive path in bufferPacket).
+  let followState = null;
+  // The mode the moments and kiosk controllers see: a follow counts as one.
+  function liveMode() { return followState ? 'FOLLOW' : VCR.mode; }
+  let followArmed = false;
+  let observerRoster = {};
+  let _observerRosterPromise = null;
+  let _followSkewPromise = null;
+  let _followToastTimer = null;
+  // Folds the controls panel (set by wireLiveCollapseToggles; null off Live).
+  let collapseLiveControls = null;
 
   // ROLE_COLORS loaded from shared roles.js (includes 'unknown')
 
@@ -213,11 +418,24 @@
   };
 
   /* ---- Panel Corner Positioning (#608 M0) ---- */
-  var PANEL_DEFAULTS = { liveFeed: 'bl', liveLegend: 'br', liveNodeDetail: 'tr' };
+  var PANEL_DEFAULTS = { liveFeed: 'bl', liveLegend: 'br', liveNodeDetail: 'tr', liveMoments: 'bc' };
   var CORNER_CYCLE = ['tl', 'tr', 'br', 'bl'];
-  var CORNER_ARROWS = { tl: '↘', tr: '↙', bl: '↗', br: '↖' };
-  var CORNER_LABELS = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right' };
-  var PANEL_NAMES = { liveFeed: 'Feed', liveLegend: 'Legend', liveNodeDetail: 'Node detail' };
+  var CORNER_ARROWS = { tl: '↘', tr: '↙', bl: '↗', br: '↖', bc: '↑' };
+  var CORNER_LABELS = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right', bc: 'bottom-center' };
+  var PANEL_NAMES = { liveFeed: 'Feed', liveLegend: 'Legend', liveNodeDetail: 'Node detail', liveMoments: 'Moments' };
+  // #958: the Moments window (live-moments.js) is a panel too. Its default
+  // is its own bottom-centre anchor, 'bc', and its button cycles that and
+  // the four corners. It never takes a corner from the panels: at its
+  // anchor it sits below them, and once moved it shares their level
+  // (live.css). It moves only where a panel can be dragged (DRAG_MQ) and
+  // never in kiosk; elsewhere it keeps its anchor.
+  var MOMENTS_PANEL = 'liveMoments';
+  var MOMENTS_CYCLE = ['bc', 'tl', 'tr', 'br', 'bl'];
+  var DRAG_MQ = '(pointer: fine) and (min-width: 768px)';
+
+  function dragAllowed() {
+    try { return !!(window.matchMedia && window.matchMedia(DRAG_MQ).matches); } catch (_) { return false; }
+  }
 
   function getPanelPositions() {
     var pos = {};
@@ -234,6 +452,7 @@
       var candidate = CORNER_CYCLE[(idx + i) % 4];
       var occupied = false;
       for (var otherId in allPositions) {
+        if (otherId === MOMENTS_PANEL) continue;
         if (otherId !== panelId && allPositions[otherId] === candidate) { occupied = true; break; }
       }
       if (!occupied) return candidate;
@@ -244,6 +463,7 @@
   function applyPanelPosition(id, corner) {
     var el = document.getElementById(id);
     if (!el) return;
+    if (id === MOMENTS_PANEL && !dragAllowed()) { el.removeAttribute('data-position'); return; }
     el.setAttribute('data-position', corner);
     var btn = el.querySelector('.panel-corner-btn');
     if (btn) {
@@ -258,22 +478,29 @@
     for (var id in positions) {
       applyPanelPosition(id, positions[id]);
     }
-    // Wire up click handlers on corner buttons
+    // Wire up click handlers on corner buttons. One shared handler, so the
+    // re-run from the drag media gate does not bind a second one.
     var btns = document.querySelectorAll('.panel-corner-btn[data-panel]');
     for (var i = 0; i < btns.length; i++) {
-      btns[i].addEventListener('click', function(e) {
-        e.stopPropagation();
-        var panelId = this.getAttribute('data-panel');
-        onCornerClick(panelId);
-      });
+      btns[i].addEventListener('click', onCornerBtnClick);
     }
+  }
+
+  function onCornerBtnClick(e) {
+    e.stopPropagation();
+    onCornerClick(this.getAttribute('data-panel'));
   }
 
   function onCornerClick(panelId) {
     var positions = getPanelPositions();
     var current = positions[panelId];
-    var nextIdx = (CORNER_CYCLE.indexOf(current) + 1) % 4;
-    var next = nextAvailableCorner(panelId, CORNER_CYCLE[nextIdx], positions);
+    var next;
+    if (panelId === MOMENTS_PANEL) {
+      next = MOMENTS_CYCLE[(MOMENTS_CYCLE.indexOf(current) + 1) % MOMENTS_CYCLE.length];
+    } else {
+      var nextIdx = (CORNER_CYCLE.indexOf(current) + 1) % 4;
+      next = nextAvailableCorner(panelId, CORNER_CYCLE[nextIdx], positions);
+    }
     try { localStorage.setItem('panel-corner-' + panelId, next); } catch (_) { /* quota */ }
     // #1567: corner button must clear any prior free-form drag state, or
     // the inline top/left from drag-manager.js wins the cascade over the
@@ -301,13 +528,28 @@
     }
   }
 
+  // #958: makes a new Moments window (its DOM from live-moments.js with
+  // panelId) a panel: its corner, its button, the DragManager and, where it
+  // can be dragged, its saved drag. Returns the release for stopMoments(),
+  // or null in kiosk, where the window stays exactly as it was.
+  function attachMomentsPanel(el, mgr, kiosk) {
+    if (!el || kiosk) return null;
+    applyPanelPosition(MOMENTS_PANEL, getPanelPositions()[MOMENTS_PANEL]);
+    var btn = el.querySelector('.panel-corner-btn');
+    if (btn) btn.addEventListener('click', onCornerBtnClick);
+    if (!mgr) return null;
+    mgr.register(el);
+    if (dragAllowed()) mgr.restorePositions([el]);
+    return function () { mgr.unregister(el); };
+  }
+
   // Export for testing
   if (typeof window !== 'undefined') {
     window._panelCorner = {
       PANEL_DEFAULTS: PANEL_DEFAULTS, CORNER_CYCLE: CORNER_CYCLE,
       getPanelPositions: getPanelPositions, nextAvailableCorner: nextAvailableCorner,
       applyPanelPosition: applyPanelPosition, onCornerClick: onCornerClick,
-      resetPanelPositions: resetPanelPositions
+      resetPanelPositions: resetPanelPositions, attachMomentsPanel: attachMomentsPanel
     };
   }
 
@@ -357,7 +599,9 @@
           probe.remove();
           return px;
         })();
-        const h = Math.max(0, window.innerHeight - reserve);
+        // #894: the stale-source pill row (in flow above the page) too.
+        const pills = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--warmup-pills-h')) || 0;
+        const h = Math.max(0, window.innerHeight - reserve - pills);
         if (page) page.style.height = h + 'px';
         if (appEl) appEl.style.height = h + 'px';
         if (map) {
@@ -368,10 +612,16 @@
     // Run immediately to set correct initial height
     _onResize();
     window.addEventListener('resize', _onResize);
-    window.addEventListener('orientationchange', () => {
+    // #428 — this anonymous arrow was never the same reference destroy()
+    // removed (it removed _onResize under the 'orientationchange' event
+    // name, which never matched anything bound here): a ref-mismatch leak.
+    // Store it so destroy() removes the actual listener.
+    _onOrientationChange = () => {
       // Orientation change is async — viewport dimensions settle late
       [50, 200, 500, 1000, 2000].forEach(ms => setTimeout(_onResize, ms));
-    });
+    };
+    window.addEventListener('orientationchange', _onOrientationChange);
+    window.addEventListener('warmup-pills-resize', _onResize);
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', _onResize);
     }
@@ -396,9 +646,17 @@
     var bar = document.getElementById('vcrBar');
     var page = document.querySelector('.live-page');
     if (!bar || !page) return;
+    // #728: the attribution control the tile registry gives Live (the base
+    // map's credit, plus each overlay's while it is on) sits right on top of
+    // the VCR bar. Its height is published too, as --live-credit-height, so
+    // the same overlays clear it and never cover the credit.
+    var credit = document.querySelector('#liveMap .leaflet-control-attribution');
     function publish() {
-      var h = Math.ceil(bar.getBoundingClientRect().height) || 58;
+      // #883: kiosk hides the bar; the 58px fallback would float the map
+      // credit above the bottom edge.
+      var h = kioskOn ? 0 : (Math.ceil(bar.getBoundingClientRect().height) || 58);
       page.style.setProperty('--vcr-bar-height', h + 'px');
+      page.style.setProperty('--live-credit-height', (credit ? Math.ceil(credit.getBoundingClientRect().height) : 0) + 'px');
       // #1568 round-2: also publish on :root so JS reading
       // getComputedStyle(document.documentElement).getPropertyValue(
       // '--vcr-bar-height') sees the measured value (E2E assertions,
@@ -409,7 +667,7 @@
     publish();
     var ro = null;
     if (typeof ResizeObserver === 'function') {
-      try { ro = new ResizeObserver(publish); ro.observe(bar); } catch (_) { ro = null; }
+      try { ro = new ResizeObserver(publish); ro.observe(bar); if (credit) ro.observe(credit); } catch (_) { ro = null; }
     }
     window.addEventListener('resize', publish);
     if (window.visualViewport) {
@@ -424,10 +682,136 @@
     };
   }
 
+  // #667: the expanded controls panel is an overlay inside the
+  // `overflow: hidden` .live-page, so a panel taller than the map area could
+  // not be scrolled. Publish where #liveControlsBody starts and how much of
+  // the viewport bottom is taken (VCR bar, bottom-nav) so CSS can cap the
+  // body there, and set `.is-capped` only while the content does not fit:
+  // a panel that fits keeps overflow visible and its dropdown overlays.
+  // #875: the legend body is click-through (map, markers and the node-filter
+  // list stay reachable under it), so it cannot take the wheel itself. When the
+  // content outgrows the capped panel, a narrow rail at its edge takes the
+  // scroll and drives the body; the rail is the only part that catches input.
+  var _legendScrollCleanup = null;
+  function initLegendScrollRail() {
+    if (_legendScrollCleanup) { try { _legendScrollCleanup(); } catch (_) {} _legendScrollCleanup = null; }
+    var legend = document.getElementById('liveLegend');
+    if (!legend) return;
+    var body = legend.querySelector('.panel-content');
+    var rail = legend.querySelector('.legend-scroll-rail');
+    var spacer = rail && rail.firstElementChild;
+    if (!body || !rail || !spacer) return;
+    function fit() {
+      var over = body.scrollHeight > body.clientHeight + 1;
+      legend.classList.toggle('is-scrollable', over);
+      if (over) spacer.style.height = body.scrollHeight + 'px';
+    }
+    function railToBody() { if (body.scrollTop !== rail.scrollTop) body.scrollTop = rail.scrollTop; }
+    function bodyToRail() { if (rail.scrollTop !== body.scrollTop) rail.scrollTop = body.scrollTop; }
+    rail.addEventListener('scroll', railToBody);
+    body.addEventListener('scroll', bodyToRail);
+    var ro = null;
+    if (typeof ResizeObserver === 'function') {
+      try { ro = new ResizeObserver(fit); ro.observe(body); [].slice.call(body.children).forEach(function(el) { ro.observe(el); }); } catch (_) { ro = null; }
+    }
+    window.addEventListener('resize', fit);
+    fit();
+    _legendScrollCleanup = function() {
+      if (ro) { try { ro.disconnect(); } catch (_) {} ro = null; }
+      window.removeEventListener('resize', fit);
+      rail.removeEventListener('scroll', railToBody);
+      body.removeEventListener('scroll', bodyToRail);
+    };
+  }
+
+  var _controlsFitCleanup = null;
+  function initControlsFitTracker() {
+    if (_controlsFitCleanup) { try { _controlsFitCleanup(); } catch (_) {} _controlsFitCleanup = null; }
+    var root = document.getElementById('liveControls');
+    var body = document.getElementById('liveControlsBody');
+    var header = document.getElementById('liveHeader');
+    var page = document.querySelector('.live-page');
+    var bar = document.getElementById('vcrBar');
+    if (!root || !body || !page) return;
+    var raf = 0;
+    function fit() {
+      raf = 0;
+      if (!root.classList.contains('is-expanded') || !body.getClientRects().length) {
+        root.classList.remove('is-capped');
+        return;
+      }
+      var top = body.getBoundingClientRect().top;
+      var barH = bar && bar.getClientRects().length ? bar.getBoundingClientRect().height : 0;
+      var reserve = window.innerHeight - (page.getBoundingClientRect().bottom - barH);
+      page.style.setProperty('--live-ctrl-top', Math.round(top) + 'px');
+      page.style.setProperty('--live-ctrl-reserve', Math.max(0, Math.ceil(reserve)) + 'px');
+      // Measure under the cap; in-flow children only, so an open dropdown
+      // overlay of a fitting panel does not count.
+      root.classList.add('is-capped');
+      var content = 0;
+      for (var c = body.firstElementChild; c; c = c.nextElementSibling) {
+        var r = c.getBoundingClientRect();
+        if (r.height) content = Math.max(content, r.bottom - top + body.scrollTop);
+      }
+      if (content <= body.clientHeight + 1) root.classList.remove('is-capped');
+    }
+    function schedule() { if (!raf) raf = requestAnimationFrame(fit); }
+    // A menu opens below its trigger, which in a capped body can be below the
+    // scroll box (43–83px tall in 641–768px landscape). Scroll the body just
+    // enough to show the menu, or its top if it is taller than the box.
+    // Capture phase, since the area trigger stops propagation; the check runs
+    // in the next frame, after the trigger's own handler has opened the menu.
+    // The node-filter typeahead opens after an input and a fetch, not on a
+    // click, so it announces itself with a 'live-menu-open' event (#671).
+    var menuRaf = 0;
+    function showOpenedMenu(e) {
+      var trigger = e.type === 'click' && e.target.closest && e.target.closest('.region-dropdown-trigger');
+      var menu = e.type === 'click' ? trigger && trigger.parentNode.querySelector('.region-dropdown-menu') : e.target;
+      if (!menu) return;
+      cancelAnimationFrame(menuRaf);
+      menuRaf = requestAnimationFrame(function() {
+        menuRaf = 0;
+        if (menu.hidden || !root.classList.contains('is-capped')) return;
+        var m = menu.getBoundingClientRect();
+        var boxTop = body.getBoundingClientRect().top + body.clientTop;
+        var below = m.bottom - (boxTop + body.clientHeight);
+        if (below > 0) body.scrollTop += Math.min(below, m.top - boxTop);
+      });
+    }
+    body.addEventListener('click', showOpenedMenu, true);
+    body.addEventListener('live-menu-open', showOpenedMenu);
+    // No window resize/visualViewport listeners: everything fit() reads
+    // follows an observed box (.live-page is sized from the viewport height,
+    // the header from its width), and a visual-only change (keyboard, pinch
+    // zoom) changes none of it.
+    var ro = null;
+    if (typeof ResizeObserver === 'function') {
+      try {
+        ro = new ResizeObserver(schedule);
+        [header, page, bar].concat([].slice.call(body.children)).forEach(function(el) { if (el) ro.observe(el); });
+      } catch (_) { ro = null; }
+    }
+    schedule();
+    _controlsFitCleanup = function() {
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      if (menuRaf) { cancelAnimationFrame(menuRaf); menuRaf = 0; }
+      if (ro) { try { ro.disconnect(); } catch (_) {} ro = null; }
+      body.removeEventListener('click', showOpenedMenu, true);
+      body.removeEventListener('live-menu-open', showOpenedMenu);
+      root.classList.remove('is-capped');
+    };
+  }
+
   function vcrSetMode(mode) {
+    const wasLive = VCR.mode === 'LIVE';
     VCR.mode = mode;
+    if (wasLive !== (mode === 'LIVE')) applyHeardFilter();
     if (mode !== 'LIVE' && !VCR.frozenNow) VCR.frozenNow = Date.now();
     if (mode === 'LIVE') VCR.frozenNow = null;
+    if (moments) moments.onModeChange();
+    if (kiosk) kiosk.onModeChange();
+    // #880 — "Follow next" picks a live packet; a replay must not feed it.
+    if (mode !== 'LIVE' && followArmed) setFollowArmed(false);
     updateVCRUI();
   }
 
@@ -591,7 +975,9 @@
         return;
       }
       const group = replayGroups[groupIdx];
-      renderPacketTree(group.packets);
+      // #880 — a follow owns the map: the replay keeps its clock but does
+      // not animate (as live packets are buffered, not drawn, in LIVE).
+      if (!followState) renderPacketTree(group.packets);
       updateVCRClock(group.ts);
       updateVCRLcd();
       VCR.playhead = Math.min(VCR.buffer.length, VCR.playhead + group.packets.length);
@@ -642,42 +1028,63 @@
     // each before joining into the popup HTML. (#1536)
     const chain = (hopNames || []).map(escapeHtml).join(' → ');
     const link = hash ? `<a class="lc-path-link" href="#/packets/${hash}" style="color:${color}">full detail →</a>` : '';
+    // #880 — only a valid 16-hex hash reaches the markup (and the button).
+    const LF = typeof window !== 'undefined' ? window.LiveFollow : null;
+    const followHash = LF ? LF.parseFollowParam(hash) : null;
+    const follow = followHash ? `<button type="button" class="lc-follow-btn" data-follow-hash="${followHash}">Follow ▶</button>` : '';
     return `<div class="lc-path-popup">
       <span class="lc-path-badge" style="background:${color}">${typeName}</span>
       <div class="lc-path-time">${timeStr}</div>
       <div class="lc-path-chain">${chain}</div>
-      ${link ? '<div class="lc-path-link-wrap">' + link + '</div>' : ''}
+      ${link || follow ? '<div class="lc-path-link-wrap">' + link + follow + '</div>' : ''}
     </div>`;
+  }
+
+  // Evict through the layer group the path was added to: poly.remove() only
+  // takes it off the map, and the group kept every route ever drawn, with its
+  // LatLng/Point arrays and click closure (~30 MB/h on real traffic, #972).
+  function dropClickablePath(entry) {
+    entry.layer.removeLayer(entry.poly);
   }
 
   function pruneClickablePaths(now) {
     const cutoff = now - CLICKABLE_PATH_TTL_MS;
     for (let i = clickablePaths.length - 1; i >= 0; i--) {
       if (clickablePaths[i].addedAt < cutoff) {
-        try { clickablePaths[i].poly.remove(); } catch (_) {}
+        dropClickablePath(clickablePaths[i]);
         clickablePaths.splice(i, 1);
       }
     }
     while (clickablePaths.length > CLICKABLE_PATH_MAX) {
-      try { clickablePaths[0].poly.remove(); } catch (_) {}
-      clickablePaths.shift();
+      dropClickablePath(clickablePaths.shift());
     }
   }
 
   function registerClickablePath(latLngs, typeName, color, hopNames, tsMs, hash) {
     if (!clickablePathsLayer) return;
     const poly = L.polyline(latLngs, { weight: 12, opacity: 0, interactive: true }).addTo(clickablePathsLayer);
-    const entry = { addedAt: Date.now(), poly };
+    // color/hash: what the route was drawn in (read by the #882 E2E).
+    const entry = { addedAt: Date.now(), poly, layer: clickablePathsLayer, color, hash };
     clickablePaths.push(entry);
     pruneClickablePaths(Date.now());
     let dismissTimer = null;
     poly.on('click', function(e) {
       if (dismissTimer) clearTimeout(dismissTimer);
       const html = buildClickablePathPopupHtml(typeName, color, hopNames, tsMs, hash);
-      L.popup({ maxWidth: 280, className: 'path-info-popup' })
+      const popup = L.popup({ maxWidth: 280, className: 'path-info-popup' })
         .setLatLng(e.latlng)
         .setContent(html)
         .openOn(map);
+      // #880 — the button lives in the popup's DOM; its listener goes with it.
+      const followBtn = popup.getElement() && popup.getElement().querySelector('.lc-follow-btn');
+      if (followBtn) {
+        followBtn.addEventListener('click', function(ev) {
+          ev.stopPropagation();
+          if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
+          if (map) map.closePopup();
+          startFollow(followBtn.getAttribute('data-follow-hash'), { settleMs: followSettleMs(tsMs) });
+        });
+      }
       dismissTimer = setTimeout(() => { if (map) map.closePopup(); }, CLICKABLE_POPUP_DISMISS_MS);
     });
   }
@@ -852,11 +1259,18 @@
     return {
       id: pkt.id, hash: pkt.hash,
       raw: pkt.raw_hex,
+      // #882: scope colour and "Scoped only" in VCR replay.
+      route_type: pkt.route_type, scope_name: pkt.scope_name,
       path_json: pkt.path_json,
       resolved_path: pkt.resolved_path,
       _ts: new Date(pkt.timestamp || pkt.created_at).getTime(),
       decoded: { header: { payloadTypeName: typeName }, payload: raw, path: { hops } },
-      snr: pkt.snr, rssi: pkt.rssi, observer: pkt.observer_name
+      snr: pkt.snr, rssi: pkt.rssi, observer: pkt.observer_name,
+      // #1898: the region filter matches on observer_id (packetMatchesRegion). Without it every replayed packet has observer_id undefined,
+      // so the filter skips them all and drops the whole group. observer_iata
+      // is carried too so obsIataBadgeHtml does not have to fall back to the
+      // roster map for replayed packets.
+      observer_id: pkt.observer_id, observer_iata: pkt.observer_iata
     };
   }
 
@@ -932,10 +1346,7 @@
       // Tab restored — skip animating anything that queued while away
       _tabHidden = false;
       // Clear any pending propagation buffers so they don't all fire at once
-      for (const [hash, entry] of propagationBuffer) {
-        clearTimeout(entry.timer);
-      }
-      propagationBuffer.clear();
+      clearPropagationBuffer();
       // Batch-update timeline once on restore instead of per-packet while hidden
       updateTimeline();
     }
@@ -948,6 +1359,7 @@
 
   function bufferPacket(pkt) {
     pkt._ts = packetTimestamp(pkt);
+    stampHeardFromPacket(pkt);
     const entry = { ts: pkt._ts, pkt };
     VCR.buffer.push(entry);
     // Keep buffer capped at ~2000 — adjust playhead to avoid stale indices (#63)
@@ -967,7 +1379,8 @@
       // #1599 — manual replay handoff sets suppressLive=true so incoming live
       // WS packets don't clutter the replay animation. We still want the
       // timeline to tick so the UI shows traffic continuing.
-      if (suppressLive) { updateTimeline(); return; }
+      // #880 — a follow suppresses the same way, for as long as it lasts.
+      if (suppressLive || followState) { updateTimeline(); return; }
       if (realisticPropagation && pkt.hash) {
         const hash = pkt.hash;
         if (propagationBuffer.has(hash)) {
@@ -1118,7 +1531,356 @@
     startReplay();
   }
 
+  /**
+   * Restore and wire the persisted Live view toggles (#125).
+   *
+   * MUST run synchronously right after init() writes the markup, before init
+   * awaits anything: until it runs the checkboxes are painted and clickable
+   * but show their default state, and a click is neither saved nor kept.
+   * Restoring state and attaching listeners never sits behind an await; the
+   * visible EFFECT of a setting that needs the map, markers or heat layer is
+   * applied again by applyLiveControlEffects() once init has built them.
+   *
+   * Idempotent per element (data-live-wired). init() writes new markup on
+   * every mount, so each mounted checkbox has exactly one listener.
+   *
+   * Not covered, deliberately: #liveAudioToggle (MeshAudio.restore() and its
+   * slider panel; audio needs a user gesture anyway) and the geo-filter and
+   * region controls, which stay hidden or inert until their own fetches.
+   */
+  function wireLiveControls() {
+    resolveScopeParams();
+    const TOGGLES = [
+      { id: 'liveHeatToggle', restore: () => heatEnabled, onChange: (v) => {
+        heatEnabled = v;
+        localStorage.setItem('meshcore-live-heatmap', heatEnabled);
+        if (v) showHeatMap(); else hideHeatMap();
+      } },
+      { id: 'liveGhostToggle', restore: () => showGhostHops, onChange: (v) => {
+        showGhostHops = v;
+        localStorage.setItem('live-ghost-hops', showGhostHops);
+      } },
+      { id: 'liveRealisticToggle', restore: () => realisticPropagation, onChange: (v) => {
+        realisticPropagation = v;
+        localStorage.setItem('live-realistic-propagation', realisticPropagation);
+      } },
+      { id: 'liveColorHashToggle', restore: () => colorByHash, onChange: (v) => {
+        colorByHash = v;
+        localStorage.setItem('meshcore-color-packets-by-hash', colorByHash);
+        // A ?color=hash|type link keeps describing what is shown.
+        const cp = getHashParams ? getHashParams().get('color') : null;
+        if (cp === 'hash' || cp === 'type') setLiveHashParam('color', v ? 'hash' : 'type');
+        window.dispatchEvent(new Event('storage'));
+      } },
+      { id: 'liveColorScopeToggle', restore: () => colorByScope, onChange: (v) => {
+        colorByScope = v;
+        localStorage.setItem('meshcore-color-packets-by-scope', colorByScope);
+        setLiveHashParam('color', v ? 'scope' : '');
+        syncScopeControls();
+      } },
+      { id: 'liveScopedOnlyToggle', restore: () => scopedOnly, onChange: (v) => {
+        scopedOnly = v;
+        localStorage.setItem('live-scoped-only', scopedOnly);
+        setLiveHashParam('scoped', v ? '1' : '');
+        rebuildFeedList();
+        syncScopeControls();
+      } },
+      { id: 'liveFavoritesToggle', restore: () => showOnlyFavorites, onChange: (v) => {
+        showOnlyFavorites = v;
+        localStorage.setItem('live-favorites-only', showOnlyFavorites);
+        applyFavoritesFilter();
+      } },
+      { id: 'liveForeignToggle', restore: () => highlightForeign, onChange: (v) => {
+        highlightForeign = v;
+        localStorage.setItem('live-highlight-foreign', highlightForeign);
+      } },
+      { id: 'liveMultibyteToggle', restore: () => multibyteOnly, onChange: (v) => {
+        multibyteOnly = v;
+        localStorage.setItem('live-multibyte-only', multibyteOnly);
+        rebuildFeedList();
+      } },
+      { id: 'liveMatrixToggle', restore: () => matrixMode, onChange: (v) => {
+        matrixMode = v;
+        localStorage.setItem('live-matrix-mode', matrixMode);
+        applyMatrixTheme(matrixMode);
+        syncHeatToggleToMatrix(matrixMode);
+        // Matrix ON hid the heat layer; OFF brings it back as Heat is set.
+        // During init applyLiveControlEffects() (re)builds it after loadNodes().
+        if (!matrixMode && heatEnabled) showHeatMap();
+      } },
+      { id: 'liveMatrixRainToggle', restore: () => matrixRain, onChange: (v) => {
+        matrixRain = v;
+        localStorage.setItem('live-matrix-rain', matrixRain);
+        if (matrixRain) startMatrixRain(); else stopMatrixRain();
+      } },
+    ];
+    for (const t of TOGGLES) {
+      const el = document.getElementById(t.id);
+      if (!el) { console.warn('[live] control not found: ' + t.id); continue; }
+      if (el.dataset.liveWired === '1') continue;
+      el.dataset.liveWired = '1';
+      el.checked = t.restore();
+      el.addEventListener('change', (e) => t.onChange(e.target.checked));
+    }
+    // The Heat/Matrix interlock holds from the first paint.
+    syncHeatToggleToMatrix(matrixMode);
+    syncScopeControls();
+    wireHeardFilter();
+    wireFollowNext();
+  }
+
+  // #880 — "Follow next packet": arm / cancel. Armed, renderPacketTree
+  // follows the next group that passes the Live filters. Two buttons, one
+  // state: an icon in the feed header (> 640px) and a row in the controls
+  // panel (<= 640px, where the feed is hidden); CSS shows one of them.
+  function wireFollowNext() {
+    document.querySelectorAll('.live-page .live-follow-next').forEach(function(btn) {
+      if (btn.dataset.liveWired === '1') return;
+      btn.dataset.liveWired = '1';
+      btn.addEventListener('click', function() {
+        if (followArmed) { setFollowArmed(false); return; }
+        // A VCR replay renders historical packets; the next one is not live.
+        if (VCR.mode !== 'LIVE') { showFollowToast('Follow next packet works in LIVE mode.'); return; }
+        stopFollow();
+        setFollowArmed(true);
+        showFollowToast('Waiting for the next packet that passes the Live filters…');
+        collapseControlsOnPhone();
+      });
+    });
+  }
+
+  // Rewrites one ?param of the #/live hash in place. replaceState, so the
+  // SPA router does not re-run (a hashchange would re-init the page).
+  function setLiveHashParam(name, value) {
+    const params = getHashParams ? getHashParams() : new URLSearchParams();
+    if (value) params.set(name, value);
+    else params.delete(name);
+    const base = location.hash.split('?')[0] || '#/live';
+    const qs = params.toString();
+    const newUrl = location.pathname + location.search + base + (qs ? '?' + qs : '');
+    try { history.replaceState(null, '', newUrl); } catch (_) {}
+  }
+
+  // #660 — "Last heard" select. Same contract as the toggles above: restored
+  // and wired before init's first await. A valid ?heard= wins over the
+  // saved value and is saved, like ?node= (#1110).
+  function wireHeardFilter() {
+    const sel = document.getElementById('liveHeardSelect');
+    if (!sel || sel.dataset.liveWired === '1') return;
+    sel.dataset.liveWired = '1';
+    const F = window.LiveHeardFilter;
+    // Optional module (stale cached index.html, blocked script): without it
+    // the Live page runs unfiltered and the control is not offered.
+    const label = document.getElementById('liveHeardLabel');
+    if (!F) { if (label) label.style.display = 'none'; return; }
+    let stored = null;
+    try { stored = localStorage.getItem(F.STORAGE_KEY); } catch (_) { /* private mode */ }
+    const fromHash = getHashParams ? getHashParams().get(F.HASH_PARAM) : null;
+    heardKey = F.resolveInitialKey(fromHash, stored);
+    if (fromHash === heardKey) {
+      try { localStorage.setItem(F.STORAGE_KEY, heardKey); } catch (_) { /* quota */ }
+    }
+    for (const o of F.OPTIONS) {
+      const opt = document.createElement('option');
+      opt.value = o.key;
+      opt.textContent = o.label;
+      sel.appendChild(opt);
+    }
+    sel.value = heardKey;
+    sel.addEventListener('change', () => {
+      heardKey = F.normalizeKey(sel.value);
+      try { localStorage.setItem(F.STORAGE_KEY, heardKey); } catch (_) { /* quota */ }
+      setLiveHashParam(F.HASH_PARAM, heardKey === F.DEFAULT_KEY ? '' : heardKey);
+      applyHeardFilter();
+    });
+    updateHeardCount(0);
+  }
+
+  // Active window in ms, or null for All. Suspended outside LIVE mode: VCR
+  // scrubbing loads nodes by first_seen <= beforeTs but their last_seen is
+  // today's, so ages against the replay clock would be meaningless.
+  function heardWindowMs() {
+    const F = window.LiveHeardFilter;
+    return F && VCR.mode === 'LIVE' ? F.windowMs(heardKey) : null;
+  }
+
+  function isHeardHidden(n, winMs, now) {
+    const F = window.LiveHeardFilter;
+    return F ? F.isHidden(n, winMs, now, window.getNodeFreshness) : false;
+  }
+
+  // Same deferral rule as addNodeMarker/cullMarkers: only markers within the
+  // padded viewport are attached.
+  function markerInView(marker) {
+    if (!map) return true;
+    try { return map.getBounds().pad(0.5).contains(marker.getLatLng()); }
+    catch (e) { return true; } // getBounds() can throw during early Leaflet init
+  }
+
+  // Flips one marker; layer work only on a state change, never a rebuild.
+  function setMarkerHeardHidden(marker, hide) {
+    marker._heardHidden = hide;
+    if (!nodesLayer) return;
+    if (hide) {
+      if (nodesLayer.hasLayer(marker)) nodesLayer.removeLayer(marker);
+    } else if (!nodesLayer.hasLayer(marker) && markerInView(marker)) {
+      nodesLayer.addLayer(marker);
+    }
+  }
+
+  // One O(n) predicate pass over the loaded markers (~5 ms at 10k nodes).
+  // Runs on select change, VCR mode change, after loadNodes, on the shared
+  // 60 s prune tick and (coalesced) when live traffic revives a hidden node.
+  function applyHeardFilter() {
+    if (_heardReapplyTimer) { clearTimeout(_heardReapplyTimer); _heardReapplyTimer = null; }
+    const winMs = heardWindowMs();
+    const now = Date.now();
+    let hidden = 0;
+    for (const key in nodeMarkers) {
+      const marker = nodeMarkers[key];
+      const hide = isHeardHidden(nodeData[key], winMs, now);
+      if (hide) hidden++;
+      if (hide !== !!marker._heardHidden) setMarkerHeardHidden(marker, hide);
+    }
+    updateHeardCount(hidden);
+  }
+
+  function scheduleHeardFilter() {
+    if (_heardReapplyTimer) return;
+    _heardReapplyTimer = setTimeout(applyHeardFilter, 250);
+  }
+
+  function updateHeardCount(hidden) {
+    const el = document.getElementById('liveHeardCount');
+    if (!el) return;
+    const F = window.LiveHeardFilter;
+    if (!F || heardKey === F.DEFAULT_KEY) { el.classList.add('hidden'); el.textContent = ''; return; }
+    el.classList.remove('hidden');
+    el.textContent = VCR.mode === 'LIVE' ? hidden + ' hidden' : 'paused in replay';
+  }
+
+  // Stamps _lastHeard on nodes a live WS packet proves were transmitting
+  // (LiveHeardFilter.heardKeysFromPacket). Called for every WS packet, in
+  // every VCR mode and with the tab hidden, so evidence is never dropped.
+  //
+  // Stamps Date.now(), not the ingestor's rxTime: pkt._ts is the
+  // transmission's first_seen (the wrong clock for a new observation of an
+  // old transmission) and the broadcast carries no per-observation time.
+  // Same evidence rule as the ingestor's relay touch, not the same clock
+  // guard: the ingestor's UPDATE never moves last_seen backwards, whereas
+  // this stamp is always "now", so an ingestor catch-up or MQTT backlog
+  // revives a node here that it would leave alone in nodes.last_seen. That
+  // is accepted: the node really did just transmit, as far as this page can
+  // tell, and the stamp is page-local (gone on reload).
+  function stampHeardFromPacket(pkt) {
+    const F = window.LiveHeardFilter;
+    if (!F) return;
+    const keys = F.heardKeysFromPacket(pkt);
+    if (!keys.length) return;
+    const now = Date.now();
+    let revive = false;
+    for (const k of keys) {
+      const n = nodeData[k];
+      if (!n) continue;
+      n._lastHeard = now;
+      const m = nodeMarkers[k];
+      if (m && m._heardHidden) revive = true;
+    }
+    if (revive) scheduleHeardFilter();
+  }
+
+  // Matrix mode owns the heat map: while it is on, the heat layer is hidden
+  // and its toggle unchecked and disabled. When it is off, the toggle shows
+  // the Heat setting again (#150). Safe before the map exists.
+  function syncHeatToggleToMatrix(on) {
+    const ht = document.getElementById('liveHeatToggle');
+    if (on) {
+      hideHeatMap();
+      if (ht) { ht.checked = false; ht.disabled = true; }
+    } else if (ht) {
+      ht.disabled = false; // recover from stale state
+      ht.checked = heatEnabled;
+    }
+  }
+
+  // Effects of the restored toggles that need what init() builds behind its
+  // awaits: the map, the node markers and the heat layer.
+  function applyLiveControlEffects() {
+    if (heatEnabled && !matrixMode) showHeatMap(); else hideHeatMap();
+    applyMatrixTheme(matrixMode);
+    syncHeatToggleToMatrix(matrixMode);
+    if (matrixRain) startMatrixRain();
+  }
+
+  // Async initialization and search callbacks belong to one Live mount.
+  // Invalidate them on exit, including when the user immediately returns.
+  let liveGeneration = 0;
+  // #881 M2 — the moments controller (live-moments.js), null while the
+  // server has moments off or the viewer is on another page.
+  let moments = null;
+  let momentsPanelRelease = null; // #958: its DragManager registration
+  // #958: this mount's DragManager, null outside a mount. Not
+  // window._liveDragMgr, which keeps the last mount's manager after destroy().
+  let liveDragMgr = null;
+  let momentsListening = false; // the customizer-change listener is on window
+  let _momentHl = null; // { layers, timer } of the last fly-to highlight
+  // #883 M1 — kiosk mode (#/live?kiosk=1, live-kiosk.js). kioskOn is read
+  // from the hash once per mount; body.kiosk (never persisted) hides the
+  // chrome from the first paint. The controller exists while Live does.
+  let kioskOn = false;
+  let kiosk = null;
+  let kioskThemeRestore = null; // #883 M2: puts the viewer's theme back
+  // #883 M3: the last mount was an in-place remount of this kiosk link and
+  // left its kiosk theme and auto-reload on; the next controller takes over.
+  // Every destroy() sets it; only the next init() and, when that mount never
+  // made its controller, its destroy() read it.
+  let kioskHandover = false;
+  // The kiosk theme's get/apply, made once here and not in init(): the
+  // restore outlives its mount across in-place remounts, and a closure made
+  // in init() would keep that mount's scope, and its whole page, alive.
+  const kioskThemeIO = {
+    get: () => document.documentElement.getAttribute('data-theme'),
+    apply: (t) => window.applyThemeTransient(t),
+  };
+  // #968 M1: the kiosk theme now showing (dark, light or auto), kept across
+  // an in-place remount like its restore. The operator preset can arrive
+  // after the first paint (a cold kiosk link): setKioskTheme() then swaps
+  // to it once, putting the viewer's theme back first.
+  let kioskThemeShown = null;
+  function setKioskTheme(theme) {
+    if (typeof window.applyThemeTransient !== 'function' || theme === kioskThemeShown) return;
+    if (kioskThemeRestore) { kioskThemeRestore(); kioskThemeRestore = null; }
+    kioskThemeRestore = window.LiveKiosk.applyKioskTheme(theme, kioskThemeIO);
+    kioskThemeShown = theme;
+  }
+  // #968 M2: the screen's text size and edge margin, inline on body: the
+  // viewer's (Customize → Display → Live kiosk) over the operator preset
+  // over live.css's own auto / 3vmin. Applied on mount, again once the
+  // preset has arrived (initKiosk) and on theme-changed (any customizer
+  // change); destroy() takes them off. Two properties, no re-layout loop.
+  let kioskDisplayListening = false;
+  function kioskDisplay() {
+    return window.LiveKiosk.SETTINGS.display(window.SITE_CONFIG && window.SITE_CONFIG.kiosk, window.MC_KIOSK_CFG);
+  }
+  function applyKioskDisplay() {
+    if (!kioskOn || !window.LiveKiosk || !document.body) return;
+    window.LiveKiosk.applyDisplay(document.body.style, kioskDisplay());
+    if (!kioskDisplayListening) { window.addEventListener('theme-changed', applyKioskDisplay); kioskDisplayListening = true; }
+  }
+
   async function init(app) {
+    const generation = ++liveGeneration;
+    // Only the link's kiosk=1 turns kiosk on; the preset (#968) never does.
+    kioskOn = !!(window.LiveKiosk && getHashParams && window.LiveKiosk.parseKioskParams(getHashParams(), window.MC_KIOSK_CFG).kiosk);
+    if (kioskOn) {
+      document.body.classList.add('kiosk');
+      applyKioskDisplay();
+      // #883 M2: the kiosk theme (dark unless &theme=), before the first
+      // paint, through app.js's non-persisting apply. After an in-place
+      // remount it is still showing, with the old mount's restore. #968:
+      // the preset's theme when /api/config/client has already answered.
+      if (!kioskHandover) setKioskTheme(window.LiveKiosk.parseKioskParams(getHashParams(), window.MC_KIOSK_CFG).theme);
+    }
     app.innerHTML = `
       <div class="live-page">
         <div id="liveMap" style="width:100%;height:100%;position:absolute;top:0;left:0;z-index:1"></div>
@@ -1159,6 +1921,7 @@
             <span id="realisticDesc" class="sr-only">Buffer packets by hash and animate all paths simultaneously</span>
             <label><input type="checkbox" id="liveColorHashToggle" aria-describedby="colorHashDesc"> Color by hash</label>
             <span id="colorHashDesc" class="sr-only">Color flying-packet dots and contrails by packet hash for propagation tracing</span>
+            <span id="colorHashScopeNote" class="sr-only">Inactive while Color by scope is on</span>
             <label><input type="checkbox" id="liveMatrixToggle" aria-describedby="matrixDesc"> Matrix</label>
             <span id="matrixDesc" class="sr-only">Animate packet hex bytes flowing along paths like the Matrix</span>
             <label><input type="checkbox" id="liveMatrixRainToggle" aria-describedby="rainDesc"> Rain</label>
@@ -1171,13 +1934,19 @@
             <span id="multibyteDesc" class="sr-only">Show only multibyte (≥2-byte path-hash) packets; hide unreliable single-byte traffic</span>
             <label><input type="checkbox" id="liveForeignToggle" checked aria-describedby="foreignDesc"> Foreign origin</label>
             <span id="foreignDesc" class="sr-only">Color a packet's route red when it originates from a node outside your configured region; darker red means more hops traveled</span>
+            <label id="liveMomentsLabel" style="display:none"><input type="checkbox" id="liveMomentsToggle" aria-describedby="momentsDesc"> Moments</label>
+            <span id="momentsDesc" class="sr-only">Show short cards for mesh moments: new nodes, repeaters back online, record links and the busiest repeater</span>
+            <label id="liveHeardLabel" class="live-heard-label" title="Hide repeaters and rooms not heard within this window. Heard = an own advert or a flood packet the server resolved this node relaying, plus live packets since the page loaded. Adverts alone are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.">Last heard <select id="liveHeardSelect" class="live-heard-select" aria-describedby="heardDesc"></select></label>
+            <span id="heardDesc" class="sr-only">Hide repeaters and rooms with no advert or relayed traffic within the chosen window. Adverts are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.</span>
+            <span id="liveHeardCount" class="live-filter-count hidden" aria-live="polite"></span>
+            <button type="button" id="liveFollowNextBtn" class="vcr-btn live-follow-next live-follow-next--menu" aria-pressed="false" title="Replay how the next visible packet spreads through the mesh">Follow next packet</button>
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Geo filter boundary</label>
             <label id="liveSelectedAreaLabel" style="display:none"><input type="checkbox" id="liveSelectedAreaToggle"> Selected area outline</label>
             </div>
             <div class="live-toggles">
               <div class="live-node-filter-wrap" style="position:relative">
-                <label class="live-node-filter-hitarea" style="display:inline-flex; align-items:center; min-height:44px; cursor:text;">
-                  <input type="text" id="liveNodeFilterInput" placeholder="Filter by node…" autocomplete="off" class="live-node-filter-input" role="combobox" aria-expanded="false" aria-owns="liveNodeFilterDropdown" aria-autocomplete="list" aria-activedescendant="">
+                <label class="live-node-filter-hitarea">
+                  <input type="text" id="liveNodeFilterInput" placeholder="Loading node filter…" disabled aria-busy="true" autocomplete="off" class="live-node-filter-input" role="combobox" aria-expanded="false" aria-owns="liveNodeFilterDropdown" aria-autocomplete="list" aria-activedescendant="">
                 </label>
                 <div id="liveNodeFilterDropdown" class="live-node-filter-dropdown hidden" role="listbox"></div>
                 <button id="liveNodeFilterClear" class="vcr-btn" title="Clear node filter" style="display:none">×</button>
@@ -1186,6 +1955,21 @@
             </div>
             <div id="liveRegionFilter" class="region-filter-container live-region-filter-container" aria-label="Filter live packets by IATA region"></div>
             <div id="liveAreaFilter" class="live-area-filter-container"></div>
+            <!-- #882: appended after every existing control so none of them moves
+                 (the desktop row, the capped phone panel and the node-filter
+                 typeahead keep their geometry, #670/#671). -->
+            <div class="live-toggles live-scope-toggles">
+              <label><input type="checkbox" id="liveColorScopeToggle" aria-describedby="colorScopeDesc"> Color by scope</label>
+              <span id="colorScopeDesc" class="sr-only">Color packet routes by their scope (region). Takes precedence over Color by hash; foreign-origin red still wins</span>
+              <label title="Show only scoped packets"><input type="checkbox" id="liveScopedOnlyToggle" aria-describedby="scopedOnlyDesc"> Scoped only</label>
+              <span id="scopedOnlyDesc" class="sr-only">Show only scoped packets (transport routes, including an unknown scope); hide plain flood and direct packets</span>
+            </div>
+            <!-- #882: phones hide the legend panel (#875), so the SCOPES list is
+                 mirrored here; CSS shows it only where the legend is hidden. -->
+            <div id="scopeLegendMenu" class="live-scope-legend live-scope-legend--menu" hidden>
+              <h3 class="legend-title">SCOPES (last 15 min)</h3>
+              <ul class="legend-list" id="scopeLegendMenuList"></ul>
+            </div>
             <div class="audio-controls hidden" id="audioControls">
               <label class="audio-slider-label">Voice <select id="audioVoiceSelect" class="audio-voice-select"></select></label>
               <label class="audio-slider-label">BPM <input type="range" id="audioBpmSlider" min="40" max="300" value="120" class="audio-slider"><span id="audioBpmVal">120</span></label>
@@ -1197,6 +1981,7 @@
         <div class="live-overlay live-feed" id="liveFeed">
           <div class="panel-header">
             <button class="panel-corner-btn" data-panel="liveFeed" title="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
+            <button type="button" id="liveFeedFollowNextBtn" class="live-follow-next live-follow-next--feed" aria-pressed="false" title="Follow next packet: replay how the next visible packet spreads through the mesh" aria-label="Follow next packet"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-crosshair"/></svg></button>
             <button class="feed-hide-btn" id="feedHideBtn" title="Hide feed" aria-label="Hide feed"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
           <div class="panel-content" aria-live="polite" aria-relevant="additions" role="log">
@@ -1212,12 +1997,17 @@
           </div>
           <div class="panel-content" id="nodeDetailContent"></div>
         </div>
-        <button class="legend-toggle-btn" id="legendToggleBtn" aria-label="Show legend" title="Show legend"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg></button>
         <div class="live-overlay live-legend" id="liveLegend" role="region" aria-label="Map legend">
           <div class="panel-header">
             <button class="panel-corner-btn" data-panel="liveLegend" title="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
+            <button class="feed-hide-btn" id="legendCloseBtn" title="Hide legend" aria-label="Hide legend"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
+          <div class="legend-body">
           <div class="panel-content">
+          <div id="scopeLegendSection" class="live-scope-legend" hidden>
+          <h3 class="legend-title">SCOPES (last 15 min)</h3>
+          <ul class="legend-list" id="scopeLegendList"></ul>
+          </div>
           <h3 class="legend-title">PACKET TYPES</h3>
           <ul class="legend-list">
             ${buildLegendHtml(window.PayloadLabels || null)}
@@ -1230,6 +2020,8 @@
             <li><span class="live-ring live-ring--other" aria-hidden="true"></span> Faded ring — companion / sensor / room</li>
             <li><span class="live-foreign-swatch" aria-hidden="true"></span> Red route — foreign-origin packet (darker = more hops)</li>
           </ul>
+          </div>
+          <div class="legend-scroll-rail" aria-hidden="true"><div class="legend-scroll-spacer"></div></div>
           </div>
         </div>
 
@@ -1271,6 +2063,10 @@
         </div>
       </div>`;
 
+    // The persisted view toggles are restored and wired before the first
+    // await (#88, #125): see wireLiveControls().
+    wireLiveControls();
+
     // Fetch configurable map defaults (#115)
     let mapCenter = [37.45, -122.0];
     let mapZoom = 9;
@@ -1279,6 +2075,8 @@
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) mapCenter = mapCfg.center;
       if (typeof mapCfg.zoom === 'number') mapZoom = mapCfg.zoom;
     } catch { }
+
+    if (generation !== liveGeneration) return;
 
     // #1709: URL hash lat/lon/zoom is the highest-precedence viewport source.
     // Applied here so the very first setView() lands at the requested viewport
@@ -1385,7 +2183,7 @@
 
         for (const key in nodeMarkers) {
           const marker = nodeMarkers[key];
-          const isVisible = bounds.contains(marker.getLatLng());
+          const isVisible = !marker._heardHidden && bounds.contains(marker.getLatLng());
           const hasLayer = nodesLayer.hasLayer(marker);
 
           if (isVisible && !hasLayer) nodesLayer.addLayer(marker);
@@ -1428,33 +2226,48 @@
       (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
     // #1420 — multi-provider dark-tile picker. Light mode unchanged.
     let _liveDarkRefLayer = null;
+    // #332 — every tile URL and attribution comes from the configured
+    // dark/light provider. The old body hard-coded CARTO in three places
+    // (the light-mode url fallback, the 'carto-dark' registry fallback and
+    // the '© OpenStreetMap © CartoDB' credit), so a map on an instance
+    // configured for Esri/OpenTopoMap still fetched keyless CARTO tiles —
+    // which have been stamped "API KEY REQUIRED" since August 2026.
     function _liveResolveTile(dark) {
-      const reg = window.MC_TILE_PROVIDERS || {};
-      if (!dark) {
-        const lightId = (typeof window.MC_getLightTileProvider === 'function') ? window.MC_getLightTileProvider() : null;
-        const lp = lightId ? (reg[lightId] || null) : null;
-        if (lp && lp.url) {
-          return { url: (typeof lp.url === 'function' ? lp.url() : lp.url), attribution: lp.attribution || '© OpenStreetMap © CartoDB', refUrl: null };
+      // Preferred path: the registry's single resolver. It picks the
+      // provider for this theme and invokes lazy `url` functions, so url
+      // AND attribution always come from the configured provider.
+      // #741 M1b: a WMS style has no url, only its `wms` descriptor.
+      if (typeof window.MC_getTileSpec === 'function') {
+        const s = window.MC_getTileSpec(dark ? 'dark' : 'light');
+        if (s && (s.url || s.wms)) {
+          return { url: s.url, wms: s.wms || null, attribution: s.attribution || '© OpenStreetMap contributors', refUrl: s.refUrl || null };
         }
-        return { url: TILE_LIGHT, attribution: '© OpenStreetMap © CartoDB', refUrl: null };
       }
-      const id  = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : 'carto-dark';
-      const p   = reg[id] || reg['carto-dark'] || {};
+      // Legacy/partial registry: accessors without getTileSpec.
+      const reg = window.MC_TILE_PROVIDERS || {};
+      const getId = dark ? window.MC_getDarkTileProvider : window.MC_getLightTileProvider;
+      const id = (typeof getId === 'function') ? getId() : null;
+      const p = (id && reg[id]) || {};
       return {
-        url: (typeof p.url === 'function' ? p.url() : p.url) || (typeof p.baseUrl === 'function' ? p.baseUrl() : p.baseUrl) || TILE_DARK,
-        attribution: p.attribution || '© OpenStreetMap © CartoDB',
+        url: (typeof p.url === 'function' ? p.url() : p.url) || (typeof p.baseUrl === 'function' ? p.baseUrl() : p.baseUrl) || (dark ? TILE_DARK : TILE_LIGHT),
+        attribution: p.attribution || '© OpenStreetMap contributors',
         refUrl: p.refUrl || null
       };
     }
     const liveAutoLayerGroup = L.layerGroup().addTo(map);
 
     function _liveSyncDarkTiles(dark) {
+      // #839 — never against a map destroy() has removed.
+      if (!map) return;
       const r = _liveResolveTile(dark);
-      tileLayer.setUrl(r.url);
-      if (tileLayer.options) tileLayer.options.attribution = r.attribution;
+      // #741 M1b — in place for a template, a swapped layer to or from WMS.
+      tileLayer = window.MC_syncBaseLayer(liveAutoLayerGroup, tileLayer, r, { maxZoom: 19 });
+      // The registry swaps the credit in Live's attribution control too.
+      if (typeof window.MC_setLayerAttribution === 'function') window.MC_setLayerAttribution(map, tileLayer, r.attribution);
+      else if (tileLayer.options) tileLayer.options.attribution = r.attribution;
       if (dark && r.refUrl) {
         if (!_liveDarkRefLayer) {
-          _liveDarkRefLayer = L.tileLayer(r.refUrl, { maxZoom: 19, attribution: r.attribution }).addTo(liveAutoLayerGroup);
+          _liveDarkRefLayer = window.MC_createBaseLayer({ url: r.refUrl, attribution: r.attribution }, { maxZoom: 19 }).addTo(liveAutoLayerGroup);
         } else {
           _liveDarkRefLayer.setUrl(r.refUrl);
           if (!liveAutoLayerGroup.hasLayer(_liveDarkRefLayer)) _liveDarkRefLayer.addTo(liveAutoLayerGroup);
@@ -1471,9 +2284,10 @@
       }
     }
     const _liveInitTile = _liveResolveTile(isDark);
-    let tileLayer = L.tileLayer(_liveInitTile.url, { maxZoom: 19, attribution: _liveInitTile.attribution }).addTo(liveAutoLayerGroup);
+    // #741 M1a — same shared factory as the Map page.
+    let tileLayer = window.MC_createBaseLayer(_liveInitTile, { maxZoom: 19 }).addTo(liveAutoLayerGroup);
     if (isDark && _liveInitTile.refUrl) {
-      _liveDarkRefLayer = L.tileLayer(_liveInitTile.refUrl, { maxZoom: 19, attribution: _liveInitTile.attribution }).addTo(liveAutoLayerGroup);
+      _liveDarkRefLayer = window.MC_createBaseLayer({ url: _liveInitTile.refUrl, attribution: _liveInitTile.attribution }, { maxZoom: 19 }).addTo(liveAutoLayerGroup);
     }
     if (typeof window.MC_applyTileFilter === 'function') window.MC_applyTileFilter();
   
@@ -1484,6 +2298,9 @@
     if (typeof window.MC_createLayerControl === 'function') {
       window.MC_createLayerControl(map, liveAutoLayerGroup, 'topright');
     }
+    // #723 M2: click-for-info on the monuments overlay. Live has no map
+    // click mode of its own; markers and clickable paths win by target.
+    if (window.HeritageInfo) window.HeritageInfo.attach(map);
 
     // Add custom Leaflet Control for Fullscreen
     const LiveFullscreenControl = L.Control.extend({
@@ -1525,22 +2342,46 @@
     });
     map.addControl(new LiveSettingsControl());
 
+    // #875: legend toggle lives in the same stack, under Fullscreen and Settings.
+    const LiveLegendControl = L.Control.extend({
+      options: { position: 'topright' },
+      onAdd: function() {
+        const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control live-leaflet-toggle live-legend-toggle-ctl');
+        const btn = L.DomUtil.create('a', '', container);
+        btn.href = 'javascript:void(0)';
+        btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg>';
+        btn.id = 'legendToggleBtn';
+        btn.title = 'Hide legend';
+        btn.setAttribute('aria-label', 'Hide legend');
+        btn.setAttribute('role', 'button');
+        btn.setAttribute('aria-controls', 'liveLegend');
+        btn.setAttribute('aria-expanded', 'true');
+        L.DomEvent.disableClickPropagation(btn);
+        return container;
+      }
+    });
+    map.addControl(new LiveLegendControl());
+
 
 
     // Swap tiles when theme changes
-    const _themeObs = new MutationObserver(function () {
+    // #839 — stored and disconnected in destroy(): <html> outlives the page.
+    if (_themeObs) _themeObs.disconnect();
+    _themeObs = new MutationObserver(function () {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       _liveSyncDarkTiles(dark);
     });
     _themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     // #1420 — re-render on customizer change.
-    window.addEventListener('mc-tile-provider-changed', function (e) {
+    // #428 — stored and removed in destroy(): window outlives the page.
+    _onTileProviderChanged = function (e) {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       if (e && e.detail && e.detail.type && e.detail.type !== (dark ? 'dark' : 'light')) return;
       _liveSyncDarkTiles(dark);
-    });
+    };
+    window.addEventListener('mc-tile-provider-changed', _onTileProviderChanged);
 
     // #1485 — animations + trails need their own pane above markerPane.
     // PR #1334 moved node markers from L.circleMarker (overlayPane @ 400)
@@ -1561,12 +2402,16 @@
 
     injectSVGFilters();
     AreaFilter.init(document.getElementById('liveAreaFilter'));
-    AreaFilter.onChange(function () { loadNodes(); });
+    areaNodesChangeHandler = AreaFilter.onChange(function () { loadNodes(); });
     await loadNodes();
-    showHeatMap();
+    if (generation !== liveGeneration) return;
+    applyLiveControlEffects();
     connectWS();
+    initMoments(generation);
+    initKiosk(generation);
     initResizeHandler();
     initVCRHeightTracker();
+    initLegendScrollRail();
     startRateCounter();
 
     // Check for packet replay from packets page (single or array of observations)
@@ -1581,10 +2426,10 @@
         // set VCR.mode='PAUSED' which froze anim.progress in
         // renderAnimations(), turning the replay into a blank, motionless map.
         suppressLive = true;
-        setTimeout(() => renderPacketTree(packets, true), 1500);
+        liveLater(() => renderPacketTree(packets, true), 1500);
         // Clear the suppression after the replay window has elapsed (the
         // longest animation duration plus a margin) so live traffic resumes.
-        setTimeout(() => { suppressLive = false; }, 12000);
+        liveLater(() => { suppressLive = false; }, 12000);
       } catch { }
     } else {
       // replayRecent(); // disabled — live page starts empty, fills from WS
@@ -1592,72 +2437,25 @@
 
     map.on('zoomend', rescaleMarkers);
 
-    // Heat map toggle — persist in localStorage
-    const liveHeatEl = document.getElementById('liveHeatToggle');
-    if (localStorage.getItem('meshcore-live-heatmap') === 'false') { liveHeatEl.checked = false; hideHeatMap(); }
-    else if (localStorage.getItem('meshcore-live-heatmap') === 'true') { liveHeatEl.checked = true; }
-    liveHeatEl.addEventListener('change', (e) => {
-      localStorage.setItem('meshcore-live-heatmap', e.target.checked);
-      if (e.target.checked) showHeatMap(); else hideHeatMap();
-    });
-
-    const ghostToggle = document.getElementById('liveGhostToggle');
-    ghostToggle.checked = showGhostHops;
-    ghostToggle.addEventListener('change', (e) => {
-      showGhostHops = e.target.checked;
-      localStorage.setItem('live-ghost-hops', showGhostHops);
-    });
-
-    const realisticToggle = document.getElementById('liveRealisticToggle');
-    realisticToggle.checked = realisticPropagation;
-    realisticToggle.addEventListener('change', (e) => {
-      realisticPropagation = e.target.checked;
-      localStorage.setItem('live-realistic-propagation', realisticPropagation);
-    });
-
-    const colorHashToggle = document.getElementById('liveColorHashToggle');
-    colorHashToggle.checked = colorByHash;
-    colorHashToggle.addEventListener('change', (e) => {
-      colorByHash = e.target.checked;
-      localStorage.setItem('meshcore-color-packets-by-hash', colorByHash);
-      window.dispatchEvent(new Event('storage'));
-    });
-
-    const favoritesToggle = document.getElementById('liveFavoritesToggle');
-    favoritesToggle.checked = showOnlyFavorites;
-    favoritesToggle.addEventListener('change', (e) => {
-      showOnlyFavorites = e.target.checked;
-      localStorage.setItem('live-favorites-only', showOnlyFavorites);
-      applyFavoritesFilter();
-    });
-
-    const multibyteToggle = document.getElementById('liveMultibyteToggle');
-    multibyteToggle.checked = multibyteOnly;
-    multibyteToggle.addEventListener('change', (e) => {
-      multibyteOnly = e.target.checked;
-      localStorage.setItem('live-multibyte-only', multibyteOnly);
-      rebuildFeedList();
-    });
-
-    const foreignToggle = document.getElementById('liveForeignToggle');
-    foreignToggle.checked = highlightForeign;
-    foreignToggle.addEventListener('change', (e) => {
-      highlightForeign = e.target.checked;
-      localStorage.setItem('live-highlight-foreign', highlightForeign);
-    });
+    // Observer roster, fetched once per Live visit: observer_id → IATA for
+    // the region filter (#1045), and positions + clock_naive for a follow
+    // (#880). /api/observers returns `{observers:[...], server_time:"..."}`
+    // (cmd/server/types.go ObserverListResponse) — NOT a top-level array.
+    // Bug #1136: previously parsed as array → map empty → region filter
+    // dropped every packet.
+    _observerRosterPromise = fetch('/api/observers').then(function(r) { return r.json(); }).then(function(data) {
+      if (generation !== liveGeneration) return;
+      setObserverIataMap(buildObserverIataMap(data));
+      if (window.LiveFollow) observerRoster = window.LiveFollow.buildObserverRoster(data);
+    }).catch(function() { /* leave maps empty; filter will hide all when active */ });
+    // #880 — deep link #/live?follow=<hash>; its fetch waits for the roster.
+    // #883: ignored in kiosk, where the tour owns the camera.
+    if (!kioskOn) startFollowFromHash();
 
     // Region filter (#1045): dropdown of observer IATA regions
     (function initLiveRegionFilter() {
       var rfEl = document.getElementById('liveRegionFilter');
       if (!rfEl || !window.RegionFilter) return;
-      // Fetch observer roster to build observer_id → IATA map.
-      // /api/observers returns `{observers:[...], server_time:"..."}`
-      // (cmd/server/types.go ObserverListResponse) — NOT a top-level array.
-      // Bug #1136: previously parsed as array → map empty → region filter
-      // dropped every packet.
-      fetch('/api/observers').then(function(r) { return r.json(); }).then(function(data) {
-        setObserverIataMap(buildObserverIataMap(data));
-      }).catch(function() { /* leave map empty; filter will hide all when active */ });
       RegionFilter.init(rfEl, { dropdown: true });
       regionFilterChangeHandler = RegionFilter.onChange(function() {
         // #1108 — when the region selection changes, reload visible map
@@ -1693,13 +2491,16 @@
     const nodeFilterDropdown = document.getElementById('liveNodeFilterDropdown');
     if (nodeFilterInput) {
       // Restore from URL param or localStorage
-      const urlNode = getHashParams && getHashParams().get('node');
+      // #883: ignored in kiosk, which shows the whole mesh.
+      const urlNode = !kioskOn && getHashParams && getHashParams().get('node');
       if (urlNode) setNodeFilter(urlNode.split(',').map(s => s.trim()).filter(Boolean));
       else if (nodeFilterKeys.length) updateNodeFilterUI();
 
       let activeIdx = -1;
+      let suggestionRequest = 0;
 
       function hideDropdown() {
+        suggestionRequest++;
         if (!nodeFilterDropdown) return;
         nodeFilterDropdown.classList.add('hidden');
         nodeFilterDropdown.innerHTML = '';
@@ -1713,15 +2514,7 @@
         // setNodeFilter accepts pubkeys/prefixes/names; commit raw for live filtering.
         const val = (rawValue || '').trim();
         setNodeFilter(val ? [val] : []);
-        // Update URL without triggering hashchange (which would re-init the page).
-        const params = getHashParams ? getHashParams() : new URLSearchParams();
-        if (val) params.set('node', val);
-        else params.delete('node');
-        const base = location.hash.split('?')[0] || '#/live';
-        const qs = params.toString();
-        const newHash = base + (qs ? '?' + qs : '');
-        const newUrl = location.pathname + location.search + newHash;
-        try { history.replaceState(null, '', newUrl); } catch (_) {}
+        setLiveHashParam('node', val);
       }
 
       function selectSuggestion(opt) {
@@ -1730,13 +2523,7 @@
         nodeFilterInput.value = name;
         // Filter by pubkey prefix when available — most precise.
         setNodeFilter(key ? [key] : (name ? [name] : []));
-        const params = getHashParams ? getHashParams() : new URLSearchParams();
-        if (key) params.set('node', key);
-        else params.delete('node');
-        const base = location.hash.split('?')[0] || '#/live';
-        const qs = params.toString();
-        const newUrl = location.pathname + location.search + base + (qs ? '?' + qs : '');
-        try { history.replaceState(null, '', newUrl); } catch (_) {}
+        setLiveHashParam('node', key);
         hideDropdown();
       }
 
@@ -1748,11 +2535,17 @@
 
       async function fetchSuggestions(q) {
         if (!nodeFilterDropdown) return;
+        if (document.activeElement !== nodeFilterInput) return;
         if (!q || q.length < 1) { hideDropdown(); return; }
+        const request = ++suggestionRequest;
+        const isCurrent = () => generation === liveGeneration && request === suggestionRequest &&
+          document.activeElement === nodeFilterInput;
         try {
           const resp = await fetch('/api/nodes/search?q=' + encodeURIComponent(q));
+          if (!isCurrent()) return;
           if (!resp.ok) { hideDropdown(); return; }
           const data = await resp.json();
+          if (!isCurrent()) return;
           const nodes = (data && data.nodes) || [];
           if (!nodes.length) { hideDropdown(); return; }
           nodeFilterDropdown.innerHTML = nodes.map(function (n, i) {
@@ -1766,6 +2559,7 @@
           }).join('');
           nodeFilterDropdown.classList.remove('hidden');
           nodeFilterInput.setAttribute('aria-expanded', 'true');
+          nodeFilterDropdown.dispatchEvent(new Event('live-menu-open', { bubbles: true }));
           nodeFilterDropdown.querySelectorAll('.live-node-filter-option').forEach(function (opt) {
             opt.addEventListener('mousedown', function (ev) {
               // Use mousedown so we run before blur hides the dropdown.
@@ -1773,17 +2567,21 @@
               selectSuggestion(opt);
             });
           });
-        } catch (_) { hideDropdown(); }
+        } catch (_) { if (isCurrent()) hideDropdown(); }
       }
 
       const debouncedInput = debounce(function (e) {
+        if (generation !== liveGeneration) return;
         const v = e.target.value.trim();
         // Apply live filter immediately as user types (no Enter required).
         applyFilterFromInput(v);
         fetchSuggestions(v);
       }, 200);
 
-      nodeFilterInput.addEventListener('input', debouncedInput);
+      nodeFilterInput.addEventListener('input', function (e) {
+        suggestionRequest++;
+        debouncedInput(e);
+      });
 
       nodeFilterInput.addEventListener('keydown', function (e) {
         const opts = nodeFilterDropdown ? nodeFilterDropdown.querySelectorAll('.live-node-filter-option') : [];
@@ -1823,6 +2621,7 @@
       });
 
       nodeFilterInput.addEventListener('blur', function () {
+        suggestionRequest++;
         // Slight delay so click on a suggestion can register first.
         setTimeout(hideDropdown, 150);
       });
@@ -1832,13 +2631,13 @@
         if (nodeFilterInput) nodeFilterInput.value = '';
         setNodeFilter([]);
         // Drop the ?node param without re-running the SPA route handler.
-        const params = getHashParams ? getHashParams() : new URLSearchParams();
-        params.delete('node');
-        const base = location.hash.split('?')[0] || '#/live';
-        const qs = params.toString();
-        const newUrl = location.pathname + location.search + base + (qs ? '?' + qs : '');
-        try { history.replaceState(null, '', newUrl); } catch (_) {}
+        setLiveHashParam('node', '');
       });
+    }
+    if (nodeFilterInput) {
+      nodeFilterInput.placeholder = 'Filter by node…';
+      nodeFilterInput.setAttribute('aria-busy', 'false');
+      nodeFilterInput.disabled = false;
     }
 
     // Geo filter overlay
@@ -1948,44 +2747,9 @@
           if (e.target.checked) { selectedAreaLayer.addTo(map); } else { map.removeLayer(selectedAreaLayer); }
         });
       }
-      AreaFilter.onChange(refresh);
+      areaOutlineChangeHandler = AreaFilter.onChange(refresh);
       refresh();
     })();
-
-    const matrixToggle = document.getElementById('liveMatrixToggle');
-    matrixToggle.checked = matrixMode;
-    matrixToggle.addEventListener('change', (e) => {
-      matrixMode = e.target.checked;
-      localStorage.setItem('live-matrix-mode', matrixMode);
-      applyMatrixTheme(matrixMode);
-      if (matrixMode) {
-        hideHeatMap();
-        const ht = document.getElementById('liveHeatToggle');
-        if (ht) { ht.checked = false; ht.disabled = true; }
-      } else {
-        const ht = document.getElementById('liveHeatToggle');
-        if (ht) { ht.disabled = false; }
-      }
-    });
-    applyMatrixTheme(matrixMode);
-    if (matrixMode) {
-      hideHeatMap();
-      const ht = document.getElementById('liveHeatToggle');
-      if (ht) { ht.checked = false; ht.disabled = true; }
-    } else {
-      // Ensure heat toggle is enabled if matrix mode is off (recover from stale state)
-      const ht = document.getElementById('liveHeatToggle');
-      if (ht) { ht.disabled = false; }
-    }
-
-    const rainToggle = document.getElementById('liveMatrixRainToggle');
-    rainToggle.checked = matrixRain;
-    rainToggle.addEventListener('change', (e) => {
-      matrixRain = e.target.checked;
-      localStorage.setItem('live-matrix-rain', matrixRain);
-      if (matrixRain) startMatrixRain(); else stopMatrixRain();
-    });
-    if (matrixRain) startMatrixRain();
 
     // Audio toggle
     const audioToggle = document.getElementById('liveAudioToggle');
@@ -2148,16 +2912,20 @@
         });
       });
       applyForViewport();
-      // #1180 — bind once across SPA re-mounts. MQL is process-global per
-      // query string; per-init binds accumulate handlers without bound.
-      if (!_liveNarrowMqlBound) {
-        if (narrowMql.addEventListener) narrowMql.addEventListener('change', applyForViewport);
-        else if (narrowMql.addListener) narrowMql.addListener(applyForViewport);
-        _liveNarrowMqlBound = true;
-        try {
-          window.__liveMQLBindCount = (window.__liveMQLBindCount || 0) + 1;
-        } catch (_) { /* sealed window */ }
-      }
+      // #880 — a follow folds the panel on phones; not persisted, so a
+      // pinned-open panel comes back on the next visit.
+      var controlsPair = pairs.find(function(p) { return p.rootId === 'liveControls'; });
+      collapseLiveControls = function() { setExpanded(controlsPair, false); };
+      initControlsFitTracker(); // #667
+      // #1180 — one 'change' handler at a time. MQL is process-global per
+      // query string, so per-init binds accumulated; #883 M3: bound per mount
+      // and dropped in destroy(), because a once-per-page binding kept the
+      // first mount's closure, and with it that mount's whole page, alive.
+      unbindNarrowMql();
+      if (narrowMql.addEventListener) narrowMql.addEventListener('change', applyForViewport);
+      else if (narrowMql.addListener) narrowMql.addListener(applyForViewport);
+      _liveNarrowMql = { mql: narrowMql, fn: applyForViewport };
+      try { window.__liveMQLBindCount = (window.__liveMQLBindCount || 0) + 1; } catch (_) { /* sealed window */ }
     })();
     // ───────────────────────────────────────────────────────────────────────
 
@@ -2197,55 +2965,56 @@
       // Escape exits fullscreen (only when currently in fullscreen so we
       // don't shadow other Escape handlers, e.g. dropdown close on the
       // node-filter input).
-      if (!window.__liveFullscreenKeyBound) {
-        window.addEventListener('keydown', function (e) {
-          if (e.defaultPrevented) return;
-          if (typeof e.key !== 'string') return;
-          // Only act when on the live page.
-          if (!document.querySelector('.live-page')) return;
-          // Escape: exit fullscreen if currently in fullscreen. Don't
-          // gate on focus-in-input here — exiting fullscreen via Escape
-          // should always work when chrome is hidden. Do NOT fire when
-          // not currently in fullscreen so other handlers see the key.
-          if (e.key === 'Escape') {
-            if (document.body.classList.contains('live-fullscreen')) {
-              e.preventDefault();
-              setFullscreen(false);
-            }
-            return;
+      if (_fullscreenKeyHandler) window.removeEventListener('keydown', _fullscreenKeyHandler);
+      _fullscreenKeyHandler = function (e) {
+        if (e.defaultPrevented) return;
+        if (typeof e.key !== 'string') return;
+        // Only act when on the live page.
+        if (!document.querySelector('.live-page')) return;
+        // Escape: exit fullscreen if currently in fullscreen. Don't
+        // gate on focus-in-input here — exiting fullscreen via Escape
+        // should always work when chrome is hidden. Do NOT fire when
+        // not currently in fullscreen so other handlers see the key.
+        if (e.key === 'Escape') {
+          if (document.body.classList.contains('live-fullscreen')) {
+            e.preventDefault();
+            setFullscreen(false);
           }
-          if (e.altKey || e.ctrlKey || e.metaKey) return;
-          var isF = (e.key === 'f' || e.key === 'F' || e.key.toLowerCase() === 'f');
-          if (!isF) return;
-          var t = e.target;
-          if (t) {
-            var tag = (t.tagName || '').toUpperCase();
-            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-            if (t.isContentEditable) return;
-          }
-          e.preventDefault();
-          toggleFullscreen();
-        });
-        window.__liveFullscreenKeyBound = true;
-      }
+          return;
+        }
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        var isF = (e.key === 'f' || e.key === 'F' || e.key.toLowerCase() === 'f');
+        if (!isF) return;
+        var t = e.target;
+        if (t) {
+          var tag = (t.tagName || '').toUpperCase();
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+          if (t.isContentEditable) return;
+        }
+        e.preventDefault();
+        toggleFullscreen();
+      };
+      window.addEventListener('keydown', _fullscreenKeyHandler);
     })();
     // ───────────────────────────────────────────────────────────────────────
 
     if (legendToggleBtn && legendEl) {
+      const setLegendHidden = (hidden, persist) => {
+        legendEl.classList.toggle('hidden', hidden);
+        const label = hidden ? 'Show legend' : 'Hide legend';
+        legendToggleBtn.setAttribute('aria-label', label);
+        legendToggleBtn.title = label;
+        legendToggleBtn.setAttribute('aria-expanded', String(!hidden));
+        if (persist) { try { localStorage.setItem('live-legend-hidden', String(hidden)); } catch (_) { /* ignore */ } }
+      };
       // Restore legend collapsed state from localStorage (#279)
       try {
-        if (localStorage.getItem('live-legend-hidden') === 'true') {
-          legendEl.classList.add('hidden');
-          legendToggleBtn.setAttribute('aria-label', 'Show legend');
-          legendToggleBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg>';
-        }
+        if (localStorage.getItem('live-legend-hidden') === 'true') setLegendHidden(true, false);
       } catch (_) { /* private browsing / storage disabled */ }
-      legendToggleBtn.addEventListener('click', () => {
-        const nowHidden = legendEl.classList.toggle('hidden');
-        legendToggleBtn.setAttribute('aria-label', nowHidden ? 'Show legend' : 'Hide legend');
-        legendToggleBtn.innerHTML = nowHidden ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg>';
-        try { localStorage.setItem('live-legend-hidden', String(nowHidden)); } catch (_) { /* ignore */ }
-      });
+      legendToggleBtn.addEventListener('click', () => setLegendHidden(!legendEl.classList.contains('hidden'), true));
+      const legendCloseBtn = document.getElementById('legendCloseBtn');
+      // The closed panel takes its x with it, so hand the focus to the toggle.
+      if (legendCloseBtn) legendCloseBtn.addEventListener('click', () => { setLegendHidden(true, true); legendToggleBtn.focus(); });
     }
 
     // Populate role legend from shared roles.js
@@ -2258,14 +3027,17 @@
       // #1619: expose so the feed-detail-card popup (constructed in a
       // different scope) can register itself as draggable.
       window._liveDragMgr = dragMgr;
+      liveDragMgr = dragMgr;
       var dragPanels = ['liveFeed', 'liveLegend', 'liveNodeDetail'];
       for (var di = 0; di < dragPanels.length; di++) {
         dragMgr.register(document.getElementById(dragPanels[di]));
       }
       dragMgr.restorePositions();
+      // #958: a Moments window that came up first joins it now.
+      joinMomentsPanel();
 
       // Responsive gate: disable drag below medium breakpoint or on touch
-      var dragMql = window.matchMedia('(pointer: fine) and (min-width: 768px)');
+      var dragMql = window.matchMedia(DRAG_MQ);
       function onDragMediaChange(e) {
         if (!e.matches) {
           // Revert dragged panels to corner positions. Preserve the
@@ -2279,19 +3051,25 @@
           dragMgr.disable();
         } else {
           dragMgr.enable();
+          // #958: the gate took the Moments window's corner; give it back.
+          applyPanelPosition(MOMENTS_PANEL, getPanelPositions()[MOMENTS_PANEL]);
           dragMgr.restorePositions();
         }
       }
       dragMql.addEventListener('change', onDragMediaChange);
+      // #839 — the MediaQueryList outlives the page; removed in destroy().
+      _dragMediaHandlers = { mql: dragMql, fn: onDragMediaChange };
       // Initial check
       if (!dragMql.matches) dragMgr.disable();
 
       // Resize clamping (debounced)
+      // #428 — stored and removed in destroy(): window outlives the page.
       var resizeTimer = null;
-      window.addEventListener('resize', function () {
+      _onDragManagerResize = function () {
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(function () { dragMgr.handleResize(); }, 200);
-      });
+      };
+      window.addEventListener('resize', _onDragManagerResize);
     }
 
     const roleLegendList = document.getElementById('roleLegendList');
@@ -2332,16 +3110,22 @@
     resizeHandle.addEventListener('mousedown', (e) => {
       feedResizing = true; e.preventDefault();
     });
-    document.addEventListener('mousemove', (e) => {
+    // #428 — the drag can leave feedEl's bounds, so mousemove/up stay on
+    // document; stored and removed in destroy() so they don't keep
+    // reacting to the mouse (and stacking) on later pages.
+    const _onFeedResizeMove = (e) => {
       if (!feedResizing) return;
       const newWidth = Math.max(200, Math.min(800, e.clientX - feedEl.getBoundingClientRect().left));
       feedEl.style.width = newWidth + 'px';
-    });
-    document.addEventListener('mouseup', () => {
+    };
+    const _onFeedResizeUp = () => {
       if (!feedResizing) return;
       feedResizing = false;
       localStorage.setItem('live-feed-width', parseInt(feedEl.style.width));
-    });
+    };
+    document.addEventListener('mousemove', _onFeedResizeMove);
+    document.addEventListener('mouseup', _onFeedResizeUp);
+    _feedResizeHandlers = { mousemove: _onFeedResizeMove, mouseup: _onFeedResizeUp };
 
     // Save/restore map view. #1709: URL hash lat/lon/zoom overrides
     // localStorage. Validated via shared parseViewportHash helper.
@@ -2349,13 +3133,21 @@
       ? parseViewportHash(location.hash) : null;
     if (urlVp) {
       map.setView([urlVp.lat, urlVp.lon], urlVp.zoom);
-    } else {
+    } else if (!kioskOn) {
+      // #883: kiosk starts from the hash or the map defaults, never from the
+      // viewer's own saved view.
       const savedView = localStorage.getItem('live-map-view');
       if (savedView) {
         try { const v = JSON.parse(savedView); map.setView([v.lat, v.lng], v.zoom); } catch {}
       }
     }
     map.on('moveend', () => {
+      // Leaflet's remove() leaves invalidateSize's debounced moveend timer
+      // armed, so this can run after destroy() has nulled the map.
+      if (!map) return;
+      // #883: the tour moves the map every step; the viewer's saved view
+      // stays as it was before kiosk.
+      if (kioskOn) return;
       const c = map.getCenter();
       localStorage.setItem('live-map-view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
     });
@@ -2418,13 +3210,17 @@
         else      { menu.removeAttribute('hidden');  moreBtn.setAttribute('aria-expanded', 'true');  }
       });
       // Click outside closes the menu.
-      document.addEventListener('click', function (e) {
+      // #428 — "outside" means outside moreBtn/menu, which can be anywhere
+      // on the page, so this stays on document; stored and removed in
+      // destroy() so it doesn't keep firing (and stacking) on later pages.
+      _moreMenuDocClickHandler = function (e) {
         if (menu.hasAttribute('hidden')) return;
         if (e.target === moreBtn || moreBtn.contains(e.target) ||
             e.target === menu   || menu.contains(e.target)) return;
         menu.setAttribute('hidden', '');
         moreBtn.setAttribute('aria-expanded', 'false');
-      });
+      };
+      document.addEventListener('click', _moreMenuDocClickHandler);
     })();
 
     // Timeline click to scrub
@@ -2487,14 +3283,20 @@
       scrubVisual(e.clientX);
       e.preventDefault();
     });
-    document.addEventListener('mousemove', (e) => {
+    // #428 — the scrub drag can leave timelineEl's bounds, so mousemove/up
+    // stay on document; stored and removed in destroy() so they don't keep
+    // reacting to the mouse (and stacking) on later pages.
+    const _onTimelineScrubMove = (e) => {
       if (!VCR.dragging) return;
       scrubVisual(e.clientX);
-    });
-    document.addEventListener('mouseup', () => {
+    };
+    const _onTimelineScrubUp = () => {
       if (!VCR.dragging) return;
       scrubRelease();
-    });
+    };
+    document.addEventListener('mousemove', _onTimelineScrubMove);
+    document.addEventListener('mouseup', _onTimelineScrubUp);
+    _timelineScrubHandlers = { mousemove: _onTimelineScrubMove, mouseup: _onTimelineScrubUp };
     timelineEl.addEventListener('touchstart', (e) => {
       VCR.dragging = true;
       VCR.scrubTs = null;
@@ -2525,7 +3327,10 @@
     }, 1000);
 
     // Prune stale nodes every 60 seconds
-    _pruneInterval = setInterval(pruneStaleNodes, 60000);
+    // One shared 60 s tick: nodes also age out of the "Last heard" filter
+    // here (#660), with no timer of its own.
+    _pruneInterval = setInterval(() => { pruneStaleNodes(); applyHeardFilter(); renderScopeLegend(); }, 60000);
+    if (!_scopeThemeListening) { window.addEventListener('theme-changed', invalidateScopePalette); _scopeThemeListening = true; }
 
     // Refresh relative timestamps in feed every 10 seconds (#701)
     _feedTimestampInterval = setInterval(function() {
@@ -2607,7 +3412,27 @@
       pktTimestamps = pktTimestamps.filter(t => now - t < 60000);
       const el = document.getElementById('livePktRate');
       if (el) el.textContent = pktTimestamps.length;
+      if (kiosk) kiosk.setRate(pktTimestamps.length); // #883 M2 tile, same tick
     }, 2000);
+  }
+
+  // #901: pure view model for the node popup's health. getHealthLastHeard
+  // never falls back from an explicit stats.lastHeard null to relay-touched
+  // directory timestamps. A null status is painted red like silent, the
+  // shared convention (Favorites status-err, My Mesh and Analytics count it
+  // as silent), but labelled "Unknown" as Favorites does, not "Offline".
+  // #902: status goes through the shared getNodeHealth entry point, so an
+  // in-window observer report is credited, and companions/sensors read
+  // "Quiet" in the neutral colour (getHealthLabel / isQuietHealthRole).
+  function liveNodeHealthView(n, stats, nowMs, observerReportedAt) {
+    const role = n && n.role;
+    const heardAt = getHealthLastHeard(n, stats);
+    const status = getNodeHealth(role, heardAt, observerReportedAt, nowMs).status;
+    const quiet = status === 'degraded' && isQuietHealthRole(role);
+    const dotClass = status === 'healthy' ? 'health-green' : status === 'degraded' ? (quiet ? 'health-muted' : 'health-yellow') : 'health-red';
+    const label = status === 'healthy' ? 'Online' : status === 'degraded' ? getHealthLabel(role, status)
+      : status === 'silent' ? 'Offline' : 'Unknown';
+    return { status, heardAt, dotClass, label };
   }
 
   async function showNodeDetail(pubkey) {
@@ -2618,39 +3443,44 @@
     document.getElementById('nodeDetailBackdrop').classList.add('active');
     content.innerHTML = '<div style="padding:20px;color:var(--text-muted)">Loading…</div>';
     try {
-      const [data, healthData] = await Promise.all([
+      const [data, healthData, observersResp] = await Promise.all([
         api('/nodes/' + encodeURIComponent(pubkey), { ttl: 30 }),
-        api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: 30 }).catch(() => null)
+        api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: 30 }).catch(() => null),
+        // #902: the cached bulk roster, for observer credit. Never per node.
+        api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null)
       ]);
+      const observerIdx = MyMeshObservers.index(observersResp);
       const n = data.node;
       const h = healthData || {};
       const stats = h.stats || {};
-      const observers = h.observers || [];
       const recent = h.recentPackets || [];
       const roleColor = ROLE_COLORS[n.role] || '#6b7280';
       const roleLabel = (ROLE_LABELS[n.role] || n.role || 'unknown').replace(/s$/, '');
       const hasLoc = n.lat != null && n.lon != null;
-      const lastSeen = formatLiveTimestampHtml(n.last_seen);
-      const thresholds = window.getHealthThresholds ? getHealthThresholds(n.role) : { degradedMs: 3600000, silentMs: 86400000 };
-      const ageMs = n.last_seen ? Date.now() - new Date(n.last_seen).getTime() : Infinity;
-      const statusDot = ageMs < thresholds.degradedMs ? 'health-green' : ageMs < thresholds.silentMs ? 'health-yellow' : 'health-red';
-      const statusLabel = ageMs < thresholds.degradedMs ? 'Online' : ageMs < thresholds.silentMs ? 'Degraded' : 'Offline';
+      // #901: same evidence as the other health views (identity-safe
+      // stats.lastHeard, legacy fallback to last_heard / last_seen); the
+      // status dot and the "Last Heard" time share one timestamp.
+      // #902: plus observer credit from the cached bulk roster.
+      const health = liveNodeHealthView(n, stats, undefined, MyMeshObservers.reportedAt(observerIdx, pubkey));
+      const lastSeen = formatLiveTimestampHtml(health.heardAt);
+      const statusDot = health.dotClass;
+      const statusLabel = health.label;
 
       let html = `
         <div style="padding:16px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
-            <span class="${statusDot}" style="font-size:18px" aria-hidden="true"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>
+            <span class="live-health-dot ${statusDot}" style="font-size:18px" aria-hidden="true"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>
             <h3 style="margin:0;font-size:16px;font-weight:700;">${escapeHtml(n.name || 'Unknown')}</h3>
           </div>
           <div style="margin-bottom:12px;">
             <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;background:${roleColor};color:#fff;">${roleLabel.toUpperCase()}</span>
-            <span style="color:var(--text-muted);font-size:12px;margin-left:8px;">${statusLabel}</span>
+            <span style="color:var(--text-muted);font-size:12px;margin-left:8px;"><span class="sr-only">Status: </span>${statusLabel}</span>
           </div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
             <code style="font-size:10px;word-break:break-all;">${escapeHtml(n.public_key)}</code>
           </div>
           <table style="font-size:12px;width:100%;border-collapse:collapse;">
-            <tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Last Seen</td><td>${lastSeen}</td></tr>
+            <tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Last Heard</td><td>${lastSeen}</td></tr>
             <tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Adverts</td><td>${n.advert_count || 0}</td></tr>
             ${'configured_scope' in n && n.configured_scope !== null ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;" title="Region scopes this node has configured, confirmed via an observer /neighbors report (status=responded) — concrete evidence (#1865).${n.configured_scope_at ? ' Last confirmed ' + escapeHtml(String(n.configured_scope_at)) + '.' : ''}">Configured scope <span style="color:var(--status-green,#2ecc71)" aria-label="confirmed"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg></span></td><td>${n.configured_scope === '' ? '<span style="color:var(--text-muted)">none configured</span>' : `<code style="color:var(--link-color)">${escapeHtml(n.configured_scope)}</code>`}</td></tr>` : ''}
             ${'default_scope' in n ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Scope</td><td>${n.default_scope === null ? '<span style="color:var(--text-muted)">—</span>'
@@ -2658,17 +3488,14 @@
   : `<code style="color:var(--link-color)">${escapeHtml(n.default_scope)}</code>`
 }</td></tr>` : ''}
             ${hasLoc ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Location</td><td>${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}</td></tr>` : ''}
-            ${stats.avgSnr != null ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Avg SNR</td><td>${stats.avgSnr.toFixed(1)} dB</td></tr>` : ''}
+            ${stats.avgSnr != null ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;" title="${escapeHtml(HeardBy.SNR_TIP)}">Direct SNR</td><td>${Number(stats.avgSnr).toFixed(1)} dB</td></tr>` : ''}
             ${stats.avgHops != null ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Avg Hops</td><td>${stats.avgHops.toFixed(1)}</td></tr>` : ''}
             ${stats.totalTransmissions || stats.totalPackets ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Total Packets</td><td>${stats.totalTransmissions || stats.totalPackets}</td></tr>` : ''}
           </table>`;
 
-      if (observers.length) {
-        const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))];
-        html += `<h4 style="font-size:12px;margin:12px 0 6px;color:var(--text-muted);">Heard By${regions.length ? ' — Regions: ' + regions.join(', ') : ''}</h4>
-          <div style="font-size:11px;">` +
-          observers.map(o => `<div style="padding:2px 0;"><a href="#/observers/${encodeURIComponent(o.observer_id)}" style="color:var(--link-color);text-decoration:none;">${escapeHtml(o.observer_name || o.observer_id.slice(0, 12))}${o.iata ? ' (' + escapeHtml(o.iata) + ')' : ''}</a> — ${o.packetCount || o.count || 0} pkts</div>`).join('') +
-          '</div>';
+      // #76: direct observers with this node's signal, relay ones without.
+      if (HeardBy.counts(h).total) {
+        html += '<div class="heard-by live-heard-by">' + HeardBy.renderList(h, { link: true }) + '</div>';
       }
 
       if (recent.length) {
@@ -2744,6 +3571,7 @@
   }
 
   async function loadNodes(beforeTs) {
+    const generation = liveGeneration;
     try {
       const aqs = AreaFilter.areaQueryString();
       // #1108 — honor region selector for visible map nodes unless
@@ -2767,6 +3595,7 @@
       const { nodes: list } = await fetchAllNodes(`${beforeQs}${aqs}${rqs}`, {
         safetyCap: window.LIVE_MAP_MAX_NODES || 10000,
       });
+      if (generation !== liveGeneration) return;
       var now = Date.now();
       // Time-scoped reload (VCR scrub/replay): reconcile against the existing
       // markers instead of tearing the layer down. addNodeMarker() already
@@ -2809,29 +3638,118 @@
         }
       });
       const _el2 = document.getElementById('liveNodeCount'); if (_el2) _el2.textContent = Object.keys(nodeMarkers).length;
+      applyHeardFilter();
       // Initialize shared HopResolver with loaded nodes
       if (window.HopResolver) HopResolver.init(list);
-      // Fetch affinity data for hop disambiguation
-      fetchAffinityData();
+      // Fetch affinity data for hop disambiguation, then every 60 s
       startAffinityRefresh();
     } catch (e) { console.error('Failed to load nodes:', e); }
   }
 
-  let _affinityInterval = null;
+  // #984 — the neighbor-graph (hop affinity) poller. A stalled connection
+  // once collected one request per tick for 20 minutes, then released them
+  // all at once. So: at most one request at a time, aborted after timeoutMs
+  // (the next tick tries again); no poll while the tab is hidden, and one
+  // refresh on return if the data is older than the interval. A failed,
+  // non-OK or truncated response keeps the last good data and warns once per
+  // failure streak. The timeout also covers the body download: a ~95 KB graph
+  // needs about 55 kbps sustained to finish in 15 s, which any link that can
+  // run the live page clears; a slower one retries on the next tick and keeps
+  // the last good data. Globals are read at call time; tests inject fakes.
+  function createAffinityPoller(deps) {
+    const env = Object.assign({
+      url: '/api/analytics/neighbor-graph',
+      intervalMs: 60000,
+      timeoutMs: 15000,
+      onData: () => {},
+      fetch: (url, init) => fetch(url, init),
+      document: document,
+      now: () => Date.now(),
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (id) => clearTimeout(id),
+      setInterval: (fn, ms) => setInterval(fn, ms),
+      clearInterval: (id) => clearInterval(id),
+      createController: () => (typeof AbortController === 'function' ? new AbortController() : null),
+      warn: (msg, e) => console.warn(msg, e),
+    }, deps);
+    let intervalId = null;
+    let current = null;     // the open request: { controller, timer }
+    let lastOkAt = null;
+    let failing = false;
 
-  async function fetchAffinityData() {
-    try {
-      const resp = await fetch('/api/analytics/neighbor-graph');
-      const graph = await resp.json();
-      if (window.HopResolver && HopResolver.setAffinity) {
-        HopResolver.setAffinity(graph);
+    // Frees the slot if req still holds it; false for a superseded request.
+    function release(req) {
+      if (current !== req) return false;
+      env.clearTimeout(req.timer);
+      current = null;
+      return true;
+    }
+    function fail(e) {
+      if (failing) return;
+      failing = true;
+      env.warn('Failed to fetch affinity data:', e);
+    }
+    async function tick() {
+      if (current || env.document.hidden) return;
+      const req = { controller: env.createController(), timer: null };
+      current = req;
+      req.timer = env.setTimeout(() => {
+        if (!release(req)) return;
+        if (req.controller) req.controller.abort();
+        fail(new Error('timed out after ' + env.timeoutMs + ' ms'));
+      }, env.timeoutMs);
+      let graph;
+      try {
+        const resp = await env.fetch(env.url, { signal: req.controller ? req.controller.signal : undefined });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        graph = await resp.json();
+      } catch (e) {
+        if (release(req)) fail(e);
+        return;
       }
-    } catch (e) { console.warn('Failed to fetch affinity data:', e); }
+      if (!release(req)) return;
+      lastOkAt = env.now();
+      failing = false;
+      env.onData(graph);
+    }
+    function onVisibility() {
+      if (env.document.hidden) return;
+      if (lastOkAt === null || env.now() - lastOkAt >= env.intervalMs) tick();
+    }
+    return {
+      timeoutMs: env.timeoutMs,
+      tick: tick,
+      inFlight: () => current !== null,
+      // Polls now and every intervalMs; calling it again restarts the
+      // interval (the DOM adds the same listener only once).
+      start() {
+        if (intervalId !== null) env.clearInterval(intervalId);
+        intervalId = env.setInterval(tick, env.intervalMs);
+        env.document.addEventListener('visibilitychange', onVisibility);
+        return tick();
+      },
+      stop() {
+        if (intervalId !== null) { env.clearInterval(intervalId); intervalId = null; }
+        env.document.removeEventListener('visibilitychange', onVisibility);
+        const req = current;
+        if (req && release(req) && req.controller) req.controller.abort();
+      },
+    };
   }
 
+  let affinityPoller = null;
+
   function startAffinityRefresh() {
-    if (_affinityInterval) clearInterval(_affinityInterval);
-    _affinityInterval = setInterval(fetchAffinityData, 60000);
+    if (!affinityPoller) {
+      affinityPoller = createAffinityPoller({
+        onData: (graph) => { if (window.HopResolver && HopResolver.setAffinity) HopResolver.setAffinity(graph); },
+      });
+    }
+    return affinityPoller.start();
+  }
+
+  function stopAffinityRefresh() {
+    if (affinityPoller) { affinityPoller.stop(); affinityPoller = null; }
   }
 
   function clearNodeMarkers() {
@@ -2968,6 +3886,7 @@
 
     for (const group of sorted) {
       if (multibyteOnly && !groupIsMultibyte(group.packets)) continue;
+      if (isScopedHidden(group.latestPkt)) continue;
       const pkt = Object.assign({}, group.latestPkt, { observation_count: group.count });
       const decoded = pkt.decoded || {};
       const header = decoded.header || {};
@@ -3005,6 +3924,9 @@
       item.setAttribute('role', 'button');
       if (group.hash) item.setAttribute('data-hash', group.hash);
       item.style.cursor = 'pointer';
+      // Rebuilt items had no hash stripe before #882; only the scope stripe is added here.
+      var _stripe1 = colorByScope ? feedStripeColor(pkt, group.hash) : null;
+      if (_stripe1) item.style.borderLeft = '4px solid ' + _stripe1;
       item.innerHTML = `
         <span class="feed-icon" style="color:${color}">${icon}</span>
         <span class="feed-type" style="color:${color}">${typeName}</span>
@@ -3018,7 +3940,7 @@
 
       // Register in dedup map so replay and live updates work
       if (group.hash) {
-        feedDedup.set(group.hash, { element: item, count: group.count, pkt, packets: group.packets, createdAt: Date.now() });
+        rememberFeedItem(group.hash, { element: item, count: group.count, pkt, packets: group.packets, createdAt: Date.now() });
       }
     }
   }
@@ -3068,18 +3990,14 @@
       popupAnchor: [0, -sizePx / 2]
     });
     const marker = L.marker([n.lat, n.lon], { icon: icon, interactive: true });
-    if (nodesLayer) {
-      try {
-        // If the marker is outside the current map bounds, it is intentionally
-        // deferred to save DOM nodes. cullMarkers() is the only path that will
-        // re-attach it later when the user pans or zooms.
-        if (!map || map.getBounds().pad(0.5).contains(marker.getLatLng())) {
-          marker.addTo(nodesLayer);
-        }
-      } catch (e) {
-        // Fallback: map.getBounds() can throw during early Leaflet initialization
-        marker.addTo(nodesLayer);
-      }
+    // #660: a node the "Last heard" filter hides is never attached; its
+    // marker is kept so applyHeardFilter() can show it again without a rebuild.
+    marker._heardHidden = isHeardHidden(n, heardWindowMs(), Date.now());
+    // If the marker is outside the current map bounds, it is intentionally
+    // deferred to save DOM nodes. cullMarkers() is the only path that will
+    // re-attach it later when the user pans or zooms.
+    if (nodesLayer && !marker._heardHidden && markerInView(marker)) {
+      marker.addTo(nodesLayer);
     }
 
     marker.bindTooltip(escapeHtml(n.name || n.public_key.slice(0, 8)), {
@@ -3243,6 +4161,7 @@
 
   // Expose for testing
   window._livePruneStaleNodes = pruneStaleNodes;
+  window._liveNodeHealthView = liveNodeHealthView;
   window._liveBuildClickablePathPopupHtml = buildClickablePathPopupHtml;
   window._livePruneClickablePaths = pruneClickablePaths;
   window._liveClickablePaths = clickablePaths;
@@ -3256,10 +4175,16 @@
   window._liveExpandToBufferEntriesAsync = expandToBufferEntriesAsync;
   window._liveSEG_MAP = SEG_MAP;
   window._liveBufferPacket = bufferPacket;
+  window._liveGroupIsMultibyte = groupIsMultibyte;
   // "One socket per viewer" tests: Live must reach the packet stream through
   // app.js's shared channel and never open a socket of its own.
   window._liveConnectWS = connectWS;
   window._liveWSHandler = function() { return wsHandler; };
+  // #881 M2 E2E: the moments controller and the map a card click moves.
+  window._liveMoments = function() { return moments; };
+  // #883 M1 E2E: the kiosk controller (stats() only).
+  window._liveKiosk = function() { return kiosk; };
+  window._liveGetMap = function() { return map; };
   window._liveVCR = function() { return VCR; };
   window._liveGetFavoritePubkeys = getFavoritePubkeys;
   window._livePacketInvolvesFavorite = packetInvolvesFavorite;
@@ -3273,7 +4198,17 @@
   window._liveSetNodeFilter = setNodeFilter;
   window._liveFormatLiveTimestampHtml = formatLiveTimestampHtml;
   window._liveResolveHopPositions = resolveHopPositions;
+  window._liveResolveHopEntries = resolveHopEntries;
+  window._liveOneByteHopsMode = oneByteHopsMode;
+  window._liveIsUncertainSegment = isUncertainSegment;
+  window._liveApplyOneByteHopsMode = applyOneByteHopsMode;
+  window._liveStartFollow = function(hash, opts) { return startFollow(hash, opts); };
+  window._liveStopFollow = function() { stopFollow(); };
+  window._liveFollowState = function() { return followState; };
+  window._liveFollowArmed = function() { return followArmed; };
   window._liveForeignPathColor = foreignPathColor;
+  window._liveScopeColorFor = scopeColorFor;
+  window._liveScopeRegistry = function() { return window.LiveScopeColor ? scopeRegistry() : null; };
   window._liveVcrSpeedCycle = vcrSpeedCycle;
   window._liveSpeedLabel = speedLabel;
   window._liveVcrPause = vcrPause;
@@ -3285,6 +4220,10 @@
     return addFeedItem(icon, typeName, payload, hops, color, pkt);
   };
   window._liveRebuildFeedList = function() { return rebuildFeedList(); };
+  // #984 test seams: the poller factory and this mount's poller.
+  window._liveCreateAffinityPoller = createAffinityPoller;
+  window._liveStartAffinityRefresh = startAffinityRefresh;
+  window._liveAffinityPoller = function() { return affinityPoller; };
 
   // PR #1490 test seams: Expose internal state for Playwright assertions
   window._liveDrawAnimatedLine = drawAnimatedLine;
@@ -3294,7 +4233,9 @@
     getPathCount: () => (typeof recentPaths !== 'undefined' ? recentPaths.length : 0),
     wake: wakeCanvasEngine,
     getPulses: () => activePulses,
-    triggerPulse: pulseNode
+    triggerPulse: pulseNode,
+    // #883 M3: liveLater() timeouts pending now (each leaves when it fires).
+    getLaterCount: () => liveTimeouts.size
   };
 
   async function replayRecent() {
@@ -3369,17 +4310,228 @@
     onWS(wsHandler);
   }
 
+  // #881 M2 — Moments. Waits for /api/config/client; does nothing at all
+  // (no listener, no request, no DOM) unless the server has moments on and
+  // the viewer has not turned them off. live-moments.js owns the cards and
+  // the drawer; this is the map half and the viewer switch.
+  async function initMoments(generation) {
+    try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
+    const M = window.LiveMoments;
+    if (generation !== liveGeneration || !map || !M || !window.MC_MOMENTS_CFG || moments) return;
+    let stored = null;
+    try { stored = localStorage.getItem(M.STORAGE_KEY); } catch (_) { /* private mode */ }
+    const fromHash = getHashParams ? getHashParams().get(M.HASH_PARAM) : null;
+    // #883 M2: Moments are on in kiosk unless the link says moments=0.
+    const enabled = M.resolveInitialEnabled(kioskOn && fromHash !== '0' ? '1' : fromHash, stored, momentSettings().enabled);
+    // #883: a kiosk link applies ?moments= without saving it.
+    if (!kioskOn && (fromHash === '0' || fromHash === '1')) {
+      try { localStorage.setItem(M.STORAGE_KEY, enabled ? 'true' : 'false'); } catch (_) { /* quota */ }
+    }
+    if (!document.querySelector('.live-page')) return;
+    window.addEventListener('moments-defaults-changed', onMomentsDefaultsChanged);
+    momentsListening = true;
+    if (enabled) startMoments();
+    const label = document.getElementById('liveMomentsLabel');
+    const toggle = document.getElementById('liveMomentsToggle');
+    if (label && toggle) {
+      label.style.display = '';
+      toggle.checked = enabled;
+      toggle.addEventListener('change', () => {
+        try { localStorage.setItem(M.STORAGE_KEY, toggle.checked ? 'true' : 'false'); } catch (_) { /* private mode */ }
+        if (toggle.checked) startMoments();
+        else stopMoments();
+        setLiveHashParam(M.HASH_PARAM, toggle.checked ? '' : '0');
+      });
+    }
+  }
+
+  // The viewer's `moments` customizer section over the built-in defaults
+  // (live-moments.js SETTINGS). Read on every use, so a change applies live.
+  function momentSettings() {
+    const sec = window.SITE_CONFIG && window.SITE_CONFIG.moments;
+    return window.LiveMoments.SETTINGS.resolve(sec);
+  }
+
+  // The customizer changed a default (#881 M3): the stack re-fits, and a
+  // changed on/off default - which the customizer applies by forgetting the
+  // viewer's saved choice - is re-resolved, so the checkbox follows.
+  function onMomentsDefaultsChanged() {
+    const M = window.LiveMoments;
+    const toggle = document.getElementById('liveMomentsToggle');
+    if (!M || !toggle || !window.MC_MOMENTS_CFG) return;
+    let stored = null;
+    try { stored = localStorage.getItem(M.STORAGE_KEY); } catch (_) { /* private mode */ }
+    const enabled = M.resolveInitialEnabled(null, stored, momentSettings().enabled);
+    if (enabled !== toggle.checked) {
+      toggle.checked = enabled;
+      if (enabled) startMoments();
+      else stopMoments();
+    }
+    if (moments) moments.onSettingsChanged();
+  }
+
+  // #883 M1 — the kiosk controller. Its tour fits the map to one area per
+  // step: animated (flyToBounds) unless the viewer prefers reduced motion.
+  // #968 M1: it waits for /api/config/client, which carries the operator
+  // preset (window.MC_KIOSK_CFG); the link's own values still win.
+  async function initKiosk(generation) {
+    const K = window.LiveKiosk;
+    if (!kioskOn || !K || kiosk || generation !== liveGeneration || !map) return;
+    try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
+    if (!kioskOn || kiosk || generation !== liveGeneration || !map) return;
+    const page = document.querySelector('.live-page');
+    if (!page) return;
+    const params = K.parseKioskParams(getHashParams(), window.MC_KIOSK_CFG);
+    setKioskTheme(params.theme);
+    applyKioskDisplay();
+    kiosk = K.create({
+      doc: document,
+      win: window,
+      root: page,
+      map: { on: (t, fn) => { if (map) map.on(t, fn); }, off: (t, fn) => { if (map) map.off(t, fn); } },
+      params: params,
+      // Shared with the selected-area outline: one request per hour at most.
+      fetchAreas: () => api('/config/areas/polygons', { ttl: 3600 }),
+      fly: (bounds, o) => {
+        if (!map) return;
+        // The safe-area inset (3 % of the short side unless set, #968 M2)
+        // keeps the area clear of TV overscan.
+        const pad = K.insetPx(kioskDisplay().safeInsetVmin, window.innerWidth, window.innerHeight);
+        const opts = { padding: [pad, pad], maxZoom: 12 };
+        if (o.animate) map.flyToBounds(bounds, Object.assign(opts, { duration: 2.5 }));
+        else map.fitBounds(bounds, Object.assign(opts, { animate: false }));
+      },
+      reducedMotion: prefersReducedMotion,
+      // Follow can start in kiosk (a path popup, a feed card), not by URL.
+      getMode: liveMode,
+      requestFullscreen: () => document.documentElement.requestFullscreen({ navigationUI: 'hide' }),
+      exitFullscreen: () => document.exitFullscreen(),
+      exit: () => {
+        if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+        location.hash = K.stripKioskParams(location.hash);
+      },
+      warn: (m) => console.warn(m),
+      now: () => Date.now(),
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (id) => clearTimeout(id),
+      // #883 M2 big numbers: bulk reads through the client cache, polled by
+      // the controller (60 s, visible only); the records come from Moments.
+      fetchStatus: () => api('/nodes/network-status', { ttl: 30000, retry503: false }),
+      fetchAreaStats: () => api('/analytics/areas', { ttl: 30000, retry503: false }),
+      momentsOn: () => !!moments,
+      // #883 M3: the in-place remount is the router's own destroy() + init()
+      // for the same hash; the document (and browser fullscreen) stays.
+      hash: () => location.hash,
+      remount: () => navigate(),
+      momentsVisible: () => !!(moments && moments.stats().visible),
+      reseed: () => { if (moments) moments.reseed(); },
+      wakeLock: (navigator.wakeLock && typeof navigator.wakeLock.request === 'function') ? navigator.wakeLock : null,
+      setAutoReload: setKioskAutoReload,
+    });
+  }
+
+  function setKioskAutoReload(on) {
+    if (window.VersionNotice) window.VersionNotice.setAutoReload(on);
+  }
+
+  function startMoments() {
+    const page = document.querySelector('.live-page');
+    if (moments || !page || !map) return;
+    moments = window.LiveMoments.create({
+      doc: document,
+      root: page,
+      onWS: onWS,
+      offWS: offWS,
+      fetchJSON: (url, signal) => fetch(url, { signal }).then(r => r.ok ? r.json() : null),
+      now: () => Date.now(),
+      matchMedia: (q) => window.matchMedia(q),
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (id) => clearTimeout(id),
+      // #880: a follow holds the live stream (bufferPacket), so it holds the
+      // cards too: moments go to history only, as with the VCR out of LIVE.
+      getMode: liveMode,
+      getZoom: () => (map ? map.getZoom() : null),
+      getSettings: () => window.SITE_CONFIG && window.SITE_CONFIG.moments,
+      // Phone: the node-detail sheet and the open settings own the bottom.
+      isSuppressed: () => {
+        const d = document.getElementById('liveNodeDetail');
+        const c = document.getElementById('liveControls');
+        return !!((d && !d.classList.contains('hidden')) || (c && c.classList.contains('is-expanded')));
+      },
+      profileOffered: () => !!(window.TerrainProfile && typeof window.TerrainProfile.offered === 'function' &&
+        window.TerrainProfile.offered(window.MC_DHM_CFG)),
+      navigate: (href) => { location.hash = href; },
+      onFly: momentFly,
+      // #883 M2: large Moments in kiosk, two cards at most, times kept
+      // fresh; every moment also feeds the kiosk's record tile.
+      cardCap: kioskOn ? 2 : 0,
+      timeRefreshMs: kioskOn ? 30000 : 0,
+      onMoment: (m) => { if (kiosk) kiosk.onMoment(m); },
+      // #958: a drag panel like the Feed, except in kiosk.
+      panelId: kioskOn ? null : MOMENTS_PANEL,
+    });
+    joinMomentsPanel();
+  }
+
+  // #958: makes the Moments window a panel of this mount's DragManager.
+  // startMoments() (after MeshConfigReady) and init()'s DragManager block
+  // both call it, so the order does not matter: once both exist, the one
+  // that runs second registers the window, once.
+  function joinMomentsPanel() {
+    if (!moments || momentsPanelRelease) return;
+    momentsPanelRelease = attachMomentsPanel(document.getElementById(MOMENTS_PANEL), liveDragMgr, kioskOn);
+  }
+
+  function stopMoments() {
+    if (momentsPanelRelease) { momentsPanelRelease(); momentsPanelRelease = null; }
+    if (moments) { moments.destroy(); moments = null; }
+  }
+
+  function clearMomentHighlight() {
+    if (!_momentHl) return;
+    clearTimeout(_momentHl.timer);
+    for (const l of _momentHl.layers) { try { l.remove(); } catch (_) {} }
+    _momentHl = null;
+  }
+
+  // momentFly runs the module's Leaflet plan and marks the target for 10 s:
+  // a ring per node (a divIcon, so CSS styles it and reduced motion stops
+  // its pulse) and, for a record link, a dashed line between the two.
+  function momentFly(plan, t) {
+    if (!map || !plan) return;
+    try { map[plan.method].apply(map, plan.args); } catch (_) { return; }
+    clearMomentHighlight();
+    const ring = (p) => L.marker([p.lat, p.lon], {
+      icon: L.divIcon({ className: 'live-moment-hl' + (plan.reduce ? ' is-static' : ''), iconSize: [28, 28] }),
+      interactive: false, keyboard: false,
+    });
+    const layers = [];
+    if (t.type === 'link') {
+      const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+      layers.push(L.polyline([[t.a.lat, t.a.lon], [t.b.lat, t.b.lon]], {
+        color: accent, weight: 3, opacity: 0.9, dashArray: '6 6', interactive: false,
+      }));
+      layers.push(ring(t.a), ring(t.b));
+    } else {
+      layers.push(ring(t));
+    }
+    for (const l of layers) l.addTo(map);
+    _momentHl = { layers, timer: setTimeout(clearMomentHighlight, 10000) };
+  }
+
   // A packet group is multibyte when its path hash size is >= 2 bytes.
-  // All observations of one packet share the same hash size; use the first
-  // observation with a resolvable raw_hex. Unresolvable => treated as single
-  // (excluded when the "Multibyte only" filter is on).
+  // #608: observations of one content hash can be heard on different routes
+  // (cmd/server/store.go StoreTx.routeMask), so hash size is read per
+  // observation from ITS OWN raw_hex header (window.MC_packetHashSize
+  // derives the route from the frame itself, not from a passed-in field) --
+  // it is not assumed shared across the group. Use the first observation
+  // with a resolvable raw_hex; unresolvable => treated as single (excluded
+  // when the "Multibyte only" filter is on).
   function groupIsMultibyte(packets) {
     if (!packets || !packets.length) return false;
     for (var i = 0; i < packets.length; i++) {
       var p = packets[i];
-      var size = window.MC_packetHashSize
-        ? window.MC_packetHashSize(p.raw_hex, p.route_type)
-        : 0;
+      var size = window.MC_packetHashSize ? window.MC_packetHashSize(p.raw_hex) : 0;
       if (size > 0) return size >= 2;
     }
     return false;
@@ -3413,6 +4565,9 @@
     // --- Favorites filter ---
     if (showOnlyFavorites && !packets.some(function(p) { return packetInvolvesFavorite(p); })) return;
 
+    // --- #882 "Scoped only": scope is a transmission attribute, first is enough ---
+    if (isScopedHidden(first)) return;
+
     // --- Node filter ---
     if (nodeFilterKeys.length) {
       nodeFilterTotal++;
@@ -3427,6 +4582,17 @@
       if (_regionSel && _regionSel.length && !packetMatchesRegion(packets, observerIataMap, _regionSel)) return;
     }
 
+    // #882 — scope colour for this transmission (registers the scope for the
+    // legend in every colour mode); null unless "Color by scope" is on.
+    const scopeColor = scopeColorFor(first, !isReplay);
+
+    // #880 — "Follow next packet": the first group that passed every filter
+    // above, i.e. the next one the viewer can see.
+    if (followArmed && !isReplay && VCR.mode === 'LIVE') {
+      const nextHash = window.LiveFollow && window.LiveFollow.parseFollowParam(first.hash);
+      if (nextHash) startFollow(nextHash, { settleMs: followSettleMs(first._ts) });
+    }
+
     // --- Ensure ADVERT nodes appear on map ---
     for (var pi = 0; pi < packets.length; pi++) {
       var pkt = packets[pi];
@@ -3436,7 +4602,7 @@
       if (h.payloadTypeName === 'ADVERT' && p.pubKey) {
         var key = p.pubKey;
         if (!nodeMarkers[key] && p.lat != null && p.lon != null && !(p.lat === 0 && p.lon === 0)) {
-          var n = { public_key: key, name: p.name || key.slice(0,8), role: p.role || 'unknown', lat: p.lat, lon: p.lon, _liveSeen: Date.now() };
+          var n = { public_key: key, name: p.name || key.slice(0,8), role: p.role || 'unknown', lat: p.lat, lon: p.lon, _liveSeen: Date.now(), _lastHeard: Date.now() };
           nodeData[key] = n;
           addNodeMarker(n);
           if (window.HopResolver) HopResolver.init(Object.values(nodeData));
@@ -3505,6 +4671,7 @@
     // Prefer path_json (per-observer unique path) over decoded.path.hops (same for all)
     var allPaths = [];
     var seenPathKeys = new Set();
+    var hopMode = oneByteHopsMode(); // #912 M1: once per packet group
     for (var qi = 0; qi < packets.length; qi++) {
       var qpkt = packets[qi];
       var qd = qpkt.decoded || {};
@@ -3518,7 +4685,7 @@
       var pathKey = hops.join(',');
       if (seenPathKeys.has(pathKey)) continue;
       seenPathKeys.add(pathKey);
-      var hopPositions = resolveHopPositions(hops, qp, window.getResolvedPath ? getResolvedPath(qpkt) : null);
+      var hopPositions = resolveHopPositions(hops, qp, window.getResolvedPath ? getResolvedPath(qpkt) : null, hopMode);
       if (hopPositions.length >= 2) {
         allPaths.push({ hopPositions: hopPositions, raw: qpkt.raw || first.raw });
       } else if (hopPositions.length === 1) {
@@ -3529,7 +4696,7 @@
     // If no multi-hop paths found, try the decoded path as fallback
     if (allPaths.length === 0) {
       var fallbackHops = decoded.path?.hops || [];
-      var fallbackPositions = resolveHopPositions(fallbackHops, payload);
+      var fallbackPositions = resolveHopPositions(fallbackHops, payload, null, hopMode);
       if (fallbackPositions.length >= 2) {
         allPaths.push({ hopPositions: fallbackPositions, raw: first.raw });
       } else if (fallbackPositions.length === 1) {
@@ -3558,14 +4725,16 @@
       // depth-scaled red for this path's line segments instead.
       var originKey = allPaths[ai].hopPositions[0] && allPaths[ai].hopPositions[0].key;
       var originForeign = highlightForeign && originKey && nodeData[originKey] && !!nodeData[originKey].foreign;
-      var pathColor = originForeign ? foreignPathColor(allPaths[ai].hopPositions.length) : color;
+      // Precedence: foreign red > scope > hash (per segment) > packet type.
+      var pathColor = originForeign ? foreignPathColor(allPaths[ai].hopPositions.length) : (scopeColor || color);
+      var forcePathColor = originForeign || !!scopeColor;
       // For TRACE packets, split at hopsCompleted: solid for completed, dashed for remaining
       var hopsCompleted = decoded.path && decoded.path.hopsCompleted;
       if (typeName === 'TRACE' && hopsCompleted != null && hopsCompleted < allPaths[ai].hopPositions.length) {
         var completedPositions = allPaths[ai].hopPositions.slice(0, hopsCompleted + 1);
         var remainingPositions = allPaths[ai].hopPositions.slice(hopsCompleted);
         if (completedPositions.length >= 2) {
-          animatePath(completedPositions, typeName, pathColor, allPaths[ai].raw, onHop, pktMeta, originForeign);
+          animatePath(completedPositions, typeName, pathColor, allPaths[ai].raw, onHop, pktMeta, forcePathColor);
         } else if (completedPositions.length === 1) {
           pulseNode(completedPositions[0].key, completedPositions[0].pos, typeName);
         }
@@ -3573,7 +4742,7 @@
           drawDashedPath(remainingPositions, pathColor);
         }
       } else {
-        animatePath(allPaths[ai].hopPositions, typeName, pathColor, allPaths[ai].raw, onHop, pktMeta, originForeign);
+        animatePath(allPaths[ai].hopPositions, typeName, pathColor, allPaths[ai].raw, onHop, pktMeta, forcePathColor);
       }
     }
   }
@@ -3583,6 +4752,11 @@
     var GHOST_TIMEOUT_MS = 10000;
     var ghostColor = getComputedStyle(document.documentElement).getPropertyValue('--trace-ghost-color').trim() || '#94a3b8';
     if (!pathsLayer) return;
+    // #883 M3: the layer of this mount, tracked so destroy() cancels it.
+    var layer = pathsLayer;
+    function dropLater(l) {
+      liveLater(function() { if (layer.hasLayer(l)) layer.removeLayer(l); }, GHOST_TIMEOUT_MS);
+    }
     for (var i = 0; i < hopPositions.length - 1; i++) {
       var from = hopPositions[i].pos;
       var to = hopPositions[i + 1].pos;
@@ -3596,11 +4770,11 @@
           var ghost = L.circleMarker(hp.pos, {
             radius: 3, fillColor: ghostColor, fillOpacity: 0.2, color: color, weight: 1, opacity: 0.3
           }).addTo(pathsLayer);
-          setTimeout((function(g) { return function() { if (pathsLayer.hasLayer(g)) pathsLayer.removeLayer(g); }; })(ghost), GHOST_TIMEOUT_MS);
+          dropLater(ghost);
         }
       }
       // Remove dashed line after timeout
-      setTimeout((function(l) { return function() { if (pathsLayer.hasLayer(l)) pathsLayer.removeLayer(l); }; })(line), GHOST_TIMEOUT_MS);
+      dropLater(line);
     }
     // Ghost marker for the final unreached hop
     var last = hopPositions[hopPositions.length - 1];
@@ -3608,38 +4782,50 @@
       var ghostEnd = L.circleMarker(last.pos, {
         radius: 4, fillColor: ghostColor, fillOpacity: 0.25, color: color, weight: 1, opacity: 0.35
       }).addTo(pathsLayer);
-      setTimeout(function() { if (pathsLayer.hasLayer(ghostEnd)) pathsLayer.removeLayer(ghostEnd); }, GHOST_TIMEOUT_MS);
+      dropLater(ghostEnd);
     }
   }
 
-  function resolveHopPositions(hops, payload, resolvedPath) {
-    // Hoist sender GPS guard once — reject (0,0) as "no GPS"
+  // One entry per hop position: {key, pos, name, known}; pos is null when
+  // the hop is unresolved or its node has no GPS. Shared by the animation
+  // (resolveHopPositions) and a follow (#880), which needs the index.
+  function resolveHopEntries(hops, payload, resolvedPath) {
+    payload = payload || {};
     const hasValidGps = payload.lat != null && payload.lon != null
       && !(payload.lat === 0 && payload.lon === 0);
     const senderLat = hasValidGps ? payload.lat : null;
     const senderLon = hasValidGps ? payload.lon : null;
 
-    // Prefer server-side resolved_path when available
-    var resolvedMap;
-    if (resolvedPath && resolvedPath.length === hops.length && window.HopResolver && HopResolver.ready()) {
-      resolvedMap = HopResolver.resolveFromServer(hops, resolvedPath);
-      // Fill in any null entries from client-side fallback, preserving sender GPS context
-      var nullHops = hops.filter(function(h, i) { return !resolvedPath[i] && !resolvedMap[h]; });
-      if (nullHops.length) {
-        var fallback = HopResolver.resolve(nullHops, senderLat, senderLon, null, null, null);
-        for (var k in fallback) resolvedMap[k] = fallback[k];
+    // Prefer server-side resolved_path when available.
+    // #391 — a canonical answer belongs to one hop POSITION, not to a prefix.
+    // resolveFromServer() returns a map keyed by prefix, so a path that repeats
+    // a prefix collapsed both positions onto the last answer (and a null entry
+    // silently borrowed the other position's node). Resolve each position with
+    // the positional primitive #367 added, and keep the prefix-keyed heuristic
+    // only for the positions the server left open.
+    var resolverReady = !!(window.HopResolver && HopResolver.ready());
+    var perPosition = new Array(hops.length);
+    var heuristicHops = hops;
+    if (resolverReady && typeof HopResolver.serverHopEntry === 'function'
+      && resolvedPath && resolvedPath.length === hops.length) {
+      heuristicHops = [];
+      for (var pi = 0; pi < hops.length; pi++) {
+        perPosition[pi] = HopResolver.serverHopEntry(resolvedPath[pi]);
+        if (!perPosition[pi]) heuristicHops.push(hops[pi]);
       }
-    } else {
-      // Delegate to shared HopResolver (from hop-resolver.js) instead of reimplementing
-      // Use HopResolver if available and initialized, otherwise fall back to simple lookup
-      resolvedMap = (window.HopResolver && HopResolver.ready())
-        ? HopResolver.resolve(hops, senderLat, senderLon, null, null, null)
-        : {};
+    }
+    // Delegate the rest to shared HopResolver (from hop-resolver.js) instead of
+    // reimplementing, preserving sender GPS context. Unresolved hops stay empty.
+    var heuristicMap = (resolverReady && heuristicHops.length)
+      ? (HopResolver.resolve(heuristicHops, senderLat, senderLon, null, null, null) || {})
+      : {};
+    for (var hi = 0; hi < hops.length; hi++) {
+      if (!perPosition[hi]) perPosition[hi] = heuristicMap[hops[hi]];
     }
 
-    // Convert HopResolver's map format to the array format live.js expects: {key, pos, name, known}
-    const raw = hops.map(hop => {
-      const r = resolvedMap[hop];
+    // Convert HopResolver's entry format to the array format live.js expects: {key, pos, name, known}
+    return hops.map((hop, hopIndex) => {
+      const r = perPosition[hopIndex];
       if (r && r.name && r.pubkey && !r.unreliable) {
         // Look up coordinates from nodeData (HopResolver resolves name/pubkey but doesn't return lat/lon directly)
         const node = nodeData[r.pubkey];
@@ -3650,6 +4836,75 @@
       }
       return { key: 'hop-' + hop, pos: null, name: hop, known: false };
     });
+  }
+
+  // #912 M1 — the 1-byte hop setting of hop-filter.js (#674), read per
+  // packet so a change (MC_set1ByteHopsMode fires mc-hide-1byte-hops-changed)
+  // reaches the next packet at once; animations in flight just finish.
+  // A visitor who never chose (or no hop-filter.js) gets Show on Live: owner
+  // decision on #912 (2026-11-27) until M2's operator default replaces this
+  // fallback. Other pages keep hop-filter.js's own default.
+  const LIVE_1BYTE_HOPS_FALLBACK = 'show';
+  function oneByteHopsMode() {
+    const stored = typeof window.MC_getStored1ByteHopsMode === 'function'
+      ? window.MC_getStored1ByteHopsMode() : null;
+    return stored || LIVE_1BYTE_HOPS_FALLBACK;
+  }
+
+  // #912 M1 — applies the mode to a path before it is resolved. Hide leaves
+  // the 1-byte hops out, with resolved_path filtered in step so each server
+  // answer stays with its own hop; Mark keeps them and flags their positions.
+  // Returns the input arrays untouched for Show, or when nothing changes.
+  // O(hops), no lookups: same order as the resolve that follows.
+  function applyOneByteHopsMode(hops, resolvedPath, mode) {
+    const out = { hops: hops, resolvedPath: resolvedPath, oneByte: null, hidden: 0 };
+    const isVisibleHop = window.MC_isVisibleHop;
+    if ((mode !== 'hide' && mode !== 'mark') || !hops || !hops.length ||
+      typeof isVisibleHop !== 'function') return out;
+    const opts = { hide1ByteHops: true };
+    const paired = !!resolvedPath && resolvedPath.length === hops.length;
+    let kept = null, keptRp = null;
+    for (let i = 0; i < hops.length; i++) {
+      if (isVisibleHop(hops[i], opts)) {
+        if (kept) { kept.push(hops[i]); if (keptRp) keptRp.push(resolvedPath[i]); }
+        continue;
+      }
+      if (mode === 'mark') {
+        if (!out.oneByte) out.oneByte = new Array(hops.length).fill(false);
+        out.oneByte[i] = true;
+        continue;
+      }
+      if (!kept) { kept = hops.slice(0, i); keptRp = paired ? resolvedPath.slice(0, i) : null; }
+      out.hidden++;
+    }
+    if (kept) {
+      out.hops = kept;
+      // A resolved_path that did not match the hops is ignored downstream; it
+      // must not start to match the shorter path by accident.
+      out.resolvedPath = keptRp;
+    }
+    return out;
+  }
+
+  // #912 M1 — a segment is drawn dashed and lighter when either end is an
+  // uncertain position (Mark: a 1-byte hop; Hide: any, once hops were dropped).
+  function isUncertainSegment(a, b) {
+    return !!((a && a.uncertain) || (b && b.uncertain));
+  }
+
+  // mode: the 1-byte hop setting (#912 M1); anything but 'hide' / 'mark'
+  // draws every hop unmarked.
+  function resolveHopPositions(hops, payload, resolvedPath, mode) {
+    // Hoist sender GPS guard once — reject (0,0) as "no GPS"
+    const hasValidGps = payload.lat != null && payload.lon != null
+      && !(payload.lat === 0 && payload.lon === 0);
+    const senderLat = hasValidGps ? payload.lat : null;
+    const senderLon = hasValidGps ? payload.lon : null;
+    const filtered = applyOneByteHopsMode(hops, resolvedPath, mode);
+    const raw = resolveHopEntries(filtered.hops, payload, filtered.resolvedPath);
+    if (filtered.oneByte) {
+      for (let i = 0; i < raw.length; i++) if (filtered.oneByte[i]) raw[i].uncertain = true;
+    }
 
     // Add sender position as anchor if available
     if (payload.pubKey && senderLat != null) {
@@ -3657,6 +4912,11 @@
       if (!existing) {
         raw.unshift({ key: payload.pubKey, pos: [payload.lat, payload.lon], name: payload.name || payload.pubKey.slice(0, 8), known: true });
       }
+    }
+    // Hide dropped hops: no segment of what is left reads as a direct link
+    // (route-render.js does the same, #1689 r1).
+    if (filtered.hidden > 0) {
+      for (let i = 0; i < raw.length; i++) raw[i].uncertain = true;
     }
 
     if (!showGhostHops) return raw.filter(h => h.known);
@@ -3682,10 +4942,10 @@
     return raw.filter(h => h.pos != null);
   }
 
-  // forceColor (foreign-origin highlight): when true, always draw this
-  // path's segments in `color` — suppresses the colorByHash per-segment
-  // override below so the foreign flag stays visible even when "Color by
-  // hash" is also enabled.
+  // forceColor (foreign-origin highlight, or a #882 scope colour): when
+  // true, always draw this path's segments in `color` — suppresses the
+  // colorByHash per-segment override below so the foreign flag (or the
+  // scope) stays visible even when "Color by hash" is also enabled.
   function animatePath(hopPositions, typeName, color, rawHex, onHop, pktMeta, forceColor) {
     if (!animLayer || !pathsLayer) return;
     if (activeAnims >= MAX_CONCURRENT_ANIMS) return;
@@ -3743,7 +5003,8 @@
         const lineColor = (isGhost || nextGhost) ? '#94a3b8' : color;
         const lineOpacity = (isGhost || nextGhost) ? 0.3 : undefined;
         const segHash = forceColor ? null : pktMeta?.hash;
-        drawAnimatedLine(hp.pos, nextPos, lineColor, () => { hopIndex++; nextHop(); }, lineOpacity, rawHex, segHash);
+        const uncertain = isUncertainSegment(hp, hopPositions[hopIndex + 1]);
+        drawAnimatedLine(hp.pos, nextPos, lineColor, () => { hopIndex++; nextHop(); }, lineOpacity, rawHex, segHash, uncertain);
       } else {
         if (!isGhost) pulseNode(hp.key, hp.pos, typeName);
         hopIndex++; nextHop();
@@ -3760,10 +5021,13 @@
       }).addTo(nodesLayer);
       ghost._baseColor = '#6b7280'; ghost._baseSize = 5;
       nodeMarkers[key] = ghost;
-      setTimeout(() => {
-        nodesLayer.removeLayer(ghost);
-        if (ghost._glowMarker) nodesLayer.removeLayer(ghost._glowMarker);
-        delete nodeMarkers[key];
+      // #883 M3: this mount's layer, and only this ghost's entry (a real
+      // marker may have taken the key since).
+      const layer = nodesLayer;
+      liveLater(() => {
+        layer.removeLayer(ghost);
+        if (ghost._glowMarker) layer.removeLayer(ghost._glowMarker);
+        if (nodeMarkers[key] === ghost) delete nodeMarkers[key];
       }, 30000);
     }
 
@@ -4315,7 +5579,8 @@
     const line = L.polyline([anim.from, anim.to], {
       pane: 'animationsPane', // #1514 M2 — fades stack with the moving phase (z=625).
       color: anim.lineColor, weight: anim.isDashed ? 1.5 : 2, opacity: anim.opacity,
-      lineCap: 'round', dashArray: anim.isDashed ? '4 6' : null
+      lineCap: 'round', dashArray: anim.isDashed ? '4 6' : null,
+      className: anim.uncertain ? 'live-path-uncertain' : ''
     }).addTo(pathsLayer);
 
           recentPaths.push({ line, glowLine: contrail, time: Date.now() });
@@ -4338,7 +5603,9 @@
     }
   }
 
-  function drawAnimatedLine(from, to, color, onComplete, overrideOpacity, rawHex, hash) {
+  // uncertain (#912 M1): a segment at a 1-byte hop (Mark) or of a path whose
+  // 1-byte hops were left out (Hide): dashed and lighter, in its own colour.
+  function drawAnimatedLine(from, to, color, onComplete, overrideOpacity, rawHex, hash, uncertain) {
     // GUARD: Prevent stale callbacks from pushing to a destroyed map
     if (!map || !animCtx) {
       if (onComplete) onComplete();
@@ -4347,14 +5614,15 @@
 
     if (matrixMode) return drawMatrixLine(from, to, color, onComplete, rawHex);
 
-    const mainOpacity = overrideOpacity ?? 0.8;
-    const isDashed = overrideOpacity != null;
+    const isGhostLine = overrideOpacity != null;
+    const mainOpacity = overrideOpacity ?? (uncertain ? UNCERTAIN_SEGMENT_OPACITY : 0.8);
+    const isDashed = isGhostLine || !!uncertain;
 
     var hashFill = '#fff';
     var hashOutline = color;
     var contrailColor = color;
 
-    if (colorByHash && hash && !isDashed && window.HashColor) {
+    if (colorByHash && hash && !isGhostLine && window.HashColor) {
       var hsl = HashColor.hashToHsl(hash, _liveTheme());
       hashFill = hsl;
       hashOutline = HashColor.hashToOutline(hash, _liveTheme());
@@ -4369,7 +5637,8 @@
       lastTick: null,
       opacity: mainOpacity,
       isDashed: isDashed,
-      lineColor: (colorByHash && hash && !isDashed && window.HashColor) ? hashFill : color,
+      uncertain: !!uncertain,
+      lineColor: (colorByHash && hash && !isGhostLine && window.HashColor) ? hashFill : color,
       contrailColor: contrailColor,
       hashFill: hashFill,
       hashOutline: hashOutline,
@@ -4384,6 +5653,7 @@
   }
 
   function showHeatMap() {
+    if (!map) return; // a Heat click during init: applyLiveControlEffects() builds it
     if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
     const points = [];
     Object.values(nodeData).forEach(n => {
@@ -4399,10 +5669,7 @@
     if (points.length && typeof L.heatLayer === 'function') {
       var savedOpacity = parseFloat(localStorage.getItem('meshcore-live-heatmap-opacity'));
       if (isNaN(savedOpacity)) savedOpacity = 0.3;
-      heatLayer = L.heatLayer(points, {
-        radius: 25, blur: 15, maxZoom: 14, minOpacity: 0.05,
-        gradient: { 0.2: '#0d47a1', 0.4: '#1565c0', 0.6: '#42a5f5', 0.8: '#ffca28', 1.0: '#ff5722' }
-      }).addTo(map);
+      heatLayer = L.heatLayer(points, HeatGradient.options()).addTo(map);
       // Set overall layer opacity via canvas element
       if (heatLayer._canvas) { heatLayer._canvas.style.opacity = savedOpacity; }
       else { setTimeout(function() { if (heatLayer && heatLayer._canvas) heatLayer._canvas.style.opacity = savedOpacity; }, 100); }
@@ -4411,7 +5678,8 @@
   }
 
   function hideHeatMap() {
-    if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
+    if (heatLayer && map) map.removeLayer(heatLayer);
+    heatLayer = null;
   }
 
   /** Extract channel row style from a packet (shared by feed item builders). */
@@ -4451,10 +5719,9 @@
     item.setAttribute('tabindex', '0');
     item.setAttribute('role', 'button');
     item.style.cursor = 'pointer';
-    // Hash-color stripe for feed items (mirrors packets table border-left)
-    if (colorByHash && pkt.hash && window.HashColor) {
-      item.style.borderLeft = '4px solid ' + HashColor.hashToHsl(pkt.hash, _liveTheme());
-    }
+    // Scope- or hash-color stripe for feed items (mirrors packets table border-left)
+    var _stripe = feedStripeColor(pkt, pkt.hash);
+    if (_stripe) item.style.borderLeft = '4px solid ' + _stripe;
     // Channel color highlighting for GRP_TXT packets (#271)
     var _cs = _getChannelStyle(pkt);
     if (_cs) item.style.cssText += _cs;
@@ -4476,6 +5743,13 @@
   // packets[] stores all observations for replay.
   const feedDedup = new Map();
   const DEDUP_WINDOW = 30000;
+  // #883 M3: a hard cap (entries hold a DOM node and the packets). A Map
+  // iterates in insertion order, so the first key is the oldest.
+  const FEED_DEDUP_MAX = 200;
+  function rememberFeedItem(hash, entry) {
+    feedDedup.set(hash, entry);
+    while (feedDedup.size > FEED_DEDUP_MAX) feedDedup.delete(feedDedup.keys().next().value);
+  }
 
   function addFeedItem(icon, typeName, payload, hops, color, pkt) {
     const feedPanel = document.getElementById('liveFeed');
@@ -4539,10 +5813,9 @@
     item.setAttribute('role', 'button');
     if (hash) item.setAttribute('data-hash', hash);
     item.style.cursor = 'pointer';
-    // Hash-color stripe for feed items (mirrors packets table border-left)
-    if (colorByHash && hash && window.HashColor) {
-      item.style.borderLeft = '4px solid ' + HashColor.hashToHsl(hash, _liveTheme());
-    }
+    // Scope- or hash-color stripe for feed items (mirrors packets table border-left)
+    var _stripe = feedStripeColor(pkt, hash);
+    if (_stripe) item.style.borderLeft = '4px solid ' + _stripe;
     // Channel color highlighting for GRP_TXT packets (#271)
     var _chanStyle = _getChannelStyle(pkt);
     if (_chanStyle) item.style.cssText += _chanStyle;
@@ -4565,7 +5838,7 @@
 
     // Register
     if (hash) {
-      feedDedup.set(hash, { element: item, count: incomingObs, pkt, packets: [pkt], createdAt: Date.now() });
+      rememberFeedItem(hash, { element: item, count: incomingObs, pkt, packets: [pkt], createdAt: Date.now() });
       // Prune stale entries
       if (feedDedup.size > 100) {
         const cutoff = Date.now() - DEDUP_WINDOW;
@@ -4590,6 +5863,7 @@
     const rssi = pkt.RSSI ?? pkt.rssi ?? null;
     const observer = pkt.observer_name || pkt.observer || '';
     const pktId = pkt.id || '';
+    const followHash = window.LiveFollow ? window.LiveFollow.parseFollowParam(pkt.hash) : null;
 
     const card = document.createElement('div');
     card.className = 'feed-detail-card';
@@ -4609,6 +5883,7 @@
       </div>
       ${pkt.hash ? `<a class="fdc-link" href="#/packets/${pkt.hash.toLowerCase()}">View in packets →</a>` : ''}
       <button class="fdc-replay">↻ Replay</button>
+      ${followHash ? '<button type="button" class="fdc-follow">Follow ▶</button>' : ''}
     `;
     card.querySelector('.fdc-close').addEventListener('click', (e) => { e.stopPropagation(); card.remove(); });
     card.querySelector('.fdc-replay').addEventListener('click', (e) => {
@@ -4619,9 +5894,26 @@
       console.log('[replay] hash=' + pkt.hash + ' pkts=' + replayPkts.length + ' uniquePaths=' + uniquePaths.size, [...uniquePaths].slice(0, 3));
       renderPacketTree(replayPkts, true);
     });
-    document.addEventListener('click', function dismiss(e) {
-      if (!card.contains(e.target) && !anchor.contains(e.target)) { card.remove(); document.removeEventListener('click', dismiss); }
-    });
+    const followBtn = card.querySelector('.fdc-follow');
+    if (followBtn) {
+      followBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        card.remove();
+        if (_feedCardDismiss) { document.removeEventListener('click', _feedCardDismiss); _feedCardDismiss = null; }
+        startFollow(followHash, { settleMs: followSettleMs(pkt._ts) });
+      });
+    }
+    // #839 — one open card at a time (the old one is removed above), so one
+    // module ref; destroy() removes it when Live is left with the card open.
+    if (_feedCardDismiss) document.removeEventListener('click', _feedCardDismiss);
+    _feedCardDismiss = function dismiss(e) {
+      if (!card.contains(e.target) && !anchor.contains(e.target)) {
+        card.remove();
+        document.removeEventListener('click', dismiss);
+        if (_feedCardDismiss === dismiss) _feedCardDismiss = null;
+      }
+    };
+    document.addEventListener('click', _feedCardDismiss);
     const feedEl = document.getElementById('liveFeed');
     if (feedEl) feedEl.parentElement.appendChild(card);
     // #1619: register the popup with the live DragManager so users can move
@@ -4632,7 +5924,457 @@
     }
   }
 
+  // === #880 Follow a packet ===
+  // live-follow.js holds the pure model/schedule/summary; this is the thin
+  // controller: one fetch, one rAF loop, one Esc listener, one layer, one
+  // card. Everything lives on followState; stopFollow() releases it all.
+
+  // Wait before the one fetch (LiveFollow.settleMs): what is left of the
+  // propagation window, so late observations reach the DB first.
+  function followSettleMs(tsMs) {
+    const LF = window.LiveFollow;
+    return LF.settleMs(tsMs, LF.settleBufferMs(followSettings(), window.PROPAGATION_BUFFER_MS), Date.now());
+  }
+
+  // #880 M3 — the viewer's replay settings (customizer Display > Live Map),
+  // read when a follow starts or loads; LiveFollow.SETTINGS validates them.
+  function followSettings() {
+    return window.SITE_CONFIG && window.SITE_CONFIG.follow;
+  }
+
+  function prefersReducedMotion() {
+    try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
+    catch (_) { return false; }
+  }
+
+  // The clock-skew list is only used to flag observers; fetched at most once
+  // per Live visit.
+  function getFollowSkew() {
+    if (!_followSkewPromise) {
+      _followSkewPromise = fetch('/api/observers/clock-skew')
+        .then(function(r) { return r.ok ? r.json() : []; })
+        .catch(function() { return []; });
+    }
+    return _followSkewPromise;
+  }
+
+  // iconId is always a literal Phosphor sprite id from this file.
+  function followIcon(iconId) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'ph-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', '/icons/phosphor-sprite.svg#' + iconId);
+    svg.appendChild(use);
+    return svg;
+  }
+
+  function followEl(tag, cls, text) {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text != null) el.textContent = text;
+    return el;
+  }
+
+  function followButton(cls, label, icon) {
+    const b = followEl('button', cls);
+    b.type = 'button';
+    b.setAttribute('aria-label', label);
+    b.title = label;
+    if (icon) b.appendChild(followIcon(icon));
+    return b;
+  }
+
+  function setFollowArmed(on) {
+    followArmed = !!on;
+    document.querySelectorAll('.live-page .live-follow-next').forEach(function(btn) {
+      btn.setAttribute('aria-pressed', followArmed ? 'true' : 'false');
+      btn.classList.toggle('active', followArmed);
+      btn.title = followArmed ? 'Waiting for the next packet; click to cancel'
+        : 'Follow next packet: replay how the next visible packet spreads through the mesh';
+      if (btn.classList.contains('live-follow-next--menu')) {
+        btn.textContent = followArmed ? 'Waiting for next packet… (cancel)' : 'Follow next packet';
+      }
+    });
+  }
+
+  // On a phone the controls panel covers the map, and the replay is the
+  // point of a follow: fold the panel away when one is armed or starts.
+  function collapseControlsOnPhone() {
+    if (collapseLiveControls && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+      collapseLiveControls();
+    }
+  }
+
+  function showFollowToast(text) {
+    const page = document.querySelector('.live-page');
+    if (!page) return;
+    page.querySelector('.live-follow-toast')?.remove();
+    const t = followEl('div', 'live-follow-toast', text);
+    t.setAttribute('role', 'status');
+    page.appendChild(t);
+    if (_followToastTimer) clearTimeout(_followToastTimer);
+    _followToastTimer = setTimeout(function() { _followToastTimer = null; t.remove(); }, 4000);
+  }
+
+  // Deep link #/live?follow=<hash>, read once per init after loadNodes().
+  function startFollowFromHash() {
+    if (!window.LiveFollow || !getHashParams) return;
+    const raw = getHashParams().get(window.LiveFollow.HASH_PARAM);
+    if (raw == null) return;
+    const h = window.LiveFollow.parseFollowParam(raw);
+    if (h) startFollow(h, { settleMs: 0 });
+    else showFollowToast('Not a packet hash: cannot follow this link.');
+  }
+
+  function buildFollowCard(st) {
+    const card = followEl('div', 'live-follow-card');
+    card.setAttribute('role', 'region');
+    card.setAttribute('aria-label', 'Following packet');
+    const head = followEl('div', 'panel-header lf-header');
+    head.appendChild(followEl('strong', 'lf-title', 'FOLLOWING'));
+    st.typeEl = followEl('span', 'lf-type', st.hash.slice(0, 8) + '…');
+    head.appendChild(st.typeEl);
+    const close = followButton('lf-close', 'Stop following', 'ph-x');
+    close.addEventListener('click', function(e) { e.stopPropagation(); stopFollow(); });
+    head.appendChild(close);
+    card.appendChild(head);
+
+    st.statusEl = followEl('div', 'lf-status', 'Loading…');
+    st.statusEl.setAttribute('aria-live', 'polite');
+    card.appendChild(st.statusEl);
+    const bar = followEl('div', 'lf-progress');
+    st.barEl = followEl('div', 'lf-bar');
+    bar.appendChild(st.barEl);
+    card.appendChild(bar);
+
+    const ctl = followEl('div', 'lf-controls');
+    st.pauseBtn = followButton('vcr-btn lf-pause', 'Pause', 'ph-pause');
+    st.pauseBtn.addEventListener('click', function(e) { e.stopPropagation(); toggleFollowPause(st); });
+    st.restartBtn = followButton('vcr-btn lf-restart', 'Restart', 'ph-arrow-clockwise');
+    st.restartBtn.addEventListener('click', function(e) { e.stopPropagation(); restartFollow(st); });
+    ctl.appendChild(st.pauseBtn);
+    ctl.appendChild(st.restartBtn);
+    st.controlsEl = ctl;
+    card.appendChild(ctl);
+
+    st.summaryEl = followEl('div', 'lf-summary');
+    st.summaryEl.hidden = true;
+    card.appendChild(st.summaryEl);
+
+    const page = document.querySelector('.live-page');
+    if (page) page.appendChild(card);
+    st.card = card;
+  }
+
+  function setFollowStatus(st, text, pct) {
+    if (st.statusEl) st.statusEl.textContent = text;
+    if (st.barEl && pct != null) st.barEl.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  }
+
+  function startFollow(hash, opts) {
+    const LF = window.LiveFollow;
+    const h = LF ? LF.parseFollowParam(hash) : null;
+    if (!h || !map) return false;
+    stopFollow({ keepUrl: true });
+    setFollowArmed(false);
+    const st = followState = {
+      hash: h, settleTimer: null, rafId: null, keyHandler: null,
+      layer: L.layerGroup().addTo(map), card: null,
+      model: null, sched: null, ptr: 0, startTs: 0, pausedElapsed: null,
+      rings: [], ringRadii: [], litRelays: 0, depthShown: -1, done: false, reduced: false,
+    };
+    if (moments) moments.onModeChange();
+    if (kiosk) kiosk.onModeChange();
+    setLiveHashParam(LF.HASH_PARAM, h);
+    collapseControlsOnPhone();
+    buildFollowCard(st);
+    st.keyHandler = function onFollowKey(e) { if (e.key === 'Escape') stopFollow(); };
+    document.addEventListener('keydown', st.keyHandler);
+    const settle = Math.max(0, Number(opts && opts.settleMs) || 0);
+    setFollowStatus(st, settle ? 'Waiting ' + Math.ceil(settle / 1000) + ' s for late observations…' : 'Loading…', 0);
+    st.controlsEl.hidden = true;
+    st.settleTimer = setTimeout(function() { st.settleTimer = null; loadFollow(st); }, settle);
+    return true;
+  }
+
+  async function loadFollow(st) {
+    const LF = window.LiveFollow;
+    let detail;
+    let skewList = [];
+    try {
+      const res = await Promise.all([fetch('/api/packets/' + st.hash), getFollowSkew(), _observerRosterPromise]);
+      if (st !== followState) return;
+      if (!res[0].ok) throw new Error(res[0].status === 404 ? 'Packet not found.' : 'Could not load the packet.');
+      skewList = res[1];
+      detail = await res[0].json();
+    } catch (err) {
+      if (st !== followState) return;
+      showFollowError(st, err && /^(Packet|Could)/.test(err.message) ? err.message : 'Could not load the packet.');
+      return;
+    }
+    if (st !== followState) return;
+    const labels = window.PayloadLabels && window.PayloadLabels.api;
+    st.model = LF.reduceFollow(detail, {
+      roster: observerRoster,
+      skew: LF.buildSkewMap(skewList),
+      resolveHops: resolveHopEntries,
+      severity: window.observerSkewSeverity,
+      typeName: function(id) { return labels ? labels.enumNameById(id) : null; },
+    });
+    st.reduced = prefersReducedMotion();
+    st.sched = LF.buildFollowSchedule(st.model,
+      Object.assign(LF.replayOptions(followSettings()), { reducedMotion: st.reduced }));
+    st.typeEl.textContent = st.model.typeName + ' · ' + st.hash.slice(0, 8) + '…';
+    computeFollowRings(st);
+    fitFollowBounds(st);
+    st.controlsEl.hidden = st.reduced;
+    if (!st.model.replayable) setFollowStatus(st, 'Path replay not meaningful for this route type.', 100);
+    runFollow(st);
+  }
+
+  function showFollowError(st, msg) {
+    setFollowStatus(st, msg, 0);
+    st.controlsEl.hidden = true;
+    st.summaryEl.hidden = false;
+    st.summaryEl.textContent = '';
+    const retry = followEl('button', 'vcr-btn lf-retry', 'Retry');
+    retry.type = 'button';
+    retry.addEventListener('click', function(e) {
+      e.stopPropagation();
+      st.summaryEl.hidden = true;
+      setFollowStatus(st, 'Loading…', 0);
+      loadFollow(st);
+    });
+    st.summaryEl.appendChild(retry);
+  }
+
+  // Ring d reaches the farthest positioned relay/observer at depth d.
+  function computeFollowRings(st) {
+    const m = st.model;
+    if (!m.origin || !window.HopResolver) return;
+    const o = m.origin.pos;
+    const far = function(p, d) {
+      if (!p) return;
+      const meters = HopResolver.haversineKm(o[0], o[1], p[0], p[1]) * 1000;
+      if (!(st.ringRadii[d] >= meters)) st.ringRadii[d] = meters;
+    };
+    for (const r of m.relays) far(r.pos, r.depth);
+    for (const ob of m.observers) far(ob.pos, ob.late ? m.depth : Math.min(ob.hops, m.depth));
+  }
+
+  function fitFollowBounds(st) {
+    const m = st.model;
+    const pts = [];
+    if (m.origin) pts.push(m.origin.pos);
+    for (const r of m.relays) if (r.pos) pts.push(r.pos);
+    for (const ob of m.observers) if (ob.pos) pts.push(ob.pos);
+    if (!pts.length || !map) return;
+    const phone = window.innerWidth <= 768;
+    // The phone sheet grows to its 40vh cap when the summary shows; pad for
+    // that from the start so it never covers markers (live.css).
+    const cardH = Math.max(st.card ? st.card.offsetHeight : 0, phone ? Math.round(window.innerHeight * 0.4) : 0);
+    try {
+      map.fitBounds(L.latLngBounds(pts), {
+        paddingTopLeft: [40, 60],
+        paddingBottomRight: phone ? [40, cardH + 70] : [340, 110],
+        maxZoom: 13, animate: !st.reduced,
+      });
+    } catch (_) { /* degenerate bounds */ }
+  }
+
+  function runFollow(st) {
+    st.ptr = 0;
+    st.done = false;
+    if (st.reduced) { applyFollowEvents(st, Infinity); return; }
+    st.startTs = performance.now();
+    st.pausedElapsed = null;
+    st.rafId = requestAnimationFrame(followTick);
+  }
+
+  function followTick(now) {
+    const st = followState;
+    if (!st || !st.sched) return;
+    st.rafId = null;
+    const elapsed = now - st.startTs;
+    applyFollowEvents(st, elapsed);
+    const growing = growFollowRings(st, elapsed);
+    if (st.ptr < st.sched.events.length || growing) st.rafId = requestAnimationFrame(followTick);
+  }
+
+  function toggleFollowPause(st) {
+    if (st !== followState || !st.sched || st.reduced) return;
+    if (st.pausedElapsed == null) {
+      if (st.rafId) { cancelAnimationFrame(st.rafId); st.rafId = null; }
+      st.pausedElapsed = performance.now() - st.startTs;
+      st.pauseBtn.replaceChildren(followIcon('ph-play'));
+      st.pauseBtn.setAttribute('aria-label', 'Resume'); st.pauseBtn.title = 'Resume';
+    } else {
+      st.startTs = performance.now() - st.pausedElapsed;
+      st.pausedElapsed = null;
+      st.pauseBtn.replaceChildren(followIcon('ph-pause'));
+      st.pauseBtn.setAttribute('aria-label', 'Pause'); st.pauseBtn.title = 'Pause';
+      st.rafId = requestAnimationFrame(followTick);
+    }
+  }
+
+  function restartFollow(st) {
+    if (st !== followState || !st.sched) return;
+    if (st.rafId) { cancelAnimationFrame(st.rafId); st.rafId = null; }
+    st.layer.clearLayers();
+    st.rings = [];
+    st.litRelays = 0;
+    st.depthShown = -1;
+    st.summaryEl.hidden = true;
+    st.controlsEl.hidden = false;
+    st.card.classList.remove('lf-finished');
+    if (st.pausedElapsed != null) {
+      st.pauseBtn.replaceChildren(followIcon('ph-pause'));
+      st.pauseBtn.setAttribute('aria-label', 'Pause'); st.pauseBtn.title = 'Pause';
+    }
+    runFollow(st);
+  }
+
+  function applyFollowEvents(st, elapsed) {
+    const ev = st.sched.events;
+    while (st.ptr < ev.length && ev[st.ptr].at <= elapsed) applyFollowEvent(st, ev[st.ptr++]);
+    if (!st.done && st.model.replayable && st.depthShown >= 0) {
+      const D = st.model.depth;
+      setFollowStatus(st, 'Hop ' + st.depthShown + ' / ' + D + (st.model.origin ? '' : ' · origin unknown'),
+        st.sched.totalMs ? Math.min(100, (elapsed / st.sched.totalMs) * 100) : 100);
+    }
+  }
+
+  function followMarker(pos, cls, labelText, flagged) {
+    const el = followEl('div', 'lf-marker ' + cls);
+    el.appendChild(followEl('span', 'lf-dot'));
+    if (labelText) {
+      const lab = followEl('span', 'lf-label', labelText);
+      if (flagged) {
+        const f = followIcon('ph-clock');
+        f.setAttribute('class', 'ph-icon lf-clock-flag');
+        lab.appendChild(f);
+      }
+      el.appendChild(lab);
+    }
+    return L.marker(pos, {
+      icon: L.divIcon({ className: 'live-follow-icon', html: el, iconSize: [0, 0] }),
+      interactive: false, keyboard: false, pane: 'liveAnimPane',
+    });
+  }
+
+  function applyFollowEvent(st, e) {
+    const m = st.model;
+    if (e.kind === 'origin') {
+      if (m.origin) followMarker(m.origin.pos, 'lf-origin', m.origin.name).addTo(st.layer);
+    } else if (e.kind === 'ring') {
+      st.depthShown = e.depth;
+      const radius = st.ringRadii[e.depth];
+      if (!m.replayable || !m.origin || !(radius > 0)) return;
+      const c = L.circle(m.origin.pos, {
+        radius: st.reduced ? radius : 1, color: cssVar('--follow-ring'), weight: 2,
+        opacity: 0.8, fill: false, interactive: false, pane: 'liveAnimPane',
+      }).addTo(st.layer);
+      st.rings.push({ circle: c, start: e.at, target: radius });
+    } else if (e.kind === 'relay') {
+      const r = m.relays[e.index];
+      st.litRelays++;
+      if (r.pos) followMarker(r.pos, 'lf-relay', null).addTo(st.layer);
+    } else if (e.kind === 'observer') {
+      const o = m.observers[e.index];
+      if (o.pos) followMarker(o.pos, 'lf-observer' + (o.late ? ' lf-late' : ''), o.name + ' ' + window.LiveFollow.formatOffset(o), !!o.clock).addTo(st.layer);
+    } else if (e.kind === 'summary') {
+      st.done = true;
+      renderFollowSummary(st);
+    }
+  }
+
+  // Grows each ring over 90% of a step; returns true while any still grows.
+  function growFollowRings(st, elapsed) {
+    const dur = st.sched.stepMs * 0.9;
+    let growing = false;
+    for (const ring of st.rings) {
+      if (ring.done) continue;
+      const t = dur > 0 ? (elapsed - ring.start) / dur : 1;
+      if (t >= 1) { ring.circle.setRadius(ring.target); ring.done = true; continue; }
+      ring.circle.setRadius(Math.max(1, ring.target * t));
+      growing = true;
+    }
+    return growing;
+  }
+
+  function followClock(sec) {
+    try { return new Date(sec * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }); }
+    catch (_) { return new Date(sec * 1000).toISOString().slice(11, 19); }
+  }
+
+  function renderFollowSummary(st) {
+    const LF = window.LiveFollow;
+    const m = st.model;
+    const s = LF.summarizeFollow(m, window.HopResolver && HopResolver.haversineKm);
+    setFollowStatus(st, m.replayable ? 'Done · ' + m.depth + ' hop' + (m.depth === 1 ? '' : 's') : 'Summary', 100);
+    st.card.classList.add('lf-finished');
+    st.controlsEl.hidden = true; // the summary carries its own Replay
+    const box = st.summaryEl;
+    box.textContent = '';
+    if (!s.observers) box.appendChild(followEl('p', 'lf-note', 'No observations for this packet.'));
+    else if (!s.positionedObservers) box.appendChild(followEl('p', 'lf-note', 'No positioned observers.'));
+    const dl = followEl('dl', 'lf-rows');
+    for (const row of LF.summaryRows(s, followClock)) {
+      dl.appendChild(followEl('dt', null, row.label));
+      dl.appendChild(followEl('dd', null, row.value));
+    }
+    box.appendChild(dl);
+    box.appendChild(followEl('p', 'lf-caption', LF.CAPTION));
+    if (m.observers.length) {
+      const list = followEl('ol', 'lf-observers');
+      list.setAttribute('aria-label', 'Observers in the order heard');
+      for (const o of m.observers) {
+        const li = followEl('li', o.late ? 'lf-late' : null);
+        li.appendChild(followEl('span', 'lf-obs-name', o.name));
+        if (o.iata) li.appendChild(followEl('span', 'badge-iata', o.iata));
+        li.appendChild(followEl('span', 'lf-obs-when', LF.formatOffset(o) + (m.replayable ? ' · ' + o.hops + ' hop' + (o.hops === 1 ? '' : 's') : '')));
+        if (o.clock) {
+          const f = followEl('span', 'lf-clock-flag', o.clock === 'naive' ? 'clock: ingest time' : 'clock off');
+          f.title = o.clock === 'naive'
+            ? 'This observer\'s clock is unreliable; its recent times are the server\'s ingest time.'
+            : 'This observer\'s clock is known to be off by minutes or more. Times are shown as reported, not corrected.';
+          li.appendChild(f);
+        }
+        list.appendChild(li);
+      }
+      box.appendChild(list);
+    }
+    const actions = followEl('div', 'lf-actions');
+    const link = followEl('a', 'lf-link', 'View packet →');
+    link.href = '#/packets/' + st.hash;
+    actions.appendChild(link);
+    if (!st.reduced) {
+      const replay = followEl('button', 'vcr-btn lf-replay', 'Replay');
+      replay.type = 'button';
+      replay.addEventListener('click', function(e) { e.stopPropagation(); restartFollow(st); });
+      actions.appendChild(replay);
+    }
+    box.appendChild(actions);
+    box.hidden = false;
+  }
+
+  function stopFollow(opts) {
+    const st = followState;
+    if (!st) return;
+    followState = null;
+    if (st.settleTimer) { clearTimeout(st.settleTimer); st.settleTimer = null; }
+    if (st.rafId) { cancelAnimationFrame(st.rafId); st.rafId = null; }
+    if (st.keyHandler) { document.removeEventListener('keydown', st.keyHandler); st.keyHandler = null; }
+    if (st.layer) { try { st.layer.remove(); } catch (_) {} st.layer = null; }
+    if (st.card) { st.card.remove(); st.card = null; }
+    if (!(opts && opts.keepUrl) && window.LiveFollow) setLiveHashParam(window.LiveFollow.HASH_PARAM, '');
+    if (moments) moments.onModeChange();
+    if (kiosk) kiosk.onModeChange();
+  }
+
   function destroy() {
+    liveGeneration++;
     // #1514 S3 — drain onComplete callbacks BEFORE clearing the array. Audio
     // `onHop` hooks rely on these firing exactly once per queued animation;
     // previously destroy() dropped them silently when navigating away with
@@ -4664,27 +6406,92 @@
       _dprMedia = null;
       _dprChangeHandler = null;
     }
+    // #880 — the route already changed, so leave the URL alone.
+    stopFollow({ keepUrl: true });
+    followArmed = false;
+    collapseLiveControls = null;
+    observerRoster = {};
+    _observerRosterPromise = null;
+    _followSkewPromise = null;
+    if (_followToastTimer) { clearTimeout(_followToastTimer); _followToastTimer = null; }
     stopReplay();
+    // #883 M3: nothing armed by this mount may fire after it.
+    clearPropagationBuffer();
+    liveTimeouts.forEach(clearTimeout);
+    liveTimeouts.clear();
+    suppressLive = false;
+    if (_fullscreenKeyHandler) { window.removeEventListener('keydown', _fullscreenKeyHandler); _fullscreenKeyHandler = null; }
+    unbindNarrowMql();
     if (_timelineRefreshInterval) { clearInterval(_timelineRefreshInterval); _timelineRefreshInterval = null; }
     if (_lcdClockInterval) { clearInterval(_lcdClockInterval); _lcdClockInterval = null; }
     if (_rateCounterInterval) { clearInterval(_rateCounterInterval); _rateCounterInterval = null; }
     if (_pruneInterval) { clearInterval(_pruneInterval); _pruneInterval = null; }
+    if (_heardReapplyTimer) { clearTimeout(_heardReapplyTimer); _heardReapplyTimer = null; }
+    if (_scopeLegendTimer) { clearTimeout(_scopeLegendTimer); _scopeLegendTimer = null; }
+    _scopeLegendSig = '';
+    if (_scopeThemeListening) { window.removeEventListener('theme-changed', invalidateScopePalette); _scopeThemeListening = false; }
     if (_feedTimestampInterval) { clearInterval(_feedTimestampInterval); _feedTimestampInterval = null; }
-    if (_affinityInterval) { clearInterval(_affinityInterval); _affinityInterval = null; }
+    stopAffinityRefresh();
     // Unsubscribe rather than close: the socket belongs to app.js and the rest
     // of the app still needs it.
     if (wsHandler) { offWS(wsHandler); wsHandler = null; }
+    if (momentsListening) {
+      window.removeEventListener('moments-defaults-changed', onMomentsDefaultsChanged);
+      momentsListening = false;
+    }
+    stopMoments();
+    clearMomentHighlight();
+    // #883 — before map.remove(): the controller holds map listeners.
+    // M3: an in-place remount hands the kiosk theme and auto-reload over.
+    const handover = !!(kiosk && kiosk.handingOver());
+    if (kiosk) { kiosk.destroy(); kiosk = null; }
+    else if (kioskHandover) setKioskAutoReload(false); // left before its controller came up
+    kioskHandover = handover;
+    if (kioskThemeRestore && !handover) { kioskThemeRestore(); kioskThemeRestore = null; }
+    if (!handover) kioskThemeShown = null;
+    if (kioskDisplayListening) { window.removeEventListener('theme-changed', applyKioskDisplay); kioskDisplayListening = false; }
+    if (window.LiveKiosk && document.body) window.LiveKiosk.clearDisplay(document.body.style);
+    kioskOn = false;
+    if (document.body) document.body.classList.remove('kiosk');
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {
       RegionFilter.offChange(regionFilterChangeHandler);
       regionFilterChangeHandler = null;
     }
+    // #883 M3: their outside-click and resize listeners held this page.
+    if (window.RegionFilter && RegionFilter.release) RegionFilter.release(document.getElementById('liveRegionFilter'));
+    if (window.AreaFilter && AreaFilter.release) AreaFilter.release(document.getElementById('liveAreaFilter'));
+    if (areaNodesChangeHandler) { AreaFilter.offChange(areaNodesChangeHandler); areaNodesChangeHandler = null; }
+    if (areaOutlineChangeHandler) { AreaFilter.offChange(areaOutlineChangeHandler); areaOutlineChangeHandler = null; }
     if (map) { map.remove(); map = null; }
     if (_onResize) {
       window.removeEventListener('resize', _onResize);
-      window.removeEventListener('orientationchange', _onResize);
+      window.removeEventListener('warmup-pills-resize', _onResize);
       if (window.visualViewport) window.visualViewport.removeEventListener('resize', _onResize);
     }
+    if (_onOrientationChange) { window.removeEventListener('orientationchange', _onOrientationChange); _onOrientationChange = null; }
+    // #428 — undo the remaining document/window listeners from init() that
+    // can't be discarded with #app's subtree (global events, and drag
+    // tracking that must follow the mouse outside its own panel's bounds).
+    if (_onTileProviderChanged) { window.removeEventListener('mc-tile-provider-changed', _onTileProviderChanged); _onTileProviderChanged = null; }
+    if (_themeObs) { _themeObs.disconnect(); _themeObs = null; }
+    if (_dragMediaHandlers) { _dragMediaHandlers.mql.removeEventListener('change', _dragMediaHandlers.fn); _dragMediaHandlers = null; }
+    if (_feedCardDismiss) { document.removeEventListener('click', _feedCardDismiss); _feedCardDismiss = null; }
+    if (_onDragManagerResize) { window.removeEventListener('resize', _onDragManagerResize); _onDragManagerResize = null; }
+    liveDragMgr = null;
+    if (_feedResizeHandlers) {
+      document.removeEventListener('mousemove', _feedResizeHandlers.mousemove);
+      document.removeEventListener('mouseup', _feedResizeHandlers.mouseup);
+      _feedResizeHandlers = null;
+    }
+    if (_moreMenuDocClickHandler) { document.removeEventListener('click', _moreMenuDocClickHandler); _moreMenuDocClickHandler = null; }
+    if (_timelineScrubHandlers) {
+      document.removeEventListener('mousemove', _timelineScrubHandlers.mousemove);
+      document.removeEventListener('mouseup', _timelineScrubHandlers.mouseup);
+      _timelineScrubHandlers = null;
+    }
     if (_vcrHeightCleanup) { try { _vcrHeightCleanup(); } catch (_) {} _vcrHeightCleanup = null; }
+    if (_controlsFitCleanup) { try { _controlsFitCleanup(); } catch (_) {} _controlsFitCleanup = null; }
+    if (_legendScrollCleanup) { try { _legendScrollCleanup(); } catch (_) {} _legendScrollCleanup = null; }
     // Restore #app height to CSS default
     const appEl = document.getElementById('app');
     if (appEl) appEl.style.height = '';
@@ -4723,13 +6530,22 @@
 
   let _themeRefreshHandler = null;
 
-  // #1180 — singleton guard for the wireLiveCollapseToggles() narrow-viewport
-  // MQL listener. MediaQueryList is process-global per query string; without
-  // this gate, every SPA re-mount of /live registers a new 'change' handler.
-  // The handler reads from current DOM each time, so a one-shot bind is safe
-  // across re-mounts. window.__liveMQLBindCount is a debug seam consumed by
+  // #1180 — the wireLiveCollapseToggles() narrow-viewport MQL listener.
+  // MediaQueryList is process-global per query string, so each mount drops
+  // the previous handler before binding its own, and destroy() drops it
+  // (#883 M3). window.__liveMQLBindCount (handlers bound now: +1 per bind,
+  // -1 per unbind, so a missed unbind shows) is a debug seam consumed by
   // test-live-mql-leak-1180-e2e.js and otherwise unused.
-  var _liveNarrowMqlBound = false;
+  var _liveNarrowMql = null;   // { mql, fn } of the current mount
+  function unbindNarrowMql() {
+    if (!_liveNarrowMql) return;
+    var b = _liveNarrowMql;
+    _liveNarrowMql = null;
+    if (b.mql.removeEventListener) b.mql.removeEventListener('change', b.fn);
+    else if (b.mql.removeListener) b.mql.removeListener(b.fn);
+    try { window.__liveMQLBindCount = (window.__liveMQLBindCount || 0) - 1; } catch (_) { /* sealed window */ }
+  }
+  var _heatUnwatch = null;
   // #1514 S4 — single source of truth for window._liveTestSeams is at the
   // earlier exposure block (search for `window._liveTestSeams = {`). The
   // duplicate definition that lived here previously added a `_liveTestSeams.wake`
@@ -4743,6 +6559,9 @@
         if (activeNodeDetailKey) showNodeDetail(activeNodeDetailKey);
       };
       window.addEventListener('theme-refresh', _themeRefreshHandler);
+      // #914: a theme, customizer or colour-blind preset change that moves
+      // the heat gradient rebuilds the layer; no reload.
+      _heatUnwatch = HeatGradient.watch(function () { if (heatLayer) showHeatMap(); });
       var result = init(app, routeParam);
       // Install channel color picker (M2, #271)
       if (window.ChannelColorPicker) window.ChannelColorPicker.installLiveFeed();
@@ -4750,6 +6569,7 @@
     },
     destroy: function() {
       if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }
+      if (_heatUnwatch) { _heatUnwatch(); _heatUnwatch = null; }
       return destroy();
     }
   });

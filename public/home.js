@@ -25,6 +25,15 @@
     if (m) return _renderHomeGlyph(m[1]) + ' ' + _escHtml(m[2]);
     return _escHtml(s); // EMOJI-OK-LEGACY-RENDER
   }
+  // #429 — footerLinks come from importable Home customization, so the URL
+  // gets the same scheme check as miniMarkdown links (roles.js). A rejected
+  // URL renders as its label text.
+  function footerLinkHtml(l) {
+    const href = window.safeUrlAttr(l.url);
+    const label = _renderHomeLabel(l.label);
+    if (!href) return label;
+    return `<a href="${href}" class="home-footer-link" target="_blank" rel="noopener">${label}</a>`;
+  }
   function _escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
   const PREF_KEY = 'meshcore-user-level';
@@ -45,6 +54,20 @@
     saveMyNodes(getMyNodes().filter(n => n.pubkey !== pubkey));
   }
   function isMyNode(pubkey) { return getMyNodes().some(n => n.pubkey === pubkey); }
+  // My Mesh cards opt into advert intervals on their health request. The
+  // health panel reuses that URL for claimed nodes so the client cache
+  // answers it; other nodes keep the plain URL and skip the advert scan.
+  // #262/#902: the ONE /observers call site. The My Mesh grid calls it once
+  // per render and the health panel once per open; both are served by the
+  // CLIENT_TTL.observers cache. A failed request yields an unavailable index.
+  function loadObserverIndex() {
+    return api('/observers', { ttl: CLIENT_TTL.observers })
+      .then(payload => MyMeshObservers.index(payload), () => MyMeshObservers.index(null));
+  }
+
+  function healthPath(pubkey, myMesh) {
+    return '/nodes/' + encodeURIComponent(pubkey) + '/health' + (myMesh ? '?include=advertIntervals' : '');
+  }
 
   function isExperienced() { return localStorage.getItem(PREF_KEY) === 'experienced'; }
   function setLevel(level) { localStorage.setItem(PREF_KEY, level); }
@@ -115,6 +138,10 @@
       </section>
 
       ${hasNodes ? '<div class="my-nodes-grid" id="myNodesGrid"><div class="my-nodes-loading">Loading your nodes…</div></div>' : '<div class="my-nodes-grid" id="myNodesGrid"></div>'}
+      <dialog class="mnc-observers-dialog" id="homeObserversDialog" aria-labelledby="homeObserversTitle">
+        <div class="mnc-dialog-header"><h2 id="homeObserversTitle"></h2><button type="button" class="mnc-dialog-close" aria-label="Close observer list">Close</button></div>
+        <ul class="mnc-dialog-list"></ul>
+      </dialog>
 
       ${!hasNodes ? `
         <div class="onboarding-prompt">
@@ -139,7 +166,7 @@
 
       <section class="home-footer">
         <div class="home-footer-links">
-          ${homeCfg?.footerLinks ? homeCfg.footerLinks.map(l => `<a href="${escapeAttr(l.url)}" class="home-footer-link" target="_blank" rel="noopener">${_renderHomeLabel(l.label)}</a>`).join('') : `
+          ${homeCfg?.footerLinks ? homeCfg.footerLinks.map(footerLinkHtml).join('') : `
           <a href="#/packets" class="home-footer-link"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-package"/></svg> Packets</a>
           <a href="#/map" class="home-footer-link"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-map-trifold"/></svg> Network Map</a>
           <a href="#/live" class="home-footer-link"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Live</a>
@@ -263,6 +290,8 @@
     clearTimeout(searchTimeout);
     if (searchAbort) { searchAbort.abort(); searchAbort = null; }
     if (miniMap) { miniMap.remove(); miniMap = null; }
+    const observersDialog = document.getElementById('homeObserversDialog');
+    if (observersDialog?.open) observersDialog.close();
     if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }
   }
 
@@ -288,57 +317,111 @@
       return;
     }
 
+    const observerLists = new Map();
+    // #262: a node in My Mesh may ALSO be a registered observer, which is a
+    // separate property from its mesh role. One bulk /observers request per
+    // grid render feeds every card (O(n) index build, O(1) per card) — never
+    // a request per card, never a scan of the list per card. A failed or
+    // unusable response leaves the index unavailable, which the grid reports
+    // explicitly instead of silently dropping the observer identity.
+    const observerIndexPromise = loadObserverIndex();
+    const observerRecords = new Map();
+
     const cards = await Promise.all(myNodes.map(async (mn) => {
+      // The health request starts BEFORE the observer list is awaited: the
+      // node part of the card never depends on /observers, so a slow or
+      // retrying observer request must not sit in front of it. The no-op
+      // catch only marks the rejection handled while we wait on the index;
+      // the try below still sees the real error.
+      // The 240 s nodeHealth TTL is intentional: it matches node detail's
+      // cadence fetch (CLIENT_TTL.nodeDetail), and WS traffic drops it early.
+      const healthPromise = api(healthPath(mn.pubkey, true), { ttl: CLIENT_TTL.nodeHealth });
+      healthPromise.catch(() => {});
+      const observerIndex = await observerIndexPromise;
+      const observer = MyMeshObservers.match(observerIndex, mn.pubkey);
+      if (observer) observerRecords.set(mn.pubkey, observer);
+      // #902: the observer's own status report is activity evidence too.
+      const observerReportedAt = MyMeshObservers.reportedAt(observerIndex, mn.pubkey);
       try {
-        const h = await api('/nodes/' + encodeURIComponent(mn.pubkey) + '/health', { ttl: CLIENT_TTL.nodeHealth });
+        const h = await healthPromise;
         const node = h.node || {};
         const stats = h.stats || {};
-        const obs = h.observers || [];
+        // #76: the preview names direct observers; the dialog lists both.
+        const heard = HeardBy.lists(h);
+        const obs = heard.direct;
+        observerLists.set(mn.pubkey, heard);
 
-        const age = stats.lastHeard ? Date.now() - new Date(stats.lastHeard).getTime() : null;
-        const status = age === null ? 'silent' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? 'healthy' : age < HEALTH_THRESHOLDS.nodeSilentMs ? 'degraded' : 'silent';
-        const statusCls = status === 'healthy' ? 'status-ok' : status === 'degraded' ? 'status-warn' : 'status-err';
-        const statusDot = '<span class="' + statusCls + '" aria-label="' + status + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>';
-        const statusText = status === 'healthy' ? 'Active' : status === 'degraded' ? 'Degraded' : 'Silent';
+        // #304 point 3: ONE evidence model drives the badge, its wording and
+        // the disclosure below. It reuses the shared liveness rules (roles.js,
+        // #539) and reports a badge that rests only on an attributed relay
+        // hash prefix as attributed, never as a confident green.
+        const ev = MyMeshActivity.statusEvidence({ node, stats, observerReportedAt });
+        const status = ev.status;
+        const statusAt = ev.statusAt;
+        const statusDot = '<span class="' + ev.cls + '" aria-label="' + escapeAttr(ev.text) +
+          '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#' + ev.glyph + '"/></svg></span>';
         const name = node.name || mn.name || truncate(mn.pubkey, 12);
 
-        // SNR quality label
-        const snrVal = stats.avgSnr;
-        const snrLabel = snrVal != null ? (snrVal > 10 ? 'Excellent' : snrVal > 0 ? 'Good' : snrVal > -5 ? 'Marginal' : 'Poor') : null;
-        const snrColor = snrVal != null ? (snrVal > 10 ? 'var(--status-green)' : snrVal > 0 ? 'var(--accent)' : snrVal > -5 ? 'var(--status-yellow)' : 'var(--status-red)') : '#6b7280';
+        // #304 points 4 and 5: every headline number states what it covers.
+        // No SNR quality verdict and no verdict colour: the mean describes
+        // the observer links that proved a direct reception, not this node's
+        // signal quality (#76).
+        const snr = MyMeshActivity.snr(stats, obs);
+        const traffic = MyMeshActivity.traffic24h(h.activity24h, node.role);
+        const trend = MyMeshActivity.compare24h(h.activity24h);
 
-        // Build sparkline from recent packets (packet timestamps → hourly buckets)
-        const sparkHtml = buildSparkline(h.recentPackets || []);
+        const sparkHtml = buildSparkline(h.activity24h);
+        const isRepeater = String(node.role || '').toLowerCase() === 'repeater';
+        const preview = isRepeater ? obs.slice(0, 3) : obs;
+        const cadenceHtml = isRepeater ? renderMyMeshAdvertIntervals(h.advertIntervals, h.advertRouteBackfill) : '';
+        // #351 F2/R1: a name wider than the CSS max-width: 14ch clamp is
+        // clipped with an ellipsis. The full name must stay recoverable on
+        // EVERY card. Each span carries a title (pointer + assistive tech),
+        // and the accessible dialog (keyboard + touch) is offered when the
+        // preview hides names. Otherwise the button starts hidden and
+        // revealClippedObserverButtons() shows it after layout if a name is
+        // actually clipped — glyph width, not character count, decides that.
+        const obsFullName = o => HeardBy.observerName(o);
+        const heardTotal = obs.length + heard.relay.length;
+        const hiddenObservers = heardTotal - preview.length;
+        const observerBtnText = hiddenObservers > 0 ? `View all ${heardTotal} →` : 'Full names →';
+        const directNames = obs.length
+          ? preview.map(o => `<span class="mnc-observer-name" title="${escapeAttr(obsFullName(o))}">${escapeHtml(obsFullName(o))}</span>`).join(', ')
+          : `<span class="text-muted" title="${escapeAttr(HeardBy.EMPTY_DIRECT_TIP)}">none proven</span>`;
+        const relayCount = heard.relay.length ? ` · <span class="mnc-relay-count" title="${escapeAttr(HeardBy.RELAY_TIP)}">${heard.relay.length} via relay</span>` : '';
 
-        return `<div class="my-node-card ${status}" data-key="${mn.pubkey}" tabindex="0" role="button">
+        return `<div class="my-node-card ${status}${ev.quiet ? ' quiet' : ''} evidence-${ev.source}${observer ? ' is-observer' : ''}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
             <div class="mnc-status">${statusDot}</div>
             <div class="mnc-name">${escapeHtml(name)}</div>
+            ${observerBadgeHtml(observer, node.role)}
             <div class="mnc-role">${node.role || '?'}</div>
             <button class="mnc-remove" data-key="${mn.pubkey}" title="Remove from My Mesh" aria-label="Remove ${escapeAttr(name)} from My Mesh"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
-          <div class="mnc-status-text">${statusText}${stats.lastHeard ? ' · ' + timeAgo(stats.lastHeard) : ''}</div>
+          <div class="mnc-status-text">${escapeHtml(ev.text)}${statusAt ? ' · ' + (ev.quiet ? 'last heard ' : '') + timeAgo(statusAt) : ''}</div>
+          ${renderMyMeshEvidence(ev, h.activity24h, stats)}
+          ${observerPanelHtml(observer)}
+          ${observer ? `<div class="mnc-section-lbl">${escapeHtml(MyMeshObservers.NODE_SECTION_LABEL)}</div>` : ''}
           <div class="mnc-metrics">
-            <div class="mnc-metric">
-              <div class="mnc-val">${stats.packetsToday ?? 0}</div>
-              <div class="mnc-lbl">Packets today</div>
+            <div class="mnc-metric" title="${escapeAttr(traffic.tip)}">
+              <div class="mnc-val">${escapeHtml(traffic.value)}${trend.short ? ` <span class="mnc-metric-sub" title="${escapeAttr(trend.text + ' — ' + trend.tip)}">${escapeHtml(trend.short)}</span>` : ''}</div>
+              <div class="mnc-lbl">${escapeHtml(traffic.label)}</div>
             </div>
-            <div class="mnc-metric">
+            <div class="mnc-metric" title="${escapeAttr(HeardBy.DIRECT_TIP)}">
               <div class="mnc-val">${obs.length}</div>
-              <div class="mnc-lbl">Observers</div>
+              <div class="mnc-lbl">Direct observers</div>
             </div>
-            <div class="mnc-metric">
-              <div class="mnc-val" style="color:${snrColor}">${snrVal != null ? Number(snrVal).toFixed(1) + ' dB' : '—'}</div>
-              <div class="mnc-lbl">SNR${snrLabel ? ' · ' + snrLabel : ''}</div>
-            </div>
-            <div class="mnc-metric">
-              <div class="mnc-val">${stats.avgHops != null ? stats.avgHops.toFixed(1) : '—'}</div>
-              <div class="mnc-lbl">Avg hops</div>
+            <div class="mnc-metric" title="${escapeAttr(snr.tip)}">
+              <div class="mnc-val">${escapeHtml(snr.value)}</div>
+              <div class="mnc-lbl">${escapeHtml(snr.label)}</div>
             </div>
           </div>
-          ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${obs.map(o => escapeHtml(o.observer_name || o.observer_id)).join(', ')}</div>` : ''}
-          ${sparkHtml ? `<div class="mnc-spark">${sparkHtml}</div>` : ''}
+          ${heardTotal ? `<div class="mnc-observers"><strong title="${escapeAttr(HeardBy.DIRECT_TIP)}">Heard directly by:</strong> ${directNames}${relayCount} <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="Show all ${heardTotal} observer names for ${escapeAttr(name)}"${hiddenObservers > 0 ? '' : ' hidden'}>${observerBtnText}</button></div>` : ''}
+          ${cadenceHtml}
+          <div class="mnc-spark">${sparkHtml}</div>
           <div class="mnc-actions">
+            <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
+            ${observerActionHtml(observer, mn.pubkey, name)}
             <button class="mnc-btn" data-action="health" data-key="${mn.pubkey}">Full health →</button>
             <button class="mnc-btn" data-action="packets" data-key="${mn.pubkey}">View packets →</button>
           </div>
@@ -349,18 +432,35 @@
         const statusMsg = is404
           ? 'Waiting for first advert — this node has been seen in channel messages but hasn\u2019t advertised yet'
           : 'Could not load data';
-        return `<div class="my-node-card silent" data-key="${mn.pubkey}" tabindex="0" role="button">
+        // #262: the observer record comes from the bulk observer list, not
+        // from node health, so a failed health request must not hide the
+        // observer identity, status or reported traffic. The mesh role is
+        // genuinely unknown here, so the badge carries no secondary term.
+        const fallbackName = mn.name || truncate(mn.pubkey, 12);
+        return `<div class="my-node-card silent${observer ? ' is-observer' : ''}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
             <div class="mnc-status">${statusIcon}</div>
-            <div class="mnc-name">${escapeHtml(mn.name || truncate(mn.pubkey, 12))}</div>
-            <button class="mnc-remove" data-key="${mn.pubkey}" title="Remove" aria-label="Remove ${escapeAttr(mn.name || truncate(mn.pubkey, 12))} from My Mesh"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
+            <div class="mnc-name">${escapeHtml(fallbackName)}</div>
+            ${observerBadgeHtml(observer, null)}
+            <button class="mnc-remove" data-key="${mn.pubkey}" title="Remove" aria-label="Remove ${escapeAttr(fallbackName)} from My Mesh"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
           <div class="mnc-status-text">${statusMsg}</div>
+          ${observerPanelHtml(observer)}
+          <div class="mnc-actions">
+            <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
+            ${observerActionHtml(observer, mn.pubkey, fallbackName)}
+          </div>
         </div>`;
       }
     }));
 
-    grid.innerHTML = cards.join('');
+    // #262: an unavailable observer list is reported once for the whole
+    // grid. Without it a card would silently look like a non-observer, which
+    // is a false negative the operator cannot see.
+    const observerNotice = (await observerIndexPromise).available ? ''
+      : `<div class="my-nodes-observer-notice" role="status"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> ${escapeHtml(MyMeshObservers.UNAVAILABLE_NOTICE)}</div>`;
+    grid.innerHTML = observerNotice + cards.join('');
+    revealClippedObserverButtons(grid);
 
     // Wire up remove buttons
     grid.querySelectorAll('.mnc-remove').forEach(btn => {
@@ -378,41 +478,187 @@
     grid.querySelectorAll('.mnc-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (btn.dataset.action === 'node') window.location.hash = '#/nodes/' + encodeURIComponent(btn.dataset.key);
+        // #262: navigate with the MATCHED observer record's own id, so the
+        // observer page always opens the right device. observers rows are
+        // stored uppercase and nodes rows lowercase (#1836), so the node key
+        // is never re-cased by hand here.
+        if (btn.dataset.action === 'observer') {
+          const href = MyMeshObservers.pageHref(observerRecords.get(btn.dataset.key));
+          if (href) window.location.hash = href;
+        }
         if (btn.dataset.action === 'health') loadHealth(btn.dataset.key);
         if (btn.dataset.action === 'packets') window.location.hash = '#/packets/' + btn.dataset.key;
+        if (btn.dataset.action === 'observers') showObservers(btn, observerLists.get(btn.dataset.key) || HeardBy.lists(null));
       });
     });
 
     // Card click → health
     grid.querySelectorAll('.my-node-card').forEach(card => {
       const handler = (e) => {
-        if (e.target.closest('.mnc-remove') || e.target.closest('.mnc-btn')) return;
+        // #304: the evidence disclosure is part of the card, so a click on
+        // its summary (or on the text it reveals) must toggle it instead of
+        // navigating to the health panel.
+        if (e.target.closest('.mnc-remove') || e.target.closest('.mnc-btn') || e.target.closest('.mnc-evidence')) return;
         loadHealth(card.dataset.key);
       };
       card.addEventListener('click', handler);
       card.addEventListener('keydown', (e) => {
+        // #2027 follow-up: a nested action/remove button's own Enter/Space
+        // activation must not be swallowed by the card's preventDefault()
+        // below. Bail out before it runs, the same target check `handler`
+        // already uses for the click case, so the button still fires its
+        // own click via the browser's native keyboard activation.
+        if (e.target.closest('.mnc-remove') || e.target.closest('.mnc-btn') || e.target.closest('.mnc-evidence')) return;
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(e); }
       });
     });
   }
 
-  function buildSparkline(packets) {
-    if (!packets.length) return '';
-    // Group into hourly buckets over last 24h
-    const now = Date.now();
-    const buckets = new Array(24).fill(0);
-    packets.forEach(p => {
-      const t = new Date(p.timestamp || p.created_at).getTime();
-      const hoursAgo = Math.floor((now - t) / 3600000);
-      if (hoursAgo >= 0 && hoursAgo < 24) buckets[23 - hoursAgo]++;
+  // ==================== #262 OBSERVER IDENTITY ON A CARD ====================
+  // All three helpers take the matched observer row (or null) and render
+  // nothing at all for a node that has no observer record, so an ordinary
+  // repeater/room card is byte-for-byte what it was before #262.
+
+  // OBSERVER is the primary badge; the node's mesh role keeps its own
+  // .mnc-role chip right beside it and is never overwritten. The title spells
+  // the pair out ("Observer · Repeater") for pointer and assistive tech.
+  function observerBadgeHtml(observer, nodeRole) {
+    if (!observer) return '';
+    const summary = MyMeshObservers.roleSummary(nodeRole);
+    return `<span class="mnc-badge-observer" title="${escapeAttr(summary)}" aria-label="${escapeAttr(summary)}">${escapeHtml(MyMeshObservers.PRIMARY_BADGE)}</span>`;
+  }
+
+  // Observer-sourced status and traffic, kept in their own labelled block so
+  // nothing here can be read as the node's own activity. Every value states
+  // its source; a missing one renders an em dash rather than a zero.
+  function observerPanelHtml(observer) {
+    if (!observer) return '';
+    const st = MyMeshObservers.status(observer);
+    const dot = `<span class="${st.cls}" aria-hidden="true"><svg class="ph-icon"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>`;
+    const reported = st.reportedAt ? MyMeshObservers.STATUS_REPORTED_PREFIX + timeAgo(st.reportedAt) : '';
+    const lastReport = MyMeshObservers.lastReport(observer);
+    const traffic = MyMeshObservers.traffic(observer);
+    return `<div class="mnc-observer-panel" data-observer-id="${escapeAttr(String(observer.id || ''))}">
+      <div class="mnc-section-lbl">${escapeHtml(MyMeshObservers.OBSERVER_SECTION_LABEL)}</div>
+      <div class="mnc-observer-rows">
+        <div class="mnc-observer-row" title="${escapeAttr(MyMeshObservers.STATUS_TIP)}"><strong>${escapeHtml(MyMeshObservers.STATUS_ROW_LABEL)}</strong> ${dot} <span class="mnc-observer-state">${escapeHtml(st.label)}</span>${escapeHtml(reported)}</div>
+        <div class="mnc-observer-row"><strong>${escapeHtml(MyMeshObservers.LAST_REPORT_ROW_LABEL)}</strong> <span class="mnc-observer-last">${lastReport ? escapeHtml(timeAgo(lastReport)) : escapeHtml(MyMeshObservers.UNKNOWN_VALUE)}</span></div>
+      </div>
+      <div class="mnc-metric mnc-observer-metric" title="${escapeAttr(MyMeshObservers.TRAFFIC_TIP)}">
+        <div class="mnc-val">${escapeHtml(traffic.value)}</div>
+        <div class="mnc-lbl">${escapeHtml(traffic.label)}</div>
+      </div>
+    </div>`;
+  }
+
+  // The direct Observer page action. Only rendered for a matched observer;
+  // the existing Node page action is untouched and always present.
+  function observerActionHtml(observer, pubkey, name) {
+    if (!MyMeshObservers.pageHref(observer)) return '';
+    return `<button class="mnc-btn mnc-observer-page" data-action="observer" data-key="${escapeAttr(pubkey)}" aria-label="Open the observer page for ${escapeAttr(name)}">Observer page →</button>`;
+  }
+
+  // #351 R1: measure after layout. scrollWidth > clientWidth is exactly when
+  // the ellipsis is drawn. All reads happen before any write, so the whole
+  // grid costs one layout pass.
+  function revealClippedObserverButtons(grid) {
+    const clipped = [...grid.querySelectorAll('.mnc-view-all[hidden]')].filter(btn =>
+      [...btn.parentElement.querySelectorAll('.mnc-observer-name')].some(el => el.scrollWidth > el.clientWidth));
+    clipped.forEach(btn => { btn.hidden = false; });
+  }
+
+  // heard is HeardBy.lists(health): direct observers first, then the relay
+  // ones, each marked so the list stays truthful about what was received.
+  function showObservers(trigger, heard) {
+    const dialog = document.getElementById('homeObserversDialog');
+    if (!dialog) return;
+    const cardName = trigger.closest('.my-node-card')?.querySelector('.mnc-name')?.textContent || 'Node';
+    dialog.querySelector('#homeObserversTitle').textContent = `${cardName} · ${heard.direct.length} direct, ${heard.relay.length} via relay`;
+    const list = dialog.querySelector('.mnc-dialog-list');
+    const fragment = document.createDocumentFragment();
+    heard.direct.concat(heard.relay).forEach((observer, i) => {
+      const item = document.createElement('li');
+      item.textContent = HeardBy.observerName(observer) + (i >= heard.direct.length ? ' (via relay)' : '');
+      fragment.appendChild(item);
     });
-    const max = Math.max(...buckets, 1);
-    const bars = buckets.map(v => {
-      const h = Math.max(2, Math.round((v / max) * 24));
-      const opacity = v > 0 ? 0.4 + (v / max) * 0.6 : 0.1;
-      return `<div class="home-spark-bar" style="height:${h}px;opacity:${opacity}"></div>`;
+    list.replaceChildren(fragment);
+    dialog.querySelector('.mnc-dialog-close').onclick = () => dialog.close();
+    dialog.onclick = (event) => {
+      if (event.target !== dialog) return;
+      const rect = dialog.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+    };
+    dialog.onclose = () => { if (trigger.isConnected) trigger.focus(); };
+    dialog.showModal();
+  }
+
+  // #304 point 3/5: the evidence behind the badge and the two numbers that
+  // need their sample scope spelled out, in a native <details> so the card
+  // stays compact and the explanation is reachable by keyboard AND touch —
+  // a title tooltip is neither. Timestamps are rendered separately, never
+  // merged: "last own advert" is the node's own transmission, "last
+  // attributed relay activity" is other traffic whose observed path named
+  // this node, and it is only reported when it is newer than that advert.
+  function renderMyMeshEvidence(ev, activity, stats) {
+    const hops = MyMeshActivity.hops(stats);
+    const trend = MyMeshActivity.compare24h(activity);
+    const row = (label, value, tip) =>
+      `<div class="mnc-evidence-row"${tip ? ` title="${escapeAttr(tip)}"` : ''}><strong>${escapeHtml(label)}</strong> <span>${escapeHtml(value)}</span></div>`;
+    return `<details class="mnc-evidence"><summary>${escapeHtml(MyMeshActivity.EVIDENCE_SUMMARY)}</summary>` +
+      row(MyMeshActivity.ADVERT_ROW_LABEL, ev.advertText || timeAgo(ev.advertAt)) +
+      row(MyMeshActivity.RELAY_ROW_LABEL, ev.relayText || timeAgo(ev.relayAt)) +
+      (ev.isObserver ? row(MyMeshActivity.OBSERVER_ROW_LABEL, timeAgo(ev.observerReportedAt) + (ev.observerText ? ' · ' + ev.observerText : '')) : '') +
+      `<div class="mnc-evidence-note">${escapeHtml(ev.explanation)}</div>` +
+      row(MyMeshActivity.WINDOW_ROW_LABEL, MyMeshActivity.windowText(activity), MyMeshActivity.TRAFFIC_TIP) +
+      row(MyMeshActivity.COMPARE_ROW_LABEL, trend.text, trend.tip) +
+      row(hops.label, hops.value, hops.tip) +
+      '</details>';
+  }
+
+  function renderMyMeshAdvertIntervals(intervals, backfill) {
+    const row = (label, estimate) => {
+      if (!estimate) return `<div class="mnc-advert-row"><strong>${label}</strong> unavailable</div>`;
+      const samples = Number(estimate.samples);
+      const seconds = Number(estimate.interval_s);
+      let value = 'unavailable';
+      if (estimate.status === 'estimated' && estimate.interval_s != null && Number.isFinite(seconds) && seconds > 0) {
+        const hours = seconds / 3600;
+        value = '≈ ' + (hours >= 1 ? Number(hours.toFixed(1)) + ' h' : Math.round(seconds / 60) + ' min');
+      } else if (estimate.status === 'too_few') {
+        value = 'not enough adverts';
+      } else if (estimate.status === 'none_observed') {
+        value = 'not observed';
+      } else if (estimate.status === 'irregular') {
+        value = 'irregular';
+      }
+      const count = Number.isInteger(samples) && samples >= 0 ? ` · ${samples} heard` : '';
+      const seen = estimate.last_advert && Number.isFinite(Date.parse(estimate.last_advert))
+        ? ' · last ' + timeAgo(estimate.last_advert) : '';
+      return `<div class="mnc-advert-row"><strong>${label}</strong> ${value}${count}${seen}</div>`;
+    };
+    const provisional = intervals && backfill?.status !== 'complete'
+      ? '<div class="mnc-advert-provisional" title="Route-mask backfill incomplete or unknown; flood and zero-hop classifications may change">Route classes provisional</div>' : '';
+    return `<div class="mnc-advert-cadence" aria-label="Observed repeater advert intervals">` +
+      row('Zero-hop', intervals?.zero_hop) + row('Flood', intervals?.flood) +
+      provisional + '<div class="mnc-advert-note" title="Observed estimate from at most 20 newest adverts per type; missed receptions can skew it. Not the configured timer.">Observed estimate ≠ setting · ≤20/type · missed receptions skew</div></div>';
+  }
+
+  function buildSparkline(activity) {
+    const label = '<div class="home-spark-label">Node-associated transmissions · last 24h</div>';
+    // #304: one shared shape check for the rolling window (MyMeshActivity),
+    // so the sparkline and the 24h traffic count can never disagree about
+    // whether the hourly counts are usable.
+    const buckets = MyMeshActivity.buckets(activity);
+    if (!buckets || activity.complete !== true) return label + '<div class="home-spark-unavailable">Activity unavailable: 24h history incomplete</div>';
+    const max = Math.max(1, ...buckets.map(b => b.count));
+    const bars = buckets.map(b => {
+      const height = Math.max(2, Math.round((b.count / max) * 24));
+      const opacity = b.count > 0 ? 0.4 + (b.count / max) * 0.6 : 0.1;
+      const range = `${new Date(b.start).toLocaleString()} to ${new Date(b.end).toLocaleString()}`;
+      return `<div class="home-spark-bar" role="img" aria-label="${escapeAttr(range)}: ${b.count} node-associated transmissions" title="${escapeAttr(range)}: ${b.count} node-associated transmissions" style="height:${height}px;opacity:${opacity}"></div>`;
     }).join('');
-    return `<div class="home-spark-label">24h activity</div><div class="home-spark-bars">${bars}</div>`;
+    return `${label}<div class="home-spark-bars">${bars}</div>`;
   }
 
   // ==================== STATS ====================
@@ -440,41 +686,54 @@
     if (journey) journey.classList.remove('visible');
 
     try {
-      const h = await api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeHealth });
+      // #902: the cached bulk observer roster, fetched alongside, never per node.
+      const [h, observerIndex] = await Promise.all([
+        api(healthPath(pubkey, isMyNode(pubkey)), { ttl: CLIENT_TTL.nodeHealth }),
+        loadObserverIndex(),
+      ]);
+      const observerReportedAt = MyMeshObservers.reportedAt(observerIndex, pubkey);
       const node = h.node || {};
       const stats = h.stats || {};
       const packets = h.recentPackets || [];
       const hasLocation = node.lat != null && node.lon != null;
-      const observers = h.observers || [];
+      const heard = HeardBy.lists(h);
       const claimed = isMyNode(pubkey);
 
-      let status = 'silent', color = 'red', statusMsg = 'Not heard in 24+ hours';
-      if (stats.lastHeard) {
-        const ageMs = Date.now() - new Date(stats.lastHeard).getTime();
-        const ago = timeAgo(stats.lastHeard);
-        if (ageMs < HEALTH_THRESHOLDS.nodeDegradedMs) { status = 'healthy'; color = 'green'; statusMsg = `Last heard ${ago}`; }
-        else if (ageMs < HEALTH_THRESHOLDS.nodeSilentMs) { status = 'degraded'; color = 'yellow'; statusMsg = `Last heard ${ago}`; }
-        else { statusMsg = `Last heard ${ago}`; }
-      }
+      // #304: the panel reads the same evidence model as the cards, so the
+      // badge, the SNR attribution and the traffic window cannot drift apart
+      // between the two views.
+      const ev = MyMeshActivity.statusEvidence({ node, stats, observerReportedAt });
+      const heardAt = ev.heardAt;
+      const status = ev.status;
+      const color = ev.confident && status === 'healthy' ? 'green' : status === 'silent' ? 'red' : ev.quiet ? 'muted' : 'yellow';
+      const statusMsg = ev.source === 'observer'
+        ? `${ev.text} ${timeAgo(ev.statusAt)}`
+        : (ev.quiet ? ev.label + ' · ' : '') +
+          (heardAt ? `${ev.quiet ? 'last' : 'Last'} heard ${timeAgo(heardAt)}` : 'No confirmed activity in the current window') +
+          (ev.source === 'relay' ? ' · ' + MyMeshActivity.ATTRIBUTED_SUFFIX : '');
 
-      const snrVal = stats.avgSnr;
-      const snrLabel = snrVal != null ? (snrVal > 10 ? 'Excellent' : snrVal > 0 ? 'Good' : snrVal > -5 ? 'Marginal' : 'Poor') : '';
+      const snr = MyMeshActivity.snr(stats, heard.direct);
+      const traffic = MyMeshActivity.traffic24h(h.activity24h, node.role);
+      const trend = MyMeshActivity.compare24h(h.activity24h);
+      const hops = MyMeshActivity.hops(stats);
 
       card.innerHTML = `
         <div class="health-banner ${color}">
-          <span class="${status === 'healthy' ? 'status-ok' : status === 'degraded' ? 'status-warn' : 'status-err'}" aria-label="${status}">${status === 'healthy' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg>' : status === 'degraded' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x-circle"/></svg>'}</span>
+          <span class="${ev.cls}" aria-label="${escapeAttr(ev.text)}">${ev.confident && status === 'healthy' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg>' : status === 'silent' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x-circle"/></svg>' : ev.quiet ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-moon"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>'}</span>
           <span><strong>${escapeHtml(node.name || truncate(pubkey, 16))}</strong> — ${statusMsg}</span>
           ${!claimed ? `<button class="health-claim" data-key="${pubkey}" data-name="${escapeAttr(node.name || '')}">+ Add to My Mesh</button>` : ''}
         </div>
         <div class="health-body">
           <div class="health-metrics">
-            <div class="health-metric"><div class="val">${stats.packetsToday ?? '—'}</div><div class="lbl">Packets Today</div></div>
-            <div class="health-metric"><div class="val">${observers.length}</div><div class="lbl">Observers</div></div>
-            <div class="health-metric"><div class="val">${stats.lastHeard ? timeAgo(stats.lastHeard) : '—'}</div><div class="lbl">Last seen</div></div>
-            <div class="health-metric"><div class="val">${snrVal != null ? Number(snrVal).toFixed(1) + ' dB' : '—'}</div><div class="lbl">Avg SNR${snrLabel ? ' · ' + snrLabel : ''}</div></div>
-            <div class="health-metric"><div class="val">${stats.avgHops != null ? stats.avgHops.toFixed(1) : '—'}</div><div class="lbl">Avg Hops</div></div>
+            <div class="health-metric" title="${escapeAttr(traffic.tip)}"><div class="val">${escapeHtml(traffic.value)}</div><div class="lbl">${escapeHtml(traffic.label)}</div><div class="mnc-metric-sub" title="${escapeAttr(trend.tip)}">${escapeHtml(trend.text)}</div></div>
+            <div class="health-metric" title="${escapeAttr(HeardBy.DIRECT_TIP)}"><div class="val">${heard.direct.length}</div><div class="lbl">Direct observers</div></div>
+            <div class="health-metric"><div class="val">${heardAt ? timeAgo(heardAt) : '—'}</div><div class="lbl">Last seen</div></div>
+            <div class="health-metric" title="${escapeAttr(snr.tip)}"><div class="val">${escapeHtml(snr.value)}</div><div class="lbl">${escapeHtml(snr.label)}</div></div>
+            <div class="health-metric" title="${escapeAttr(hops.tip)}"><div class="val">${escapeHtml(hops.value)}</div><div class="lbl">${escapeHtml(hops.label)}</div></div>
           </div>
-          ${observers.length ? `<div class="health-observers"><strong>Heard by:</strong> ${observers.map(o => escapeHtml(o.observer_name || o.observer_id)).join(', ')}</div>` : ''}
+          ${renderMyMeshEvidence(ev, h.activity24h, stats)}
+          ${heard.direct.length || heard.relay.length ? `<div class="health-observers"><strong title="${escapeAttr(HeardBy.DIRECT_TIP)}">Heard directly by:</strong> ${heard.direct.length ? heard.direct.map(o => escapeHtml(HeardBy.observerName(o))).join(', ') : `<span class="text-muted" title="${escapeAttr(HeardBy.EMPTY_DIRECT_TIP)}">none proven</span>`}</div>` : ''}
+          ${heard.relay.length ? `<div class="health-observers"><strong title="${escapeAttr(HeardBy.RELAY_TIP)}">Heard via relay by:</strong> ${heard.relay.map(o => escapeHtml(HeardBy.observerName(o))).join(', ')}</div>` : ''}
           ${hasLocation ? '<div class="health-map" id="healthMap"></div>' : ''}
           <div class="health-timeline">
             <h3>Recent Activity</h3>
@@ -513,7 +772,20 @@
         const mapEl = document.getElementById('healthMap');
         if (mapEl) {
           miniMap = L.map(mapEl, { zoomControl: false, attributionControl: false }).setView([node.lat, node.lon], 12);
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(miniMap);
+          // #741 M1a — this minimap still hardcodes OSM (#756 left that
+          // out of scope), but it builds the layer through the registry's
+          // one factory like every other map.
+          window.MC_createBaseLayer({
+            url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            attribution: '© OpenStreetMap contributors',
+          }).addTo(miniMap);
+          // #756 — this minimap was the one map #752/#754 left out of scope
+          // (it hardcodes OSM, not the registry's provider), but it still
+          // needs a credit; route it through the same shared control as
+          // every other inset, compact so it fits a 150px card.
+          if (typeof window.MC_ensureAttribution === 'function') {
+            window.MC_ensureAttribution(miniMap, { compact: true });
+          }
           L.marker([node.lat, node.lon]).addTo(miniMap);
           setTimeout(() => miniMap.invalidateSize(), 100);
         }
@@ -553,7 +825,11 @@
 
   // ==================== HELPERS ====================
   function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function escapeAttr(s) { return String(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  /* #368: one shared implementation, defined and exported by public/roles.js
+     (which index.html loads before this file) so the Markdown link
+     destinations in miniMarkdown() and the attribute sinks here cannot drift
+     apart. Behaviour is unchanged from the local copy this replaces. */
+  function escapeAttr(s) { return window.escapeAttr(s); }
   function timeSinceMs(d) { return Date.now() - d.getTime(); }
 
   function checklist(homeCfg) {

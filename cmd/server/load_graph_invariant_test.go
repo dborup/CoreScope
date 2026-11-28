@@ -22,7 +22,7 @@ func TestLoad_PanicsWhenGraphNotLoadedAndEdgesExist(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
-	rw, err := sql.Open("sqlite", "file:"+dbPath+"?_journal_mode=WAL")
+	rw, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}

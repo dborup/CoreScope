@@ -1,0 +1,16 @@
+badge         24px bold    x= 962 y= 58 w= 196 Terrain: Marginal
+surface-badge 16px regular x= 990 y=100 w= 174 Buildings/trees: Blocked
+title         40px bold    x=  44 y= 70 w= 520 Ridge North → Valley Node
+subtitle      22px regular x=  44 y=104 w= 445 Path profile · 14.6 km · 869.618 MHz · k = 4/3
+axis-y        16px regular x=  52 y=150 w=  36 93 m
+axis-y        16px regular x=  52 y=238 w=  36 71 m
+axis-y        16px regular x=  52 y=326 w=  36 49 m
+axis-y        16px regular x=  52 y=414 w=  36 26 m
+axis-y        16px regular x=  61 y=502 w=  27 4 m
+pin           18px bold    x= 106 y=275 w=  13 A
+pin           18px bold    x=1152 y=330 w=  13 B
+axis-x        16px regular x=  96 y=524 w=   9 0
+axis-x        16px regular x= 607 y=524 w=  58 7.30 km
+axis-x        16px regular x=1118 y=524 w=  58 14.6 km
+summary       20px regular x=  24 y=574 w= 905 Tightest Fresnel point: clearance 3.1 m at 8.11 km · heights assumed (46 m / 34 m) · terrain + surface
+attribution   18px regular x=  24 y=604 w= 760 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0 — data bearbejdet

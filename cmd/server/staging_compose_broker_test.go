@@ -43,15 +43,22 @@ import (
 	"testing"
 )
 
-func readStagingCompose(t *testing.T) string {
+// readRepoCompose reads a compose file from the repo root (cmd/server is two
+// levels down). #372 added shape tests over more than one compose file, so
+// the reader takes the file name.
+func readRepoCompose(t *testing.T, name string) string {
 	t.Helper()
-	// cmd/server -> repo root
-	path := filepath.Join("..", "..", "docker-compose.staging.yml")
+	path := filepath.Join("..", "..", name)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+func readStagingCompose(t *testing.T) string {
+	t.Helper()
+	return readRepoCompose(t, "docker-compose.staging.yml")
 }
 
 // stripYAMLComments removes any `#`-prefixed comment tail (and pure
@@ -69,17 +76,16 @@ func stripYAMLComments(yaml string) string {
 	return strings.Join(out, "\n")
 }
 
-// extractStagingGoBlock returns the YAML lines belonging to the
-// services.staging-go entry. It stops at the next top-level
-// services key or at a top-level key like "volumes:"/"networks:".
-func extractStagingGoBlock(t *testing.T, yaml string) string {
-	t.Helper()
+// extractServiceBlock returns the YAML lines belonging to the
+// services.<name> entry. It stops at the next top-level services key or at
+// a top-level key like "volumes:"/"networks:".
+func extractServiceBlock(yaml, name string) string {
 	lines := strings.Split(yaml, "\n")
 	var out []string
 	in := false
 	for _, ln := range lines {
 		if !in {
-			if strings.HasPrefix(ln, "  staging-go:") {
+			if strings.HasPrefix(ln, "  "+name+":") {
 				in = true
 				out = append(out, ln)
 			}
@@ -98,6 +104,11 @@ func extractStagingGoBlock(t *testing.T, yaml string) string {
 		out = append(out, ln)
 	}
 	return strings.Join(out, "\n")
+}
+
+func extractStagingGoBlock(t *testing.T, yaml string) string {
+	t.Helper()
+	return extractServiceBlock(yaml, "staging-go")
 }
 
 // extractSubBlock returns the indented body under a given `key:` line

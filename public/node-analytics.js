@@ -9,6 +9,10 @@
   let charts = [];
   let currentDays = 7;
   let currentPubkey = null;
+  // A range selection or a new visit invalidates every result from the
+  // previous load, including battery and hop requests started by it.
+  let loadSequence = 0;
+  let titleVisit = -1; // PageTitle token of the current visit (#563)
 
   function destroyCharts() {
     charts.forEach(c => { try { c.destroy(); } catch {} });
@@ -31,6 +35,8 @@
   }
 
   async function loadAnalytics(container, pubkey, days) {
+    const sequence = ++loadSequence;
+    const isCurrent = () => sequence === loadSequence;
     currentPubkey = pubkey;
     currentDays = days;
     destroyCharts();
@@ -42,11 +48,14 @@
     try {
       data = await api('/nodes/' + encodeURIComponent(pubkey) + '/analytics?days=' + days, { ttl: CLIENT_TTL.nodeAnalytics });
     } catch (e) {
+      if (!isCurrent()) return;
       container.innerHTML = '<div style="padding:40px;text-align:center;color:#ff6b6b">Failed to load analytics: ' + escapeHtml(e.message) + '</div>';
       return;
     }
+    if (!isCurrent()) return;
 
     const n = data.node;
+    if (window.PageTitle) window.PageTitle.setEntity(n.name || n.public_key.slice(0, 12), titleVisit);
     const s = data.computedStats;
     const nodeName = escapeHtml(n.name || n.public_key.slice(0, 12));
 
@@ -159,6 +168,22 @@
         </div>
       </div>`;
 
+    // The API's coverage is retained store evidence, not physical radio uptime.
+    // Use textContent for all server-provided metadata and insert one notice;
+    // do not interpolate coverage fields into this page's HTML template.
+    if (data.coverage && data.coverage.partial) {
+      const notice = document.createElement('p');
+      notice.id = 'nodeAnalyticsCoverageNotice';
+      notice.setAttribute('role', 'status');
+      notice.style.cssText = 'padding:10px 12px;color:var(--text-muted);border:1px solid var(--border);border-radius:6px';
+      const coverage = data.coverage;
+      notice.textContent = coverage.seconds > 0
+        ? 'Partial history: statistics use available retained data from ' + coverage.from + ' to ' + coverage.to + ', not the entire requested ' + days + ' days. Missing history is not inactivity; this is not measured radio uptime.'
+        : 'Partial history: a supported history interval is not yet known. Rates are shown as 0 until retained data is available; this is not measured radio uptime.';
+      if (coverage.loading) notice.textContent += ' History is still loading.';
+      container.querySelector('.analytics-stats').before(notice);
+    }
+
     // Time range buttons
     container.querySelectorAll('#timeRangeBtns button').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -174,8 +199,8 @@
     buildObserverChart(data);
     buildHopChart(data);
     buildHeatmap(data);
-    loadBatteryChart(pubkey, currentDays);
-    loadHopAnalyticsChart(pubkey, currentDays);
+    loadBatteryChart(pubkey, currentDays, isCurrent);
+    loadHopAnalyticsChart(pubkey, currentDays, isCurrent);
   }
 
   function buildActivityChart(data) {
@@ -306,31 +331,54 @@
     }
   }
 
-  async function loadBatteryChart(pubkey, days) {
+  // Battery status badge (#562). Fixed icon + label are built with explicit
+  // DOM; the API-derived voltage is only ever a text node (never parsed as HTML).
+  const BATTERY_STATUS = {
+    ok: { cls: 'status-ok', icon: 'ph-battery-high', label: 'OK' },
+    low: { cls: 'status-warn', icon: 'ph-warning', label: 'Low' },
+    critical: { cls: 'status-err', icon: 'ph-battery-low', label: 'Critical' },
+  };
+  function renderBatteryBadge(badge, data) {
+    const st = (data && BATTERY_STATUS[data.status]) || { cls: 'status-muted', icon: null, label: 'No data' };
+    badge.className = 'battery-status-badge ' + st.cls;
+    badge.style.color = '';
+    const kids = [];
+    if (st.icon) {
+      const NS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('class', 'ph-icon');
+      svg.setAttribute('aria-hidden', 'true');
+      const use = document.createElementNS(NS, 'use');
+      use.setAttribute('href', '/icons/phosphor-sprite.svg#' + st.icon);
+      svg.appendChild(use);
+      kids.push(svg, document.createTextNode(' '));
+    }
+    const label = document.createElement('span');
+    label.className = 'battery-status-label';
+    label.textContent = st.label;
+    kids.push(label);
+    if (data && data.latest_mv) kids.push(document.createTextNode(' · ' + data.latest_mv + ' mV'));
+    badge.replaceChildren(...kids);
+  }
+
+  async function loadBatteryChart(pubkey, days, isCurrent) {
     let data;
     try {
       data = await api('/nodes/' + encodeURIComponent(pubkey) + '/battery?days=' + days);
     } catch (e) {
+      if (!isCurrent()) return;
       const empty = document.getElementById('batteryEmpty');
       if (empty) { empty.style.display = 'block'; empty.textContent = 'Battery data unavailable: ' + e.message; }
       return;
     }
+    if (!isCurrent()) return;
     const ctx = document.getElementById('batteryChart');
     const empty = document.getElementById('batteryEmpty');
     const badge = document.getElementById('batteryStatusBadge');
     const samples = (data && data.samples) || [];
     const thr = (data && data.thresholds) || { low_mv: 3300, critical_mv: 3000 };
 
-    if (badge) {
-      const STATUS_COLOR = { ok: '#51cf66', low: '#fcc419', critical: '#ff6b6b', unknown: 'var(--text-muted)' };
-      const label = data && data.status === 'ok' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-battery-high"/></svg> OK'
-        : data && data.status === 'low' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Low'
-        : data && data.status === 'critical' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-battery-low"/></svg> Critical'
-        : 'No data';
-      const mv = data && data.latest_mv ? ' · ' + data.latest_mv + ' mV' : '';
-      badge.textContent = label + mv;
-      badge.style.color = STATUS_COLOR[(data && data.status) || 'unknown'];
-    }
+    if (badge) renderBatteryBadge(badge, data);
 
     if (!ctx || samples.length === 0) {
       if (ctx) ctx.style.display = 'none';
@@ -385,12 +433,16 @@
   let hopAnalyticsFilter = 'flood';
   let hopAnalyticsHistChart = null;
 
-  async function loadHopAnalyticsChart(pubkey, days) {
+  async function loadHopAnalyticsChart(pubkey, days, isCurrent) {
+    const sequence = loadSequence;
+    isCurrent = isCurrent || (() => sequence === loadSequence);
     hopAnalyticsFilter = 'flood';
     try {
       const data = await api('/nodes/' + encodeURIComponent(pubkey) + '/hop_analytics?days=' + days);
+      if (!isCurrent()) return;
       hopAnalyticsPackets = (data && data.packets) || [];
     } catch (e) {
+      if (!isCurrent()) return;
       hopAnalyticsPackets = [];
       const empty = document.getElementById('hopAnalyticsEmpty');
       if (empty) { empty.style.display = 'block'; empty.textContent = 'Hop-count data unavailable: ' + e.message; }
@@ -544,11 +596,13 @@
       container.innerHTML = '<div style="padding:40px;text-align:center">Invalid analytics URL</div>';
       return;
     }
+    titleVisit = window.PageTitle ? window.PageTitle.visit() : -1;
     const pubkey = routeParam.slice(0, -'/analytics'.length);
     loadAnalytics(container, pubkey, 7);
   }
 
   function destroy() {
+    loadSequence++;
     destroyCharts();
     currentPubkey = null;
   }

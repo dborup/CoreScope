@@ -6,7 +6,10 @@
 // apart on the trim/prefix/dedupe rules.
 package regions
 
-import "strings"
+import (
+	"crypto/sha256"
+	"strings"
+)
 
 // Normalize applies the hashRegions name convention to a single raw config
 // entry: trim whitespace, ensure a leading "#", and reject blank entries.
@@ -36,4 +39,13 @@ func NormalizeNames(raw []string) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// Key derives a region's 16-byte transport key from its exact name, as
+// MeshCore's TransportKeyStore::getAutoKeyFor does: SHA-256 of the name
+// bytes, truncated to TransportKey.key. Configured and admin-approved names
+// both use it, so the two can never derive different keys.
+func Key(name string) []byte {
+	h := sha256.Sum256([]byte(name))
+	return h[:16]
 }

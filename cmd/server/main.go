@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -12,13 +13,14 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/meshcore-analyzer/dbschema"
+	"github.com/meshcore-analyzer/pprofbind"
 )
 
 // Set via -ldflags at build time
@@ -57,27 +59,39 @@ func resolveBuildTime() string {
 	return "unknown"
 }
 
+// Graceful-shutdown bounds (#577). shutdownDrainTimeout caps the HTTP drain;
+// shutdownTimeout caps the whole sequence main waits for after the listener
+// closes. It stays below the compose files' 30 s stop_grace_period, so the
+// server reports a hung shutdown itself before the runtime's SIGKILL.
+// Variables so the process tests can shorten them.
+var (
+	shutdownDrainTimeout = 15 * time.Second
+	shutdownTimeout      = 25 * time.Second
+)
+
 func main() {
-	// pprof profiling — off by default, enable with ENABLE_PPROF=true
-	if os.Getenv("ENABLE_PPROF") == "true" {
-		pprofPort := os.Getenv("PPROF_PORT")
-		if pprofPort == "" {
-			pprofPort = "6060"
-		}
+	// pprof profiling — off by default; the bind address, and the port that
+	// must stay distinct from the ingestor's, are resolved in one place so
+	// an operator can narrow the listener without editing code (#372).
+	if pp := pprofbind.Server.Resolve(os.Getenv); pp.Enabled {
 		go func() {
-			log.Printf("[pprof] profiling UI at http://localhost:%s/debug/pprof/", pprofPort)
-			if err := http.ListenAndServe(":"+pprofPort, nil); err != nil {
+			log.Printf("[pprof] profiling UI at %s (listening on %s)", pp.URL, pp.Addr)
+			if err := http.ListenAndServe(pp.Addr, nil); err != nil {
 				log.Printf("[pprof] failed to start: %v (non-fatal)", err)
 			}
 		}()
+	} else if pp.Reason != "" {
+		log.Printf("[pprof] %s", pp.Reason)
 	}
 
 	var (
-		configDir string
-		port      int
-		dbPath    string
-		publicDir string
-		pollMs    int
+		configDir     string
+		port          int
+		dbPath        string
+		publicDir     string
+		pollMs        int
+		wsHistoryFile string
+		regionDryRun  bool
 	)
 
 	flag.StringVar(&configDir, "config-dir", ".", "Directory containing config.json")
@@ -85,11 +99,17 @@ func main() {
 	flag.StringVar(&dbPath, "db", "", "SQLite database path (overrides config/env)")
 	flag.StringVar(&publicDir, "public", "public", "Directory to serve static files from")
 	flag.IntVar(&pollMs, "poll-ms", 1000, "SQLite poll interval for WebSocket broadcast (ms)")
+	flag.StringVar(&wsHistoryFile, "ws-history-file", "", "WebSocket history file (default: beside packet database; off disables persistence)")
+	flag.BoolVar(&regionDryRun, "region-placement-dryrun", false, "Print the read-only #488 region placement report for -db and the regionPlacement config, then exit")
 	flag.Parse()
 
 	// Load config
 	cfg, err := LoadConfig(configDir)
 	if err != nil {
+		var invalidPolicy *invalidEstimatedPositionsConfigError
+		if errors.As(err, &invalidPolicy) {
+			log.Fatalf("[config] fatal: %v", err)
+		}
 		log.Printf("[config] warning: %v (using defaults)", err)
 	}
 
@@ -146,6 +166,12 @@ func main() {
 
 	// Resolve DB path
 	resolvedDB := cfg.ResolveDBPath(configDir)
+	if regionDryRun {
+		if err := runRegionPlacementDryRun(resolvedDB, cfg.RegionPlacementSettings(), os.Stdout); err != nil {
+			log.Fatalf("[region-placement] dry-run: %v", err)
+		}
+		return
+	}
 	log.Printf("[config] port=%d db=%s public=%s", cfg.Port, resolvedDB, publicDir)
 	if len(cfg.NodeBlacklist) > 0 {
 		log.Printf("[config] nodeBlacklist: %d node(s) will be hidden from API", len(cfg.NodeBlacklist))
@@ -160,6 +186,12 @@ func main() {
 	database, err := OpenDB(resolvedDB)
 	if err != nil {
 		log.Fatalf("[db] failed to open %s: %v", resolvedDB, err)
+	}
+	database.regionPlacement = cfg.RegionPlacementSettings()
+	if database.regionPlacement.Mode != regionModeHeard {
+		log.Printf("[config] regionPlacement: mode=%s maxHops=%d lifetime=%v persistSpan=%v",
+			database.regionPlacement.Mode, database.regionPlacement.Params.MaxHops,
+			database.regionPlacement.Params.Lifetime, database.regionPlacement.Params.PersistSpan)
 	}
 	var dbCloseOnce sync.Once
 	dbClose := func() error {
@@ -191,13 +223,29 @@ func main() {
 	// (#1287). The server NEVER migrates — it only reads. If a required
 	// column/index/table is missing, the operator must restart the
 	// ingestor (which owns dbschema.Apply) before this server can start.
-	if err := dbschema.AssertReady(database.conn); err != nil {
+	// #89 / PR #93: the ingestor creates this PR's migration while both
+	// processes start, so the server waits for it in-process (bounded,
+	// see schema_wait.go) instead of exiting until supervisord gives up.
+	// SIGINT/SIGTERM cancel the wait; the regular shutdown handler below is
+	// registered only after it, so nothing is registered twice.
+	schemaCtx, stopSchemaSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	_, err = waitForDBSchema(schemaCtx, database, defaultSchemaWaitPolicy, realClock{}, log.Printf)
+	stopSchemaSignals()
+	if errors.Is(err, context.Canceled) {
+		log.Printf("[db] shutdown requested while waiting for the ingestor's schema; exiting")
+		return
+	}
+	if err != nil {
 		log.Fatalf("[db] schema not ready (ingestor must run migrations first): %v", err)
 	}
 
 	// In-memory packet store
 	store := NewPacketStore(database, cfg.PacketStore, cfg.CacheTTL)
 	store.config = cfg
+	// #740 M2: build the DAGI membership once at startup; node snapshot
+	// rebuilds keep it current. In the background: it reads the nodes
+	// table, not the packets the startup load below is reading.
+	go store.warmDagi()
 
 	// Load the persisted neighbor graph BEFORE the packet load so the
 	// chunked loader can resolve relay-hop pubkeys from path_json. Since
@@ -273,11 +321,6 @@ func main() {
 	// all live in the ingestor; the server only reads the snapshot and
 	// then refreshes it via the recompNeighborGraph slot every 60s.
 	dbPath = database.path
-	// Optimization only, not required for correctness: hasResolvedPath()
-	// self-heals on its own via a PRAGMA re-probe if this weren't here --
-	// AssertReady above already guarantees the column exists, so skip
-	// even that first probe.
-	database.hasResolvedPathFlag.forceTrue()
 
 	// WaitGroup for background init steps that gate /api/healthz readiness.
 	var initWg sync.WaitGroup
@@ -330,6 +373,7 @@ func main() {
 			store.mu.Lock()
 			for j := i; j < end && j < len(store.packets); j++ {
 				pickBestObservation(store.packets[j])
+				store.trackedBytes += rechargeTx(store.packets[j])
 			}
 			store.mu.Unlock()
 			if end < totalPackets {
@@ -349,31 +393,20 @@ func main() {
 	// WebSocket hub
 	hub := NewHub()
 	hub.SetAllowedOrigins(cfg.CORSAllowedOrigins)
+	hub.ConfigureLimits(cfg.WSMaxClients(), cfg.WSMaxConnsPerIP(), cfg.WSUpgradesPerMinPerIP(),
+		cfg.WSTrustedProxies(), cfg.WSDeny()) // #1794, #369
 	hub.upgrader.EnableCompression = cfg.WSCompressionEnabled()
+	if err := hub.history.enablePersistence(wsHistoryPersistencePath(wsHistoryFile, database.path), database.path, time.Now().UTC()); err != nil {
+		log.Printf("[ws-history] persistence unavailable; RAM-only history: %v", err)
+	}
+	stopWSHistory := hub.StartHistorySampler(wsHistoryInterval)
+	defer stopWSHistory()
 
 	// HTTP server
 	srv := NewServer(database, cfg, hub)
 	srv.configDir = configDir
 	srv.store = store
-	router := mux.NewRouter()
-	srv.RegisterRoutes(router)
-
-	// WebSocket endpoint
-	router.HandleFunc("/ws", hub.ServeWS)
-
-	// Static files + SPA fallback
-	absPublic, _ := filepath.Abs(publicDir)
-	if _, err := os.Stat(absPublic); err == nil {
-		fs := http.FileServer(http.Dir(absPublic))
-		router.PathPrefix("/").Handler(wsOrStatic(hub, spaHandler(absPublic, fs)))
-		log.Printf("[static] serving %s", absPublic)
-	} else {
-		log.Printf("[static] directory %s not found — API-only mode", absPublic)
-		router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/html")
-			w.Write([]byte(`<!DOCTYPE html><html><body><h1>CoreScope</h1><p>Frontend not found. API available at /api/</p></body></html>`))
-		})
-	}
+	router := newHTTPRouter(srv, hub, publicDir)
 
 	// Start SQLite poller for WebSocket broadcast
 	poller := NewPoller(database, hub, time.Duration(pollMs)*time.Millisecond)
@@ -384,6 +417,12 @@ func main() {
 	stopEviction := store.StartEvictionTicker()
 	defer stopEviction()
 
+	// #618: build the per-IATA region index for /api/nodes?region= in the
+	// background and keep it refreshed, so no request pays the full history
+	// scan. It reads SQLite only, never the PacketStore or its lock.
+	stopRegionIndex := database.StartRegionIndexWarmer()
+	defer stopRegionIndex()
+
 	// Steady-state analytics recomputers (issue #1240). Replaces the
 	// on-request compute-then-cache pattern for the default (region="",
 	// zero-window) analytics queries with a background refresh loop so
@@ -393,7 +432,7 @@ func main() {
 		cfg.AnalyticsRecomputeIntervals(),
 	)
 	defer stopAnalyticsRecomp()
-	log.Printf("[analytics-recompute] background recompute enabled (default=%s)", cfg.AnalyticsDefaultRecomputeInterval())
+	log.Printf("[analytics-recompute] background recompute enabled (default=%s, pauseWhenIdle=%v)", cfg.AnalyticsDefaultRecomputeInterval(), cfg.AnalyticsPauseWhenIdle())
 
 	// #1481 P0-1: background recomputer for the default-shape
 	// /api/analytics/neighbor-graph response (5 min cadence). Reads
@@ -443,6 +482,14 @@ func main() {
 	log.Printf("[repeater-enrich-recompute] background recompute enabled (window=%.1fh, interval=%s)",
 		relayWindowHours, cfg.AnalyticsDefaultRecomputeInterval())
 
+	// #807/#848: last known advert facts per node (hash size, newest own
+	// ADVERT), read from SQLite (one indexed statement) so a node keeps its
+	// hash_size and health lastAdvert after its last advert leaves the
+	// packet-store window and right after a restart. Synchronous prewarm,
+	// then a background refresh.
+	stopLastKnownAdverts := store.StartLastKnownAdvertRecomputer(lastKnownAdvertRefreshInterval)
+	defer stopLastKnownAdverts()
+
 	// Steady-state bridge-centrality recomputer (issue #672 axis 2).
 	// Computes betweenness centrality over the in-memory neighbor
 	// graph and stores the per-pubkey score map atomically. Read by
@@ -473,6 +520,11 @@ func main() {
 	defer stopNeighborRecomp()
 	log.Printf("[neighbor-recompute] snapshot reload enabled (interval=%s)",
 		NeighborGraphRecomputerDefaultInterval)
+
+	// #881 moments: off unless config moments.enabled. Its first node tick
+	// waits for the store to finish loading and seeds silently.
+	stopMoments := srv.startMoments(momentsNodeTickInterval)
+	defer stopMoments()
 
 	// Ping-score highscore/leaderboard: the persistent-history engine
 	// (fase 4A-4E design, fase 5B-5G production wiring) replaces the old
@@ -516,6 +568,12 @@ func main() {
 	_ = cfg.IncrementalVacuumPages() // kept reachable for config validation; not used here
 	_ = cfg.NeighborMaxAgeDays()     // ditto — owned by ingestor now
 
+	// Every route is registered by now. An /api route added after the
+	// API fallback would never be reached (#233).
+	if shadowed := apiRoutesShadowedByFallback(router); len(shadowed) > 0 {
+		log.Fatalf("[server] /api routes registered after the API fallback are unreachable: %v (register them in RegisterRoutes)", shadowed)
+	}
+
 	// Graceful shutdown
 	var handler http.Handler = router
 	if cfg.GZipEnabled() {
@@ -537,9 +595,13 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	// Register before the listener binds (#567): once /api/healthz answers, a
+	// SIGTERM must reach this handler. Registered inside the goroutine, it
+	// could arrive first and take Go's default action (exit -1, no shutdown).
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	shutdownDone := make(chan struct{}) // closed once the whole sequence below has run (#577)
 	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		sig := <-sigCh
 		log.Printf("[server] received %v, shutting down...", sig)
 
@@ -555,15 +617,19 @@ func main() {
 		if stopAnalyticsRecomp != nil {
 			stopAnalyticsRecomp()
 		}
+		// 1d. Stop the region index warmer (#618) for the same reason: it
+		// cancels a scan in flight and returns once the goroutine has.
+		stopRegionIndex()
 
-		// 2. Gracefully drain HTTP connections (up to 15s)
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// 2. Gracefully drain HTTP connections (up to shutdownDrainTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
 		defer cancel()
 		if err := httpServer.Shutdown(ctx); err != nil {
 			log.Printf("[server] HTTP shutdown error: %v", err)
 		}
 
 		// 3. Close WebSocket hub
+		stopWSHistory()
 		hub.Close()
 
 		// 3b. Stop the ping-score-history worker (fase 5G). MUST happen
@@ -587,17 +653,10 @@ func main() {
 		//
 		// This explicit call is NOT redundant with the plain
 		// `defer stopPingScoreHistory()` declared at Start time: that
-		// defer only runs on the MAIN goroutine, once
-		// httpServer.ListenAndServe() returns below and main() begins
-		// unwinding -- but ListenAndServe() returns as soon as
-		// Shutdown() closes the listener (near the START of step 2
-		// above), essentially concurrently with the REST of this
-		// goroutine's own steps, including its own explicit dbClose()
-		// call a few lines down. Without this explicit call, THIS
-		// goroutine's dbClose() would have no ordering guarantee
-		// relative to the worker's shutdown at all -- the main-goroutine
-		// defer runs on a different goroutine and provides no
-		// happens-before relationship with this one. Calling it here,
+		// defer only runs on the MAIN goroutine, once main() unwinds
+		// after this goroutine has closed shutdownDone (#577) -- that
+		// is, after this goroutine's own dbClose() a few lines down, so
+		// it cannot order the worker's shutdown before it. Calling it here,
 		// in this goroutine's own program order before its own
 		// dbClose(), is what actually guarantees the required
 		// cancel → active Cycle finishes → ticker stopped (if created) →
@@ -609,11 +668,12 @@ func main() {
 		// then returns immediately.
 		stopPingScoreHistory()
 
-		// 4. Close database (release SQLite WAL lock)
+		// 4. Close database (its read-only connections; #583: no checkpoint)
 		if err := dbClose(); err != nil {
 			log.Printf("[server] DB close error: %v", err)
 		}
 		log.Println("[server] shutdown complete")
+		close(shutdownDone)
 	}()
 
 	log.Printf("[server] CoreScope (Go) listening on http://localhost:%d", cfg.Port)
@@ -623,29 +683,121 @@ func main() {
 	// process. The server reads the results via the periodic
 	// recompNeighborGraph / fetchResolvedPathForObs paths.
 
-	// Migrate old content hashes in background (one-time, idempotent).
-	go migrateContentHashesAsync(store, 5000, 100*time.Millisecond)
+	// Rehash content hashes in memory in the background (idempotent). The DB
+	// rewrite is the ingestor's (#215); the server never writes.
+	// It walks a snapshot of s.packets taken when it starts, so it waits for the
+	// whole startup load: LoadChunked and the background fill, not just the
+	// first chunk the HTTP listener binds after (#215).
+	go func() {
+		<-store.StartupLoadDone()
+		migrateContentHashesAsync(store, 5000, 100*time.Millisecond)
+	}()
 
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("[server] %v", err)
 	}
+	// #577: ListenAndServe returns ErrServerClosed as soon as Shutdown closes
+	// the listener, before the drain, the hub close, the history worker stop
+	// and dbClose have run. Returning here would exit mid-sequence, so wait
+	// for the shutdown goroutine, bounded so a hung step cannot hold the
+	// process until the runtime's SIGKILL.
+	select {
+	case <-shutdownDone:
+	case <-time.After(shutdownTimeout):
+		log.Printf("[server] shutdown did not complete within %v; exiting", shutdownTimeout)
+		os.Exit(1) // skips main's deferred stops: one of them may be what hangs
+	}
 }
+
+// newHTTPRouter builds the production router: the API routes (ending in the
+// /api fallback, see registerAPIFallback), the WebSocket endpoint and the
+// static/SPA catch-all, in that order. Add new /api routes inside
+// RegisterRoutes: one added to this router afterwards is shadowed by the
+// fallback, which apiRoutesShadowedByFallback reports, at startup in main
+// and in TestProductionRouterHasNoShadowedAPIRoutes.
+func newHTTPRouter(srv *Server, hub *Hub, publicDir string) *mux.Router {
+	router := mux.NewRouter()
+	srv.RegisterRoutes(router)
+
+	// WebSocket endpoint
+	router.HandleFunc("/ws", hub.ServeWS)
+
+	// Static files + SPA fallback
+	absPublic, _ := filepath.Abs(publicDir)
+	if _, err := os.Stat(absPublic); err == nil {
+		fs := http.FileServer(http.Dir(absPublic))
+		doc := newIndexDoc(absPublic, ogMetaFromConfig(srv.cfg, absPublic, "."))
+		// /p must be matched before the SPA catch-all (#727).
+		srv.registerShareRoutes(router, doc)
+		router.PathPrefix("/").Handler(wsOrStatic(hub, spaHandlerDoc(absPublic, fs, doc)))
+		log.Printf("[static] serving %s", absPublic)
+	} else {
+		log.Printf("[static] directory %s not found — API-only mode", absPublic)
+		router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(`<!DOCTYPE html><html><body><h1>CoreScope</h1><p>Frontend not found. API available at /api/spec (interactive docs: /api/docs, needs internet).</p></body></html>`))
+		})
+	}
+	return router
+}
+
+// vendorVersionedAssetRe matches a locally-vendored browser dependency at
+// public/vendor/<name>/<exact version>/<file> (#442, see
+// docs/browser-dependencies.md). The version is part of the URL, so this
+// shape is immutable and safe to cache far into the future.
+var vendorVersionedAssetRe = regexp.MustCompile(`^/vendor/[^/]+/\d+\.\d+\.\d+(?:[-.][0-9A-Za-z]+)*/`)
 
 // spaHandler serves static files, falling back to index.html for SPA routes.
 // It reads index.html once at creation time and replaces the __BUST__ placeholder
 // with a Unix timestamp so browsers fetch fresh JS/CSS after each server restart.
-func spaHandler(root string, fs http.Handler) http.Handler {
-	// Pre-process index.html: replace __BUST__ with a cache-bust timestamp
-	indexPath := filepath.Join(root, "index.html")
-	rawHTML, err := os.ReadFile(indexPath)
+//
+// Open Graph / Twitter / <title> placeholders are filled from og (#646); omit
+// it for the defaults.
+func spaHandler(root string, fs http.Handler, ogOpt ...*ogMeta) http.Handler {
+	var og *ogMeta
+	if len(ogOpt) > 0 {
+		og = ogOpt[0]
+	}
+	return spaHandlerDoc(root, fs, newIndexDoc(root, og))
+}
+
+// indexDoc is index.html, read once at startup with __BUST__ replaced by a
+// cache-bust timestamp: the site document with every Open Graph
+// placeholder filled (prepared), and the same document with the
+// placeholders still in place (profile), which the /p share route fills
+// per request (#727).
+type indexDoc struct {
+	og       *ogMeta
+	prepared []byte
+	profile  string
+}
+
+// newIndexDoc reads root/index.html; og nil means the default branding.
+func newIndexDoc(root string, og *ogMeta) *indexDoc {
+	if og == nil {
+		og = newOGMeta(nil, root, nil)
+	}
+	rawHTML, err := os.ReadFile(filepath.Join(root, "index.html"))
 	if err != nil {
 		log.Printf("[static] warning: could not read index.html for cache-bust: %v", err)
 		rawHTML = []byte("<!DOCTYPE html><html><body><h1>CoreScope</h1><p>index.html not found</p></body></html>")
 	}
 	bustValue := fmt.Sprintf("%d", time.Now().Unix())
-	indexHTML := []byte(strings.ReplaceAll(string(rawHTML), "__BUST__", bustValue))
+	busted := strings.ReplaceAll(string(rawHTML), "__BUST__", bustValue)
 	log.Printf("[static] cache-bust value: %s", bustValue)
+	return &indexDoc{og: og, prepared: []byte(og.prepare(busted)), profile: busted}
+}
 
+// serveSite writes the site document with the given status.
+func (d *indexDoc) serveSite(w http.ResponseWriter, r *http.Request, status int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.WriteHeader(status)
+	w.Write(d.og.render(d.prepared, r))
+}
+
+// spaHandlerDoc is spaHandler over an already-read index.html.
+func spaHandlerDoc(root string, fs http.Handler, doc *indexDoc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Defense-in-depth: explicitly reject path-traversal attempts before
 		// we touch the filesystem. gorilla/mux + http.FileServer already clean
@@ -659,22 +811,27 @@ func spaHandler(root string, fs http.Handler) http.Handler {
 		}
 		// Serve pre-processed index.html for root and /index.html
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.Write(indexHTML)
+			doc.serveSite(w, r, http.StatusOK)
 			return
 		}
 
 		path := filepath.Join(root, r.URL.Path)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			// SPA fallback — serve pre-processed index.html
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.Write(indexHTML)
+			doc.serveSite(w, r, http.StatusOK)
 			return
 		}
-		// Disable caching for JS/CSS/HTML
-		if filepath.Ext(path) == ".js" || filepath.Ext(path) == ".css" || filepath.Ext(path) == ".html" {
+		// A vendored browser dependency (public/vendor/<name>/<exact
+		// version>/<file>, #442) is immutable: the version is part of the
+		// URL, so a bump is served from a new path rather than a mutated
+		// file at the old one. Cache it far into the future. Everything
+		// else under vendor/ (pre-#442: jsqr.min.js, aes-ecb.js, ...) keeps
+		// the no-cache rule below -- its URL does not change when the file
+		// does, so its cache-busting relies on no-cache, not on the URL.
+		if vendorVersionedAssetRe.MatchString(r.URL.Path) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else if filepath.Ext(path) == ".js" || filepath.Ext(path) == ".css" || filepath.Ext(path) == ".html" {
+			// Disable caching for JS/CSS/HTML
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		}
 		fs.ServeHTTP(w, r)

@@ -6,9 +6,13 @@
  *   1. `.live-legend` panel must be content-driven (`height: max-content`)
  *      with a `max-width` cap so it doesn't dominate the map.
  *   2. The activate/hide toggle button group at the bottom of the map
- *      (`.legend-toggle-btn`, `.feed-show-btn`) must be pinned via
- *      `position: fixed; bottom: 1rem; right: 1rem` so they dock as one
+ *      (`.feed-show-btn`; the legend toggle moved to the map controls in #875) must be pinned via
+ *      `position: absolute; bottom: 1rem; right: 1rem` so they dock as one
  *      tidy bottom-right group instead of being scattered/cramped.
+ *      (#1833 round 2 changed the anchor from `fixed` to `absolute`: the
+ *      group must resolve its offsets against .live-page, the same box as
+ *      .vcr-bar, or it drifts into the bar by --bottom-nav-reserve at
+ *      641..768px and stops taking clicks.)
  *   3. Theming uses existing CSS variables only — no new hex colors.
  *
  * Source-invariant assertions on public/live.css, same approach as
@@ -81,31 +85,15 @@ if (legendBase) {
 // ─────────────────────────────────────────────────────────────────────
 console.log('\n=== #1107 B: bottom toggle button group pinned bottom-right ===');
 
-const legendBtn = ruleBlock(liveCss, '.legend-toggle-btn');
-assert(legendBtn != null, '.legend-toggle-btn rule block found');
-
-if (legendBtn) {
-  assert(
-    /position\s*:\s*fixed/.test(legendBtn),
-    '.legend-toggle-btn uses position: fixed (pinned to viewport)'
-  );
-  assert(
-    /bottom\s*:\s*(1rem|max\(1rem|calc\(\s*var\(--vcr-bar-height)/.test(legendBtn),
-    '.legend-toggle-btn pinned at bottom: 1rem / max(1rem,...) / calc(var(--vcr-bar-height,...)+...) (VCR-bar-aware, #1833)'
-  );
-  assert(
-    /right\s*:\s*1rem/.test(legendBtn),
-    '.legend-toggle-btn pinned at right: 1rem'
-  );
-}
-
+// #875: the legend toggle moved into the top-right Leaflet control stack, so
+// only .feed-show-btn is docked bottom-right now.
 const feedShowBtn = ruleBlock(liveCss, '.feed-show-btn');
 assert(feedShowBtn != null, '.feed-show-btn rule block found');
 
 if (feedShowBtn) {
   assert(
-    /position\s*:\s*fixed/.test(feedShowBtn),
-    '.feed-show-btn uses position: fixed (pinned to viewport)'
+    /position\s*:\s*absolute/.test(feedShowBtn),
+    '.feed-show-btn uses position: absolute (docked to .live-page, #1833 round 2)'
   );
   assert(
     /bottom\s*:\s*(1rem|max\(1rem)/.test(feedShowBtn),
@@ -126,7 +114,6 @@ console.log('\n=== #1107 B2: cascade-final bottom invariant (no !important confl
 // and the buttons don't actually dock together.
 (function cascadeFinalCheck() {
   const feedBlocks = allRuleBlocks(liveCss, '.feed-show-btn');
-  const legendBlocks = allRuleBlocks(liveCss, '.legend-toggle-btn');
 
   // Collect all bottom declarations from .feed-show-btn blocks
   const feedBottoms = [];
@@ -164,17 +151,11 @@ console.log('\n=== #1107 B2: cascade-final bottom invariant (no !important confl
     const m = block.match(/right\s*:\s*([^;]+)/);
     if (m) feedRights.push(m[1].trim().replace(/\s*!important/, ''));
   }
-  const legendRights = [];
-  for (const block of legendBlocks) {
-    const m = block.match(/right\s*:\s*([^;]+)/);
-    if (m) legendRights.push(m[1].trim().replace(/\s*!important/, ''));
-  }
-
   // All right values should be identical across both selectors
-  const allRights = [...new Set([...feedRights, ...legendRights])];
+  const allRights = [...new Set(feedRights)];
   assert(
     allRights.length === 1,
-    '.feed-show-btn and .legend-toggle-btn share identical `right` value' +
+    '.feed-show-btn declares a single `right` value' +
     (allRights.length !== 1 ? ' — found: ' + allRights.join(', ') : ' (both ' + allRights[0] + ')')
   );
 })();
@@ -200,7 +181,6 @@ function noHexInBlock(block, name) {
 }
 
 noHexInBlock(legendBase, '.live-legend base');
-noHexInBlock(legendBtn,  '.legend-toggle-btn');
 noHexInBlock(feedShowBtn, '.feed-show-btn');
 
 // ─────────────────────────────────────────────────────────────────────

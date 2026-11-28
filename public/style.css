@@ -158,6 +158,121 @@
 }
 
 :root {
+  /* #680 DHM terrain overlay: multiply darkens the base map by the
+     hillshade's shadows. Dark themes (both blocks below) invert the
+     hillshade and screen it, the same treatment the inverted dark base
+     tiles get, so relief shows as light ridges and labels stay readable. */
+  --terrain-overlay-blend: multiply;
+  --terrain-overlay-filter: none;
+  /* #752 — compact map credit for the inset maps (node detail, node-reach,
+     packet-path, area-nodes, rx-coverage, Analytics subpath). The smallest
+     inset is 200px tall (160px at <=640px), and the Esri World Imagery
+     credit is long enough to wrap, so the credit is capped at two lines and
+     scrolls; nothing is cut away, and it never takes more than about a
+     seventh of the smallest inset. */
+  --mc-credit-compact-font-size: 10px;
+  --mc-credit-compact-line-height: 1.3;
+  --mc-credit-compact-max-width: 70%;
+  --mc-credit-compact-padding-v: 1px;
+  --mc-credit-compact-padding-h: 5px;
+  /* #756 — box-sizing is border-box, so the vertical padding eats into the
+     content height the font-size/line-height product budgets for. Without
+     it, every two-line credit (Esri World Imagery) is 2px taller than the
+     cap and scrolls even though it only ever has two lines. */
+  --mc-credit-compact-max-height: calc(2 * var(--mc-credit-compact-font-size) * var(--mc-credit-compact-line-height) + 2 * var(--mc-credit-compact-padding-v));
+  --mc-credit-compact-padding: var(--mc-credit-compact-padding-v) var(--mc-credit-compact-padding-h);
+  /* How far a bottom-right inset overlay (the node-detail QR) must sit
+     above the map's bottom edge to clear the credit: the cap plus the 8px
+     the overlay used to have plus 4px of air. Static, because the cap is a
+     constant — no JS measuring as on Live. */
+  --mc-credit-compact-clearance: calc(var(--mc-credit-compact-max-height) + 12px);
+  /* #681 M4 — Path profile chart. Six tokens so the customizer can reach
+     them later (M6). Dark values live in BOTH dark blocks below. */
+  --terrain-fill: #9a8a73;                       /* DTM, the bare ground */
+  --terrain-clutter: rgba(84, 124, 92, 0.55);    /* DTM → DSM: trees, buildings */
+  --los-line: #1d4ed8;                           /* line of sight */
+  --fresnel-100: #6d28d9;                        /* first Fresnel zone */
+  --fresnel-60: #a78bfa;                         /* the 60 % criterion */
+  --profile-blocked: #b91c1c;                    /* terrain in the way */
+  /* #730 M3 — the surface band by class: inside a building footprint, and
+     trees/other. Each is >= 3:1 against the panel and against the other
+     (test-issue-730-buildings-ui.js measures it). Dark values live in
+     BOTH dark blocks below. */
+  --terrain-building: #5e1f0c;
+  --terrain-vegetation: #5a9466;
+  /* #781 — the profile's hover cursor: the chart's dashed line and the
+     map's dot. Dark values live in BOTH dark blocks below. */
+  --tp-cursor: #334155;
+  --tp-cursor-dot: #dc2626;
+  /* #724 M3 — Mastedatabasen antenna sites on the map (canvas markers read
+     these). Dark values live in BOTH dark blocks below. */
+  --mast-site: #0e7490;                          /* every antenna site */
+  --mast-interference: #c2410c;                  /* 700/800/900 MHz ring */
+  /* #914 — node heat map: one violet -> magenta hue family, apart from the
+     Colour by elevation ramp (teal -> red). Read by public/heat-gradient.js. */
+  --heat-1: #5b21b6;
+  --heat-2: #7e22ce;
+  --heat-3: #a21caf;
+  /* #941 — Predicted reach: the margin classes, best first, and the
+     transmitter's dot. Ordered by lightness (dark green, bright yellow,
+     orange) so the classes also part without hue. public/coverage.js
+     reads them into its colour table; the customizer gets them in M4.
+     Dark values live in BOTH dark blocks below. */
+  --reach-good: #15803d;
+  --reach-marginal: #eab308;
+  --reach-weak: #ea580c;
+  --reach-centre: #1d4ed8;
+  --heat-4: #c026d3;
+  --heat-5: #e879f9;
+  /* The stop in effect, by the #1446 rule: the user's customizer pick
+     (--heat-user-N), else a colour-blind preset's ramp for this mode
+     (cb-presets.js heatRamp), else the theme's --heat-N (server config or
+     the values above). Dark blocks pick the preset's dark ramp. */
+  --heat-stop-1: var(--heat-user-1, var(--mc-heat-light-1, var(--heat-1)));
+  --heat-stop-2: var(--heat-user-2, var(--mc-heat-light-2, var(--heat-2)));
+  --heat-stop-3: var(--heat-user-3, var(--mc-heat-light-3, var(--heat-3)));
+  --heat-stop-4: var(--heat-user-4, var(--mc-heat-light-4, var(--heat-4)));
+  --heat-stop-5: var(--heat-user-5, var(--mc-heat-light-5, var(--heat-5)));
+  /* #789 M3 — the badge on an antenna height the node's owner set (Path
+     profile, node page). Follows --success in light and dark alike unless
+     the customizer sets ownerBadge. */
+  --owner-badge: var(--success);
+  /* #881 M3 — Live "Moments" cards. The kind accents (icon + stripe) are the
+     colourblind preset's (--mc-moment-*, cb-presets.js) or these mid-tones,
+     each >= 3:1 against both the light and the dark card, so one value
+     serves both themes. The customizer's Theme tab can set any of them. */
+  --moment-card-bg: var(--card-bg);
+  --moment-new-node: var(--mc-moment-new-node, #009e73);
+  --moment-back-online: var(--mc-moment-back-online, #2e86c1);
+  --moment-record-link: var(--mc-moment-record-link, #b8578a);
+  --moment-busiest: var(--mc-moment-busiest, #d55e00);
+  /* #883 M2 — Live kiosk big-number tiles (customizer Theme tab): the tile
+     fill (shown at 92 % over the map) and the numbers. */
+  --kiosk-tile-bg: var(--card-bg);
+  --kiosk-number: var(--text);
+  /* #792 — the colour-by-elevation ramp, one variable per stop in metres.
+     They are the colours the server renders the tiles with
+     (internal/dhm.ElevationRamp; cmd/server's
+     TestDHM792_LegendCSSMatchesTheRamp pins them), so they are the same in
+     every theme: the tiles are. The legend draws its bar from them.
+     #860: stops chosen from the heights of Danish land (each band below
+     80 m holds 5-14 % of it): teal low-lying ground, green lowland,
+     yellow and orange, red hills from 80 m. */
+  --dhm-elevation-0: #007974;
+  --dhm-elevation-2: #1f9b82;
+  --dhm-elevation-5: #4ea954;
+  --dhm-elevation-10: #7abd4f;
+  --dhm-elevation-15: #a6cf51;
+  --dhm-elevation-20: #c5db55;
+  --dhm-elevation-25: #eddf5c;
+  --dhm-elevation-30: #fec943;
+  --dhm-elevation-40: #fcba43;
+  --dhm-elevation-50: #f8962d;
+  --dhm-elevation-65: #ea7028;
+  --dhm-elevation-80: #d64c29;
+  --dhm-elevation-100: #ba2b2e;
+  --dhm-elevation-130: #902047;
+  --dhm-elevation-175: #642560;
   /* Node-quality link strength colours (bottleneck tiers). Dark-theme
      overrides live in the [data-theme="dark"] block below (brighter hues). */
   --link-strong: #1a7f37;
@@ -242,6 +357,13 @@
   --success: var(--palette-green-700, #15803d);
   --warning: #b45309;
   --danger: var(--palette-red-600, #dc2626);
+  /* #353 — 1-byte path hash recommendation (renderPathHashSize in app.js).
+     Round 3 (operator decision): a 1-byte hash is a recommendation, not an
+     error, so it follows the amber --warning palette (not --danger) in both
+     themes. WCAG AA (>= 4.5:1) on every surface it renders on: channel badge
+     and node badge 5.02:1 light / 10.51:1 dark, packet-detail row 4.60:1 light
+     / 13.09:1 dark. Themeable via the customizer (pathHashWarn). */
+  --path-hash-warn: var(--warning);
   --link-color: var(--palette-blue-600);
   --accent-bg: rgba(59, 130, 246, 0.12);
   --accent-border: rgba(59, 130, 246, 0.25);
@@ -359,6 +481,38 @@
    * light theme. Dark theme override is set in both dark-mode blocks below. */
   --shadow: rgba(0,0,0,0.3);
   --trace-ghost-color: #94a3b8;
+  /* #882 — Live "Color by scope" palette (public/live-scope-color.js).
+   * 12 qualitative slots, kept off pure red (foreign-origin red wins), plus
+   * two greys that differ from each other: no scope (FLOOD/DIRECT) and
+   * unknown scope (route 0/3, region not resolved). Customizer: #882 M2. */
+  --scope-1: #0072b2;
+  --scope-2: #009e73;
+  --scope-3: #b35c00;
+  --scope-4: #7e3fa0;
+  --scope-5: #a8780b;
+  --scope-6: #00838f;
+  --scope-7: #b0306f;
+  --scope-8: #4b5eaa;
+  --scope-9: #5e8b2f;
+  --scope-10: #8b4513;
+  --scope-11: #c026d3;
+  --scope-12: #6d6d00;
+  --scope-none: #a1a1aa;
+  --scope-unknown: #57534e;
+  --scope-other: #111827;
+  /* #880 — Live "Follow a packet". Built on theme tokens, so both dark
+   * blocks follow without their own copies. #880 M3: the customizer's
+   * Theme tab sets any of them (light and dark); a colourblind preset sets
+   * the relay / observer pair (--mc-follow-*, cb-presets.js followAccents),
+   * since yellow next to green is the pair a red-green deficiency loses. */
+  --follow-ring: var(--accent);
+  --follow-relay: var(--mc-follow-relay, var(--status-yellow));
+  --follow-observer: var(--mc-follow-observer, var(--status-green));
+  --follow-flag: var(--warning);
+
+  /* #620: minimum viewport margin of the region/area dropdown menus. Read by
+   * region-filter.js placeMenu() as well as the menu max-width below. */
+  --region-menu-gutter: 8px;
 
   /* #1128: documented z-index scale. Use these custom props for any new
    * stacking context decision. Existing legacy z-index values that work are
@@ -382,6 +536,40 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
+    --terrain-overlay-blend: screen;
+    --terrain-overlay-filter: invert(1);
+    /* #681 M4 — Path profile chart on dark surfaces. */
+    --terrain-fill: #5d5444;
+    --terrain-clutter: rgba(122, 170, 132, 0.45);
+    --los-line: #60a5fa;
+    --fresnel-100: #c4b5fd;
+    --fresnel-60: #8b5cf6;
+    --profile-blocked: #f87171;
+    /* #730 M3 — the surface band by class. */
+    --terrain-building: #e6cdb0;
+    --terrain-vegetation: #337f4c;
+    /* #781 — the profile's hover cursor. */
+    --tp-cursor: #e2e8f0;
+    --tp-cursor-dot: #f87171;
+    /* #724 M3 — antenna sites on dark tiles. */
+    --mast-site: #22d3ee;
+    --mast-interference: #fb923c;
+    /* #914 — heat map on dark tiles: brighter violet -> magenta. */
+    --heat-1: #7c3aed;
+    --heat-2: #9333ea;
+    --heat-3: #c026d3;
+    --heat-4: #d946ef;
+    /* #941 — Predicted reach on dark tiles. */
+    --reach-good: #22c55e;
+    --reach-marginal: #facc15;
+    --reach-weak: #fb923c;
+    --reach-centre: #60a5fa;
+    --heat-5: #f0abfc;
+    --heat-stop-1: var(--heat-user-1, var(--mc-heat-dark-1, var(--heat-1)));
+    --heat-stop-2: var(--heat-user-2, var(--mc-heat-dark-2, var(--heat-2)));
+    --heat-stop-3: var(--heat-user-3, var(--mc-heat-dark-3, var(--heat-3)));
+    --heat-stop-4: var(--heat-user-4, var(--mc-heat-dark-4, var(--heat-4)));
+    --heat-stop-5: var(--heat-user-5, var(--mc-heat-dark-5, var(--heat-5)));
     --status-green: #22c55e;
     /* #1719 — on dark card-bg (#232340) #22c55e gives 6.65:1, AA pass.
        Keep the bright hue for text rather than darkening it. */
@@ -437,12 +625,62 @@
     --hover-bg: rgba(255,255,255, 0.06);
     --shadow: rgba(0,0,0,0.5);
     --trace-ghost-color: #94a3b8;
+    /* #882 — Live scope palette, dark (keep both dark blocks in sync). */
+    --scope-1: #3d8bfd;
+    --scope-2: #3fd7a5;
+    --scope-3: #f0a03c;
+    --scope-4: #c49be0;
+    --scope-5: #e6c34a;
+    --scope-6: #4dd0e1;
+    --scope-7: #f06292;
+    --scope-8: #8c9eff;
+    --scope-9: #a5d66b;
+    --scope-10: #d7a07a;
+    --scope-11: #e879f9;
+    --scope-12: #dce775;
+    --scope-none: #6b7280;
+    --scope-unknown: #c4b5a5;
+    --scope-other: #f8fafc;
     --section-bg: #1e1e34;
   }
 }
 /* ⚠️ DARK THEME VARIABLES — KEEP IN SYNC with @media block above (EMOJI-OK-COMMENT) */
 [data-theme="dark"] {
   color-scheme: dark;
+  --terrain-overlay-blend: screen;
+  --terrain-overlay-filter: invert(1);
+  /* #681 M4 — Path profile chart on dark surfaces (mirror of the @media block). */
+  --terrain-fill: #5d5444;
+  --terrain-clutter: rgba(122, 170, 132, 0.45);
+  --los-line: #60a5fa;
+  --fresnel-100: #c4b5fd;
+  --fresnel-60: #8b5cf6;
+  --profile-blocked: #f87171;
+  /* #730 M3 — the surface band by class (mirror of the @media block). */
+  --terrain-building: #e6cdb0;
+  --terrain-vegetation: #337f4c;
+  /* #781 — the profile's hover cursor (mirror of the @media block). */
+  --tp-cursor: #e2e8f0;
+  --tp-cursor-dot: #f87171;
+  /* #724 M3 — antenna sites on dark tiles (mirror of the @media block). */
+  --mast-site: #22d3ee;
+  --mast-interference: #fb923c;
+  /* #914 — heat map on dark tiles: brighter violet -> magenta. */
+  --heat-1: #7c3aed;
+  --heat-2: #9333ea;
+  --heat-3: #c026d3;
+  --heat-4: #d946ef;
+  /* #941 — Predicted reach on dark tiles (mirror of the @media block). */
+  --reach-good: #22c55e;
+  --reach-marginal: #facc15;
+  --reach-weak: #fb923c;
+  --reach-centre: #60a5fa;
+  --heat-5: #f0abfc;
+  --heat-stop-1: var(--heat-user-1, var(--mc-heat-dark-1, var(--heat-1)));
+  --heat-stop-2: var(--heat-user-2, var(--mc-heat-dark-2, var(--heat-2)));
+  --heat-stop-3: var(--heat-user-3, var(--mc-heat-dark-3, var(--heat-3)));
+  --heat-stop-4: var(--heat-user-4, var(--mc-heat-dark-4, var(--heat-4)));
+  --heat-stop-5: var(--heat-user-5, var(--mc-heat-dark-5, var(--heat-5)));
   /* Brighter link-strength hues for contrast on dark map tiles + surfaces. */
   --link-strong: #3fb950;
   --link-medium: #d29922;
@@ -492,6 +730,22 @@
   --hover-bg: rgba(255,255,255, 0.06);
   --shadow: rgba(0,0,0,0.5);
   --trace-ghost-color: #94a3b8;
+  /* #882 — Live scope palette, dark (keep both dark blocks in sync). */
+  --scope-1: #3d8bfd;
+  --scope-2: #3fd7a5;
+  --scope-3: #f0a03c;
+  --scope-4: #c49be0;
+  --scope-5: #e6c34a;
+  --scope-6: #4dd0e1;
+  --scope-7: #f06292;
+  --scope-8: #8c9eff;
+  --scope-9: #a5d66b;
+  --scope-10: #d7a07a;
+  --scope-11: #e879f9;
+  --scope-12: #dce775;
+  --scope-none: #6b7280;
+  --scope-unknown: #c4b5a5;
+  --scope-other: #f8fafc;
   --section-bg: #1e1e34;
 }
 
@@ -518,8 +772,8 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 }
 
 /* === Touch Targets === */
-/* WCAG 2.5.5 / Apple HIG / Material: 48x48 CSS px minimum touch target for
-   all interactive controls. Targets are achieved with min-height/min-width
+/* House preference: 48x48 CSS px minimum for the controls below (#2052),
+   above WCAG 2.5.5's 44x44 minimum. Targets use min-height/min-width
    plus inline-flex centering so existing visual styling (font-size, padding,
    icon size) is preserved on desktop while the *hit area* grows for touch.
    Issue #1060.
@@ -565,8 +819,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .ch-icon-btn,
-.ch-remove-btn,
-.ch-share-btn {
+.ch-row-menu-item {
   min-height: 48px;
   min-width: 48px;
   touch-action: manipulation;
@@ -608,8 +861,7 @@ button.ch-item {
 }
 
 /* Additional button-like controls discovered during PR #1067 review (Issue
-   #1060 follow-up). Same 48x48 minimums + touch-action so all interactive
-   surfaces meet WCAG 2.5.5. */
+   #1060 follow-up). Same 48x48 house minimums + touch-action. */
 .btn-link,
 .col-toggle-btn,
 .filter-toggle-btn,
@@ -697,9 +949,7 @@ input[type="radio"] {
   transform: scale(0.97);
   opacity: 0.9;
 }
-.ch-icon-btn:active,
-.ch-remove-btn:active,
-.ch-share-btn:active {
+.ch-icon-btn:active {
   opacity: 1;
   transform: scale(0.92);
 }
@@ -890,7 +1140,7 @@ img.brand-logo {
 .nav-btn {
   background: none; border: 1px solid var(--border); color: var(--nav-text-muted); padding: 6px 12px;
   border-radius: 6px; cursor: pointer; font-size: 14px; transition: all .15s;
-  min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
+  display: inline-flex; align-items: center; justify-content: center;
 }
 .nav-btn:hover { background: var(--nav-bg2); color: var(--nav-text); }
 
@@ -898,7 +1148,7 @@ img.brand-logo {
 .theme-toggle {
   display: inline-flex; align-items: center; cursor: pointer;
   padding: 0; margin: 0; border: none; background: none;
-  min-width: 44px; min-height: 44px; justify-content: center;
+  min-width: 48px; min-height: 48px; justify-content: center;
 }
 .theme-toggle input[type="checkbox"] {
   position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;
@@ -969,12 +1219,13 @@ img.brand-logo {
    tap-to-scroll works because <body> is the scroll container.  Pages that need
    a fixed-height container (maps, virtual-scroll, split-panels) add
    .app-fixed via the router so their children can use height:100%. */
-#app { min-height: calc(100vh - 52px); min-height: calc(100dvh - 52px); }
+#app { min-height: calc(100vh - 52px - var(--warmup-pills-h, 0px)); min-height: calc(100dvh - 52px - var(--warmup-pills-h, 0px)); }
 /* #1174 mesh-op review: subtract --bottom-nav-reserve so /map and the
  * other fixed-height pages (packets, nodes, channels, audio-lab) do not
  * have their last 56px covered by the bottom-nav at ≤768. The token is
  * 0px at desktop so wide-viewport behavior is unchanged. */
-#app.app-fixed { height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px)); height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px)); min-height: 0; overflow: hidden; }
+/* #894: also subtract --warmup-pills-h, the stale-source pill row (0px when hidden). */
+#app.app-fixed { height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px)); height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px)); min-height: 0; overflow: hidden; }
 
 .split-layout {
   display: flex; height: 100%; overflow: hidden;
@@ -1058,7 +1309,24 @@ img.brand-logo {
   box-shadow: 0 4px 12px rgba(0,0,0,.3); pointer-events: none;
 }
 .sort-help:hover .sort-help-tip { display: block; }
+.node-packet-count-help {
+  border: 0; padding: 0; background: none; color: inherit; font: inherit;
+  text-align: left; text-transform: inherit; letter-spacing: inherit;
+}
+.node-packet-count-help .sort-help-tip {
+  top: auto; bottom: 100%; left: 0; transform: none; pointer-events: auto;
+  font-weight: normal; text-transform: none; letter-spacing: normal;
+}
+.node-packet-count-help.help-dismissed .sort-help-tip { display: none; }
+/* Avoid touch target expansion redirecting nearby table-cell taps into the help button. */
+.node-packet-count-help.help-touch .sort-help-tip { pointer-events: none; }
 .filter-bar .btn:hover { background: var(--row-hover); }
+/* #96 — "Hide CONTROL packets" checkbox in the packets filter bar. */
+.filter-bar .filter-checkbox { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--text); white-space: nowrap; cursor: pointer; }
+.filter-bar .filter-checkbox input[type="checkbox"] { /* not the text-input box above */
+  width: 16px; height: 16px; min-width: 0; min-height: 0; padding: 0; margin: 0; cursor: pointer; accent-color: var(--accent);
+}
+@media (pointer: coarse) { .filter-bar .filter-checkbox { min-height: 44px; } } /* the label is the touch target */
 .filter-bar .btn.active { background: var(--accent-strong); color: var(--text-on-accent); border-color: var(--accent-strong); }
 .filter-bar .col-toggle-btn { height: 34px; min-height: 34px; }
 
@@ -1095,6 +1363,31 @@ img.brand-logo {
   max-width: 0; /* forces td to respect table width instead of expanding to content */
 }
 .data-table td.col-details { white-space: normal; word-break: break-word; max-width: 480px; }
+/* #1122/#1124: the packets "Details" cell is a one-line summary (the full
+ * message is in the detail pane / SlideOver). Letting it wrap made rows taller
+ * whenever table-layout:auto narrowed the column (e.g. 1030-1280px desktop
+ * widths), breaking the bounded row height and the virtual scroller's
+ * constant-row-height assumption (#1770). Clamp the INNER .col-details-clip to
+ * one line; the td keeps white-space:normal so the column's intrinsic widths
+ * (and thus the table layout) are unchanged -- see the #1805 note in the
+ * mobile block, whose inline-block/nowrap clip still overrides this. */
+.data-table td.col-details > .col-details-clip {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  overflow: hidden;
+}
+/* The one-line clip box is only a line box tall, so anything drawn outside
+ * it is clipped (padding would expose the top of the hidden 2nd line).
+ * Draw link focus rings inside the link box instead of around it... */
+.data-table td.col-details > .col-details-clip a:focus-visible { outline-offset: -2px; }
+/* ...and give the line box room for .chan-tag pills (17px, baseline-aligned)
+ * where that is height-neutral: above 768px the Path chips already make rows
+ * ~30px tall. (<=640px keeps the #1805 inline-block clip below.) */
+@media (min-width: 769px) {
+  .data-table td.col-details > .col-details-clip { line-height: 18px; }
+}
 /* Direct Neighbors' Configured Scope cell (observer-detail.js) can hold a
  * long comma-joined scope list (e.g. a #eu/#dk/#dk-sjl/... catch-all
  * observer) -- the generic max-width:0 ellipsis rule above truncated it
@@ -1319,6 +1612,19 @@ img.brand-logo {
 /* MAJOR-2: when user-resizable columns push total width past container,
  * fall back to horizontal scroll on the wrap rather than overflowing the page. */
 .table-fluid-wrap { width: 100%; overflow-x: auto; }
+.obs-nb-scope-scroll-hint { display: none; }
+/* Decision buttons are never ellipsized: the narrow-viewport .data-table td
+ * rule (max-width + text-overflow) would paint an overflowing button as "…". */
+.data-table td.obs-nb-scope-actions { max-width: none; overflow: visible; white-space: nowrap; }
+
+/* Observer Neighbors scope review: give both decision buttons a real table
+ * column on phones, then let the existing fluid wrapper scroll it. Without
+ * a min-width, .data-table's max-width:0 cells ellipsize the buttons while
+ * the wrapper has almost nothing to scroll. */
+@media (max-width: 600px) {
+  .obs-nb-scope-scroll-hint { display: block; font-size: 0.8em; margin: 0 0 6px; }
+  .obs-nb-scope-table.has-actions { min-width: 560px; }
+}
 
 /* === #1056 AC#4: Slide-over row-detail overlay (narrow viewports) ========
  * Singleton .slide-over-backdrop + .slide-over-panel injected into <body>
@@ -1334,8 +1640,12 @@ img.brand-logo {
  * body.style.overflow capture-and-restore string approach which
  * corrupted overflow under last-writer-wins races. */
 body.scroll-locked { overflow: hidden; }
+/* #180: the SlideOver is a modal dialog (role=dialog, aria-modal, focus
+ * trap), so it stacks on the modal tokens, above the sticky .top-nav (1100).
+ * At 1000/1001 the panel's header and close button sat under the nav at
+ * 641–1023 px, and a click on × landed on the nav. */
 .slide-over-backdrop {
-  position: fixed; inset: 0; z-index: 1000;
+  position: fixed; inset: 0; z-index: var(--z-modal-backdrop);
   background: rgba(0, 0, 0, 0.5);
   cursor: pointer;
 }
@@ -1343,7 +1653,7 @@ body.scroll-locked { overflow: hidden; }
 .slide-over-panel {
   position: fixed; top: 0; right: 0; bottom: 0;
   width: min(480px, 90vw);
-  z-index: 1001;
+  z-index: var(--z-modal);
   background: var(--detail-bg, var(--card-bg, #1f2937));
   color: var(--text, inherit);
   border-left: 1px solid var(--border);
@@ -1371,7 +1681,7 @@ body.scroll-locked { overflow: hidden; }
   color: var(--text-muted, #94a3b8);
   padding: 4px 8px; border-radius: 4px;
   /* WCAG 2.5.5 / Apple HIG — 48px tap target on touch devices. */
-  min-width: 44px; min-height: 44px;
+  min-width: 48px; min-height: 48px;
   display: inline-flex; align-items: center; justify-content: center;
 }
 .slide-over-close:hover { color: var(--text, inherit); background: var(--row-hover); }
@@ -1397,6 +1707,27 @@ body.scroll-locked { overflow: hidden; }
   font-size: 10px; font-weight: 700; font-family: var(--mono);
   background: var(--nav-bg); color: var(--nav-text); letter-spacing: .5px;
 }
+/* #76 Heard By: direct receptions (with the node's signal) and relay
+   observers (without), shared by node page, side panel and Live panel. */
+.heard-by-subtitle {
+  margin: 10px 0 4px; font-size: 12px; font-weight: 600; color: var(--text-muted);
+}
+.heard-by-subtitle .heard-by-help { font-size: inherit; font-weight: inherit; color: inherit; }
+.heard-by-help {
+  border: 0; padding: 0; background: none; font: inherit; text-align: left;
+}
+.heard-by-help .sort-help-tip { left: 0; transform: none; font-weight: normal; text-transform: none; letter-spacing: normal; }
+.heard-by-empty { font-size: 12px; margin: 2px 0 6px; }
+.heard-by .observer-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 12px;
+}
+.heard-by .heard-by-name { font-weight: 600; }
+.heard-by .heard-by-stats { color: var(--text-muted); white-space: nowrap; }
+.heard-by-link { color: var(--link-color); text-decoration: none; }
+.live-heard-by .heard-by-title { font-size: 12px; margin: 12px 0 6px; color: var(--text-muted); }
+.live-heard-by .observer-row { font-size: 11px; padding: 2px 0; }
+
 /* Issue #1290: listener vs repeater badge on observers list + detail.
  * Driven by ObserverResp.can_relay (false = firmware reported repeat:off).
  * Server-side disambiguator excludes listener observers from path-hop
@@ -1430,6 +1761,8 @@ body.scroll-locked { overflow: hidden; }
   font-size: 9px; font-weight: 700; font-family: var(--mono);
   background: var(--transport-badge-bg, #f59e0b20); color: var(--transport-badge-fg, #d97706);
   letter-spacing: .5px; vertical-align: middle;
+  /* Scope names are case-sensitive (#458): opt out of .badge uppercase. */
+  text-transform: none;
   /* Region names can run long (e.g. "#dk-trekantsomraadet") — cap and
      ellipsis instead of blowing out the Type column; full name is
      always in the title attribute. */
@@ -1449,7 +1782,7 @@ body.scroll-locked { overflow: hidden; }
   display: inline-block; padding: 1px 6px; border-radius: 4px;
   font-size: 10px; font-weight: 700; font-family: var(--mono);
   background: var(--transport-badge-bg, #f59e0b20); color: var(--transport-badge-fg, #d97706);
-  letter-spacing: .3px;
+  letter-spacing: .3px; text-transform: none;
 }
 .badge-scope-unknown {
   background: var(--text-muted-bg, #6b728020); color: var(--text-muted, #6b7280);
@@ -1575,6 +1908,11 @@ body.scroll-locked { overflow: hidden; }
    both themes. */
 .path-hops .hop-named { color: var(--text-on-accent); background: var(--accent-strong); padding: 1px 6px; border-radius: 3px; font-family: var(--font); font-size: 12px; font-weight: 600; cursor: default; flex: 0 0 auto; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; }
 .path-hops .arrow { color: var(--text-muted); flex: 0 0 auto; line-height: 18px; }
+/* #217 "Full Names" (packets.js): hop chips keep their whole name. The path
+ * stays on one line; hops past the edge go behind the +N pill. Wrapping would
+ * make rows taller than the fixed VSCROLL_ROW_HEIGHT the virtual scroller
+ * positions rows with. */
+#pktTable.pkt-full-names .path-hops .hop-named { max-width: none; }
 /* #1122/#1128: bound the row height contributed by the path column.
  * `max-height` on a <td> is widely ignored by browsers (table layout
  * overrides it), so use `height` — table cells respect `height` as
@@ -1594,6 +1932,23 @@ body.scroll-locked { overflow: hidden; }
   display: flex; align-items: center; justify-content: center;
   padding: clamp(8px, 2vw, 24px); /* #1059: viewport-edge breathing room */
 }
+/* #812 M4: up to 1023 px View Path opens from the packet detail's bottom
+ * sheet (<=640) or slide-over panel (641-1023, --z-modal), and the modal's
+ * top runs under the sticky top nav (1100). At 200 it sat below them, and
+ * its Close and Copy link could not be tapped. There it takes the modal
+ * layer; appended after the panel, it stacks above it. From 1024 px the
+ * detail is a side pane and the nav and the search stay above the modal
+ * (#180), so the rule stops there. */
+@media (max-width: 1023px) {
+  #packetPathModal.modal-overlay,
+  #packetPathLoadError.modal-overlay { z-index: var(--z-modal); }
+}
+/* #978: "Try again" in the View Path modal and in its load-error notice;
+ * .btn keeps them at least 48 px tall for a finger. */
+.packet-path-retry { margin-top: 12px; }
+.packet-path-load-error h3 { margin: 0 0 8px; }
+.packet-path-load-error p { margin: 0 0 16px; color: var(--text-muted); }
+.packet-path-load-error-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .modal {
   /* #1059: fluid via min(); cap height at 90vh; internal scroll.
      MINOR-6: dropped redundant `width: ...` — `max-width: min(90vw, 500px)`
@@ -1691,16 +2046,23 @@ body.scroll-locked { overflow: hidden; }
 .modal > .modal-close:not(.ch-modal-close):hover { background: var(--row-hover, rgba(0,0,0,0.05)); }
 
 /* #1648 M6 (M5 CDP carry-forward): mobile touch-target. The 4px/10px
-   padding above produces an ~24px hit area, below WCAG's 44×44 minimum.
-   Bump on ≤640px so dismiss is reliably tappable on phones. Applies to
-   both the generic .modal-close and the channel-modal close. */
+   padding above produces an ~24px hit area, below the 48×48 house minimum
+   (#2052, #235). Bump on ≤640px so dismiss is reliably tappable on phones.
+   Applies to both the generic .modal-close and the channel-modal close. */
 @media (max-width: 640px) {
   .modal > .modal-close:not(.ch-modal-close),
   .ch-modal-close {
-    min-width: 44px; min-height: 44px;
+    min-width: 48px; min-height: 48px;
     display: inline-flex; align-items: center; justify-content: center;
     padding: 8px 12px;
   }
+}
+
+/* #249: the add-channel dialog's primary buttons were 32 px tall next to
+   their 48 px inputs. Touch only, like the #630 coarse-pointer block;
+   desktop keeps them at 32 px. */
+@media (pointer: coarse) {
+  #chGenerateBtn, #chPskAddBtn, #chHashtagBtn { min-height: 48px; }
 }
 
 
@@ -1714,7 +2076,9 @@ body.scroll-locked { overflow: hidden; }
   width: clamp(160px, 18vw, 240px);
   max-width: calc(100vw - 24px);
   font-size: 13px;
-  max-height: calc(100% - 24px); overflow-y: auto;
+  /* #839: and above the map credit (bottom right), which ran under it;
+     map.js publishes the credit's height. */
+  max-height: calc(100% - 24px - var(--map-credit-height, 0px)); overflow-y: auto;
   /* #1236: keep the scrollbar gutter reserved so the scroll affordance is
      visible even when content briefly fits — users get a consistent visual
      cue that the panel is scrollable. */
@@ -1749,6 +2113,10 @@ fieldset.mc-section legend.mc-label { padding: 0; }
 
 /* === Misc === */
 .text-muted { color: var(--text-muted); }
+/* Explanatory note beside a tool's own content (e.g. the operator-disabled
+   notice in Areas -> Position-Fix Coverage Gaps): same size as the muted
+   notes it sits next to, so it does not read as body copy. */
+.estimated-positions-note { font-size: 0.85em; margin: 0 0 8px; }
 .text-center { text-align: center; }
 .mt-8 { margin-top: 8px; }
 .mb-8 { margin-bottom: 8px; }
@@ -1839,29 +2207,37 @@ button.ch-item.selected { background: var(--selected-bg); }
   line-height: 1.4;
 }
 /* Shared icon button base for sidebar row controls (remove ✕, share ⤴). EMOJI-OK-COMMENT
-   WCAG 2.5.5 / Apple HIG: 44x44 CSS px minimum touch target. */
+   Inherits the shared 48x48 house minimum above. */
 .ch-icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
   background: none; border: none; color: var(--text-muted);
   cursor: pointer; padding: 4px; margin-left: 2px;
-  min-width: 44px; min-height: 44px; box-sizing: border-box;
+  box-sizing: border-box;
   opacity: 0.55; transition: opacity 0.15s, color 0.15s;
   line-height: 1; user-select: none;
 }
-.ch-remove-btn {
-  font-size: 14px;
-  background: var(--statusRed, #b54a4a);
-  color: white;
-  border-radius: 4px;
-  padding: 4px 8px;
-  font-weight: bold;
-  opacity: 0.9;
-}
-.ch-share-btn  { font-size: 13px; padding: 4px 8px; }
+/* #354: one overflow trigger per saved channel. It keeps the 48x48 house
+   target (#2052) but the negative margins take it out of the row's height, so
+   a saved row is as tall as a Network row. */
+.ch-row-menu-btn { margin: -4px -8px -4px 0; flex-shrink: 0; opacity: 0.8; }
+.ch-row-menu-btn .ph-icon { width: 18px; height: 18px; }
 button.ch-item:hover .ch-icon-btn { opacity: 1; }
-.ch-icon-btn:hover, .ch-icon-btn:focus { opacity: 1 !important; outline: none; }
-.ch-remove-btn:hover, .ch-remove-btn:focus { background: #8b3838; color: white; }
-.ch-share-btn:hover,  .ch-share-btn:focus  { color: var(--link-color, #3b82f6); }
+.ch-icon-btn:hover, .ch-icon-btn:focus-visible { opacity: 1 !important; }
+.ch-icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 6px; }
+.ch-row-menu {
+  position: fixed; z-index: var(--z-popover, 300); min-width: 160px; max-width: calc(100vw - 8px);
+  padding: 4px; background: var(--card-bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 16px var(--shadow);
+}
+.ch-row-menu[hidden] { display: none; }
+.ch-row-menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 12px;
+  background: none; border: none; border-radius: 6px; color: inherit; font: inherit; text-align: left;
+  cursor: pointer; touch-action: manipulation;
+}
+.ch-row-menu-item:hover, .ch-row-menu-item:focus-visible { background: var(--row-hover); outline: none; }
+.ch-row-menu-item:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.ch-row-menu-danger { color: var(--danger); }
 .ch-user-badge { font-size: 12px; font-weight: var(--fw-medium); margin-left: 2px; opacity: 0.85; flex-shrink: 0; } /* #1668 M3 r1 — chip floor, mirror row chips (adv #2) */
 .ch-item-preview { font-size: 13px; font-weight: var(--fw-medium); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* #1668 M3 — was 12px/400 */
 
@@ -1883,7 +2259,7 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   display: none; background: none; border: none; font-size: 22px; cursor: pointer;
   color: var(--text); padding: 8px 12px; border-radius: 4px;
   align-items: center; justify-content: center;
-  min-width: 44px; min-height: 44px;
+  min-width: 48px; min-height: 48px;
   -webkit-tap-highlight-color: rgba(0,0,0,.08);
   touch-action: manipulation;
 }
@@ -1915,6 +2291,28 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 .ch-bot-message .ch-msg-bubble { border-style: dashed; font-style: italic; }
 .ch-encrypted-text { font-size: 11px; color: var(--text-muted); }
 .ch-msg-meta { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.ch-path-hash-badge {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--badge-radius);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  vertical-align: baseline;
+}
+/* #353 — 1-byte path hash warning, shared by the channel "Sent with" badge,
+ * the packet-detail Hash Size row and the node badge (renderPathHashSize in
+ * public/app.js). The icon + sr-only text carry it without colour. */
+.path-hash-warn { color: var(--path-hash-warn); font-weight: 600; }
+.path-hash-warn .ph-icon { margin-right: 3px; vertical-align: -0.125em; }
+/* #480 — "no scope" marker (renderNoScope in app.js): reuses the amber
+ * --path-hash-warn recommendation colour; stays compact on most messages. */
+.no-scope { white-space: nowrap; }
+.ch-path-hash-badge--warn { border-color: var(--path-hash-warn); align-items: center; }
+.node-path-hash-badge { background: var(--surface-2); border: 1px solid var(--path-hash-warn); font-size: 10px; }
 .ch-analyze-link { color: var(--link-color); text-decoration: none; margin-left: 8px; }
 .ch-analyze-link:hover { text-decoration: underline; }
 .ch-scroll-btn {
@@ -2158,6 +2556,11 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 .health-dot.health-green { background: var(--status-green); box-shadow: 0 0 6px #22c55e80; }
 .health-dot.health-yellow { background: var(--status-yellow); box-shadow: 0 0 6px #eab30880; }
 .health-dot.health-red { background: var(--status-red); box-shadow: 0 0 6px #ef444480; }
+/* #905 F4: the Live node popup's glyph dot (an SVG painted in currentColor). */
+.live-health-dot.health-green { color: var(--status-green); }
+.live-health-dot.health-yellow { color: var(--status-yellow); }
+.live-health-dot.health-red { color: var(--status-red); }
+.live-health-dot.health-muted { color: var(--text-muted); }
 .obs-table td:first-child { white-space: nowrap; }
 .obs-table td:nth-child(6) { max-width: none; overflow: visible; }
 .col-observer { min-width: 70px; max-width: none; }
@@ -2428,8 +2831,12 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
      icon-only row actions, smaller empty state. */
   .ch-sidebar-header {
     padding: 6px 10px; gap: 6px;
-    max-height: 56px;
   }
+  /* #235: with 48px touch targets the region pills cannot share a row with
+     the title and + Add at phone width. Keep title and + Add on the first
+     row and give the pills the second. The old max-height: 56px cap only
+     hid the overflow: the list was drawn over the lower half of the pills. */
+  .ch-sidebar-header .ch-header-region { order: 1; }
   .ch-sidebar-title { font-size: 14px; }
   .ch-sidebar-title .ch-icon { font-size: 16px; }
   .ch-add-channel-btn { padding: 4px 8px; font-size: 12px; }
@@ -2437,25 +2844,24 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   /* Region filter shows just its compact pills/dropdown trigger in the header. */
   .ch-header-region .region-filter-bar { padding: 0; gap: 4px; }
   .ch-header-region .region-pill { padding: 2px 6px; font-size: 11px; }
+  /* #416 — the channels header is the tightest host of the region control. */
+  .ch-header-region .region-quick-pick { padding: 2px 6px; font-size: 11px; }
+  .ch-header-region .region-quick-picks { gap: 4px; }
   .ch-header-region .region-dropdown-trigger { padding: 3px 6px; font-size: 11px; }
+  /* #620: the shared menu placement (region-filter.js placeMenu) keeps the
+     open menu inside the viewport wherever the trigger sits, so Channels
+     needs no menu override of its own (it used to pin right: 0 here). */
 
-  /* Channel list row: name must dominate. The inline share/remove icons
-     were eating >88px because of their 44x44 touch target — push them
-     onto a per-row reveal pattern: show a single ⋮ trigger that toggles
-     the action set. Until then, shrink them to icon-only and let the
-     name grow via flex:1. */
+  /* Channel list row: name must dominate. Below 768px channels.js renders
+     the flat .ch-row list (#1367), which has no inline share/remove
+     actions, so there is no size override for .ch-icon-btn here: wherever
+     those actions render they keep the shared 48x48 house minimum. */
   #chList .ch-item { padding: 10px 12px; gap: 10px; }
   #chList .ch-item-name { flex: 1 1 auto; min-width: 0; }
   #chList .ch-item-top { gap: 6px; }
-  #chList .ch-icon-btn { min-width: 32px; min-height: 32px; padding: 2px 4px; }
   /* #1648 M5: share-btn now renders an inline <svg.ph-icon> from channels.js,
    * so the legacy `font-size: 0` + `::before { content: '<emoji>' }` shim is
-   * obsolete. The icon-button class above already sets the touch target;
-   * the SVG inherits color via currentColor. */
-  #chList .ch-share-btn .ph-icon { font-size: 13px; }
-  #chList .ch-share-btn { font-size: 0; }
-  #chList .ch-share-btn .ph-icon, #chList .ch-share-btn svg { font-size: 13px; }
-  #chList .ch-remove-btn { font-size: 12px; padding: 2px 6px; }
+   * obsolete. The SVG inherits color via currentColor. */
   /* Mobile-narrow timestamp — #1668 M3 chip floor (12px+500 carries from base) */
   #chList .ch-item-time { font-size: 12px; }
 
@@ -2472,7 +2878,8 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   /* #1770: packets-view virtual-scroller assumes constant row height
      (VSCROLL_ROW_HEIGHT). The base rule at ~L1097 sets
      `.data-table td.col-details { white-space: normal; word-break: break-word }`
-     which lets the "Details" cell wrap on narrow viewports, producing
+     which let the "Details" cell wrap on narrow viewports (since #1122 the
+     inner clip is also line-clamped at wider widths, see ~L1106), producing
      variable row heights → visible jitter when scrolling past ~900px on
      iOS. Quick-fix (S path): clamp the cell to a single line on mobile.
      The proper L-path fix (per-row measurement) tracks separately.
@@ -2528,7 +2935,13 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
      instead so visible content fits without internal scrolling. Panel can
      grow to fill available height; max-height bound by viewport so it
      never escapes the screen. */
-  .map-controls { width: calc(100vw - 24px); right: 12px; top: 8px; max-height: calc(100vh - 80px); font-size: 12px; padding: 10px 12px; }
+  .map-controls { width: calc(100vw - 24px); right: 12px; top: 8px; font-size: 12px; padding: 10px 12px; }
+  /* #935: bound the panel by its containing block, the map area that
+     #app.app-fixed already sizes (header, --bottom-nav-reserve and
+     --warmup-pills-h, or the full viewport in embed mode), less the 8px top
+     offset, an 8px gap below and the map credit. Without the reserves the
+     last section could not scroll above the bottom nav. */
+  .map-controls { max-height: calc(100% - 16px - var(--map-credit-height, 0px)); }
   /* On mobile, hide collapsed section bodies (everything inside the
      fieldset except the legend). The legend remains tappable to expand. */
   .map-controls fieldset.mc-section.mc-collapsed > *:not(legend) { display: none; }
@@ -2552,6 +2965,14 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   .map-controls fieldset.mc-section.mc-collapsed > legend.mc-label::after {
     content: '▸';
   }
+  /* #930: a checkbox row's label toggles its box, so the row is the touch
+     target. Give it 44 px with the box centred; desktop keeps 2 px rows. */
+  .map-controls .mc-section label:has(> input[type="checkbox"]) {
+    min-height: 44px;
+    padding: 12px 0;
+    line-height: 20px;
+    box-sizing: border-box;
+  }
   #leaflet-map { z-index: 0; }
   #map-wrap { z-index: 0; }
 
@@ -2568,8 +2989,6 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 
 /* === Grouped Packet Rows === */
 .group-header { cursor: pointer; font-weight: 600; }
-.group-header td:first-child::before { content: '▶ '; font-size: 10px; color: var(--link-color); transition: transform 0.15s; display: inline-block; }
-.group-header.expanded td:first-child::before { content: '▼ '; }
 .group-header:hover { background: var(--row-hover); }
 .group-child { font-size: 12px; }
 .group-child td { padding-left: 20px; }
@@ -2580,12 +2999,12 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
 
-/* Favorite stars — Phosphor sprite, 44×44 hit target (WCAG 2.5.5) */
+/* Favorite stars — Phosphor sprite, 48×48 hit target (the house minimum, #2052) */
 .fav-star {
   background: none; border: none; cursor: pointer;
   color: var(--text-muted); padding: 0; line-height: 1;
   transition: color .15s, transform .15s;
-  min-width: 44px; min-height: 44px;
+  min-width: 48px; min-height: 48px;
   display: inline-flex; align-items: center; justify-content: center;
 }
 .fav-star .ph-icon { width: 22px; height: 22px; }
@@ -2682,15 +3101,202 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   filter: invert(1);
 }
 
+/* #845 — the Denmark group of the layer control: a full-width disclosure
+   button, two small headings, and a zoom hint right-aligned on its row. */
+.mc-layers-dk[hidden], .mc-layers-dk-body[hidden],
+.mc-layers-dk-head[hidden], .mc-layers-dk-base[hidden], .mc-layers-dk-overlays[hidden] {
+  display: none;
+}
+.mc-layers-dk {
+  border-top: 1px solid var(--border);
+  margin-top: 5px;
+  padding-top: 2px;
+}
+.mc-layers-dk-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.mc-layers-dk-toggle::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid currentColor;
+  transition: transform 0.15s;
+}
+.mc-layers-dk-toggle[aria-expanded="false"]::before {
+  transform: rotate(-90deg);
+}
+.mc-layers-dk-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.mc-layers-dk-body {
+  padding-left: 12px;
+}
+.mc-layers-dk-head {
+  margin: 4px 0 2px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+/* #859 — every row of the list, in the Denmark group or not, is laid out
+   the same way, so the tap targets match; on a coarse pointer each row is
+   as tall as the Denmark toggle. MapChromeFit (#841) keeps the taller list
+   scrollable above the credits and the bottom nav. */
+.leaflet-control-layers-list label > span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 20px;
+}
+.leaflet-control-layers-list label > span > span {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+}
+@media (pointer: coarse) {
+  .leaflet-control-layers-list label > span { min-height: 32px; }
+}
+.mc-layer-hint {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* #839 — every map credit follows the theme (Leaflet's own is a white bar,
+   which stayed light over a dark map). One more class than leaflet.css's
+   rule, which loads after this file; the compact inset credit below and the
+   Matrix theme still override it. */
+.leaflet-container .leaflet-control.leaflet-control-attribution {
+  background: color-mix(in srgb, var(--surface-1) 85%, transparent);
+  color: var(--text-muted);
+}
+.leaflet-container .leaflet-control.leaflet-control-attribution a {
+  color: var(--link-color);
+}
+
+/* #752 — the inset maps credit the viewer's active base map through the
+   registry's own attribution control (MC_ensureAttribution, compact: true).
+   The credit must stay legible on a 200px inset without swallowing it, so
+   it is capped at two lines (--mc-credit-compact-max-height) and scrolls
+   instead of being truncated: an attribution that is cut off is no
+   attribution. Colours come from the theme tokens, like the layer control
+   above. */
+.leaflet-control-attribution.mc-credit-compact {
+  font-size: var(--mc-credit-compact-font-size);
+  line-height: var(--mc-credit-compact-line-height);
+  max-width: var(--mc-credit-compact-max-width);
+  max-height: var(--mc-credit-compact-max-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: var(--mc-credit-compact-padding);
+  background: color-mix(in srgb, var(--surface-1) 88%, transparent) !important;
+  color: var(--text-muted) !important;
+}
+.leaflet-control-attribution.mc-credit-compact a {
+  color: var(--accent) !important;
+}
+
+/* #680 — DHM terrain hillshade pane (between base tiles and markers). */
+.mc-terrain-pane {
+  mix-blend-mode: var(--terrain-overlay-blend);
+  filter: var(--terrain-overlay-filter);
+}
+
+/* #792 — the colour-by-elevation legend under its toggle in the layer
+   control: the ramp as a bar (its gradient is set from the
+   --dhm-elevation-<m> variables) and the metres under it. */
+.mc-elev-legend {
+  margin: 2px 0 6px 20px;
+  width: 180px;
+  max-width: calc(100% - 20px);
+}
+.mc-elev-legend[hidden] { display: none; }
+.mc-elev-legend-bar {
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+.mc-elev-legend-scale {
+  position: relative;
+  height: 14px;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--text-muted);
+}
+.mc-elev-legend-scale span {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+}
+
+/* #724 M3 — antenna sites: the status line under the overlay toggles and
+   the site popup. */
+.mc-masts-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 0 0 4px 20px;
+  max-width: 220px;
+}
+.mc-masts-popup .mc-masts-popup-title { font-weight: 600; margin-bottom: 2px; }
+.mc-masts-popup .mc-masts-popup-addr,
+.mc-masts-popup .mc-masts-popup-stations { font-size: 12px; }
+.mc-masts-popup .mc-masts-popup-table { border-collapse: collapse; margin: 6px 0; font-size: 12px; }
+.mc-masts-popup .mc-masts-popup-table th,
+.mc-masts-popup .mc-masts-popup-table td { padding: 1px 6px 1px 0; text-align: left; }
+.mc-masts-popup .mc-masts-popup-table tr.mc-masts-int td { color: var(--mast-interference); font-weight: 600; }
+.mc-masts-popup .mc-masts-popup-hint { font-size: 12px; margin: 6px 0; padding-left: 6px; border-left: 3px solid var(--mast-interference); }
+.mc-masts-popup .mc-masts-popup-note { font-size: 11px; color: var(--text-muted); margin: 6px 0 0; }
+
+/* #723 M2 heritage popup */
+/* Click-for-info on the protected ancient monuments overlay
+   (heritage-info.js). Colours follow the theme through the variables. */
+.mc-heritage-popup .leaflet-popup-content { margin: 10px 14px; min-width: 180px; }
+.mc-heritage-info { color: var(--text); line-height: 1.35; }
+.mc-heritage-title { font-weight: 600; font-size: 14px; margin: 0 24px 6px 0; overflow-wrap: anywhere; }
+.mc-heritage-fields {
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0;
+}
+.mc-heritage-fields dt { color: var(--text-muted); }
+.mc-heritage-fields dd { margin: 0; overflow-wrap: anywhere; }
+.mc-heritage-msg { margin-right: 18px; }
+.mc-heritage-note { margin-top: 6px; color: var(--text-muted); font-style: italic; }
+.mc-heritage-credit { margin-top: 8px; font-size: 11px; color: var(--text-muted); }
+/* Leaflet styles the button as .leaflet-container a.leaflet-popup-close-button,
+   so these need the same specificity plus the popup class to win. */
+.leaflet-container .mc-heritage-popup a.leaflet-popup-close-button { color: var(--text-muted); }
+@media (pointer: coarse) {
+  .leaflet-container .mc-heritage-popup a.leaflet-popup-close-button {
+    width: 44px; height: 44px; line-height: 44px; font-size: 24px;
+  }
+  .mc-heritage-title, .mc-heritage-msg { margin-right: 40px; }
+}
+/* end #723 M2 heritage popup */
+
 /* ---- Leaflet overrides for theme ---- */
 .leaflet-control-zoom a {
   background: color-mix(in srgb, var(--surface-1) 92%, transparent) !important;
   backdrop-filter: blur(12px);
   color: var(--text) !important;
   border-color: var(--border) !important;
-  width: 44px !important;
-  height: 44px !important;
-  line-height: 44px !important;
+  width: 48px !important;
+  height: 48px !important;
+  line-height: 48px !important;
   font-size: 20px !important;
 }
 .leaflet-control-zoom a:hover {
@@ -2792,7 +3398,7 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
     min-height: 36px;
     font-size: 14px;
   }
-  .ch-avatar.ch-tappable { min-width: 44px; min-height: 44px; width: 44px; height: 44px; }
+  .ch-avatar.ch-tappable { min-width: 48px; min-height: 48px; width: 48px; height: 48px; }
   /* #1253: trim .badge-iata h-padding + margin-left on narrow viewports so
    * the observer cell + IATA pill fits within a 375px viewport. Without this
    * the badge right edge overflows by ~1.25px at 375px (same class of fix
@@ -2816,6 +3422,14 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
   margin-bottom: 12px; border: 1px solid var(--border);
 }
 .node-full-card h4 { margin: 0 0 10px; font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; }
+/* #254: the Affinity Debug heading is a disclosure button. It keeps the h4
+ * look and spans the heading, so the whole row toggles as before. */
+.node-full-card h4 .affinity-debug-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  margin: 0; padding: 0; border: 0; background: none; cursor: pointer;
+  font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit; text-align: start;
+}
+@media (pointer: coarse) { .node-full-card h4 .affinity-debug-toggle { min-height: 48px; } }
 .node-activity-list { display: flex; flex-direction: column; gap: 6px; }
 .node-activity-item {
   display: flex; gap: 8px; font-size: 13px; padding: 6px 0;
@@ -2823,6 +3437,31 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 }
 .node-activity-item:last-child { border-bottom: none; }
 .node-activity-time { color: var(--text-muted); white-space: nowrap; min-width: 70px; font-size: 12px; }
+
+/* #2073 Recent Adverts (node-adverts.js): per-route counts, tabs, route badge.
+   Colors reuse the status tokens; badge text stays --text for contrast. */
+.node-adverts-counts { display: flex; flex-wrap: wrap; gap: 2px 16px; margin: 0 0 8px; font-size: 12px; color: var(--text-muted); }
+.node-adverts-count-row strong { margin-right: 4px; color: var(--text); }
+.node-adverts-note { margin: 0 0 8px; font-size: 12px; }
+.node-adverts-intervals { display: flex; flex-direction: column; gap: 2px; margin: 0 0 8px; font-size: 12px; color: var(--text-muted); cursor: help; }
+.node-adverts-interval-row strong { margin-right: 4px; color: var(--text); }
+.node-adverts-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
+.node-adverts-tabs .tab-btn { padding: 4px 10px; }
+.node-adverts-empty { font-size: 13px; }
+.advert-timeline .node-adverts-empty { padding: 8px; }
+.advert-route-badge {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0 6px;
+  border: 1px solid var(--border); border-radius: 4px;
+  font-size: 11px; font-weight: var(--fw-semibold); color: var(--text); white-space: nowrap;
+}
+.advert-route-badge::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
+.advert-route-badge[data-route-class="flood"]::before { background: var(--status-info); }
+.advert-route-badge[data-route-class="zero_hop"]::before { background: var(--status-green); }
+.advert-route-badge[data-route-class="mixed"]::before { background: var(--status-purple); }
+/* Per-advert hash size when a node's adverts disagree (was inline colors). */
+.advert-hs-badge { font-size: 9px; font-family: var(--mono); color: var(--text-on-accent); background: var(--palette-green-600); }
+.advert-hs-badge.hs-1 { background: var(--status-orange); }
+.advert-hs-badge.hs-2 { background: var(--palette-green-300); color: var(--palette-gray-900); }
 
 /* Analytics page */
 .analytics-page { padding: 16px 24px; max-width: 1600px; margin: 0 auto; }
@@ -2984,7 +3623,9 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 [data-theme="dark"] .node-qr svg rect[fill="#ffffff"] { fill: var(--card-bg); }
 [data-theme="dark"] .node-qr svg rect[fill="#000000"] { fill: var(--text); }
 .node-map-qr-wrap { position: relative; }
-.node-map-qr-overlay { position: absolute; bottom: 8px; right: 8px; z-index: 400; background: rgba(255,255,255,0.5); border-radius: 4px; padding: 4px; line-height: 0; margin: 0; text-align: center; }
+/* #752 — bottom: clears the inset's map credit (the control is in the same
+   corner and paints above this overlay, z-index 800 against 400). */
+.node-map-qr-overlay { position: absolute; bottom: var(--mc-credit-compact-clearance); right: 8px; z-index: 400; background: rgba(255,255,255,0.5); border-radius: 4px; padding: 4px; line-height: 0; margin: 0; text-align: center; }
 .node-map-qr-overlay svg { max-width: 56px !important; height: auto; display: block; margin: 0; }
 [data-theme="dark"] .node-map-qr-overlay { background: rgba(255,255,255,0.4); }
 
@@ -3094,10 +3735,28 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 
 /* Ambiguous hop indicator */
 .hop-ambiguous { border-bottom: 1px dashed var(--status-yellow, #f59e0b); }
+/* #598 — unlisted hop: no known node with its prefix fits that point in the path */
+.hop-unlisted { font-family: var(--mono); color: var(--text-muted); }
+.hop-nogps { font-size: 0.85em; color: var(--text-muted); }
 .hop-warn { font-size: 0.7em; margin-left: 2px; vertical-align: super; color: var(--status-yellow, #f59e0b); }
 .hop-conflict-btn { background: var(--status-yellow, #f59e0b); color: #000; border: none; border-radius: 4px; font-size: 11px;
   font-weight: 700; padding: 1px 5px; cursor: pointer; vertical-align: middle; margin-left: 3px; line-height: 1.2; }
 .hop-conflict-btn:hover { background: var(--status-yellow, #d97706); filter: brightness(0.85); }
+
+/* #165 (port of upstream 2099) — a badge is a sibling of its pill, so
+   "A [8] -> B [6]" gave no clue which name the 8 belonged to. The group ties the pair together and keeps the
+   separator outside it. Only hops that carry a badge are wrapped. */
+.hop-group { display: inline-flex; align-items: center; white-space: nowrap; }
+.hop-group .hop-conflict-btn,
+.hop-group .hop-unreliable-btn { margin-left: 2px; }
+
+/* One indicator for a whole path, used by the packets list. The detail pane
+   keeps a badge per hop, because that is where the candidates get read. It
+   leads the path so a clipped (overflowing) path cell cannot hide it. */
+.hop-path-warn { display: inline-flex; align-items: center; gap: 2px; margin-right: 4px; flex: 0 0 auto;
+  background: var(--status-yellow); color: var(--palette-gray-900); border-radius: 4px;
+  font-size: 11px; font-weight: 700; padding: 1px 5px; line-height: 1.2;
+  vertical-align: middle; white-space: nowrap; }
 .hop-conflict-popover { position: absolute; z-index: var(--z-popover); background: var(--surface-1); border: 1px solid var(--border);
   border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.25); width: 260px; max-height: 300px; overflow-y: auto; }
 .hop-conflict-header { padding: 10px 12px; font-size: 12px; font-weight: 700; border-bottom: 1px solid var(--border);
@@ -3119,7 +3778,20 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 .hop-unreliable-btn { background: none; border: none; color: var(--status-yellow, #f59e0b); font-size: 13px;
   cursor: help; vertical-align: middle; margin-left: 2px; padding: 0 2px; line-height: 1; }
 .hop-global-fallback { border-bottom: 1px dashed var(--status-red); }
-.hop-current { font-weight: 700 !important; color: var(--link-color) !important; }
+.hop-current {
+  display: inline-block;
+  padding: 0 4px;
+  /* box-shadow, not outline: outline is this app's focus affordance (see
+     "Focus Indicators" above), so an outlined-but-unfocused hop reads as
+     focused, and a genuinely focused one would differ only in ring width and
+     a near-identical blue. A shadow ring draws the same box while leaving
+     :focus-visible unambiguous, and — like outline — it does not disturb the
+     shared renderer's dashed ambiguity border. */
+  box-shadow: 0 0 0 1px var(--link-color);
+  border-radius: 4px;
+  font-weight: 700 !important;
+  color: var(--link-color) !important;
+}
 
 /* Self-loop subpath rows */
 .subpath-selfloop { opacity: 0.6; }
@@ -3252,8 +3924,8 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .home-footer,
 .home-favorites { max-width: 1200px; }
 
-/* #40 — Increase suggest-claim touch target to ≥44px */
-.suggest-claim { min-height: 44px; min-width: 44px; padding: 10px 14px; display: inline-flex; align-items: center; justify-content: center; }
+/* #40, #235 — suggest-claim touch target at the 48px house minimum */
+.suggest-claim { min-height: 48px; min-width: 48px; padding: 10px 14px; display: inline-flex; align-items: center; justify-content: center; }
 
 /* #41 — Lower My Nodes grid minimum to prevent overflow on 375-640px */
 .my-nodes-grid { max-width: 1200px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
@@ -3282,11 +3954,48 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .obs-table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .obs-table-scroll .obs-table { min-width: 0; }
 
+/* #245 M2 — Analytics → Advert Intervals (advert-interval-analytics.js) */
+.ai-note { margin: 0 0 12px; font-size: 13px; }
+.ai-dist { display: flex; flex-direction: column; gap: 6px; }
+.ai-dist-row { display: grid; grid-template-columns: minmax(80px, max-content) 1fr minmax(32px, max-content); align-items: center; gap: 8px; font-size: 13px; }
+.ai-dist-bar { display: block; height: 10px; border-radius: 5px; overflow: hidden; background: var(--border); }
+.ai-dist-fill { display: block; height: 100%; background: var(--accent); }
+.ai-dist-count { text-align: right; font-weight: var(--fw-medium); }
+.ai-class-counts { margin-top: 10px; font-size: 12px; }
+.ai-rearm-row { font-size: 13px; margin: 4px 0; }
+/* end #245 M2 */
+/* #896 — distribution rows are bucket buttons; the bucket's node list (advert-interval-analytics.js) */
+.ai-dist-row { width: 100%; margin: 0; padding: 2px 4px; border: 0; border-radius: var(--radius-sm); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.ai-dist-row:hover { background: var(--row-hover); }
+.ai-dist-row[aria-expanded="true"] { background: var(--selected-bg); box-shadow: inset 0 0 0 1px var(--accent); }
+.ai-bucket-panel { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--detail-bg); min-width: 0; scroll-margin: 64px 0 72px; }
+.ai-bucket-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.ai-bucket-head h4 { margin: 0; font-size: var(--fs-md); flex: 1 1 auto; min-width: 0; }
+.ai-bucket-head .btn-secondary { flex: none; }
+.ai-bucket-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ai-bucket-member { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 13px; min-width: 0; }
+.ai-bucket-member a { overflow-wrap: anywhere; }
+.ai-bucket-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
+.ai-bucket-notice { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--status-amber); background: var(--surface-2); font-size: 13px; }
+@media (max-width: 640px), (pointer: coarse) {
+  .ai-dist-row { min-height: 48px; }
+  .ai-bucket-member a { display: inline-flex; align-items: center; min-height: 44px; }
+}
+/* end #896 */
+
 /* #206 — Analytics/Compare tables scroll wrappers on mobile */
 .analytics-table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .analytics-table-scroll .analytics-table,
 .analytics-table-scroll .analytics-peer-table,
 .analytics-table-scroll .compare-table { min-width: 480px; }
+/* Busiest Repeaters: six columns that fit a phone, names wrap anywhere. */
+.analytics-table-scroll .busiest-repeaters-table { min-width: 0; }
+/* #716 — "24h"/"1h" became "Relayed 24h"/"Relayed 1h" so the columns say
+ * what they count without relying on the group header above them; tighter
+ * horizontal padding on a phone keeps the six columns fitting as before. */
+@media (max-width: 480px) {
+  .busiest-repeaters-table th, .busiest-repeaters-table td { padding: 8px 4px; }
+}
 @media (max-width: 640px) {
   .spark-bar { min-width: 60px; width: auto; }
 }
@@ -3332,10 +4041,17 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .node-top-row .node-qr-wrap { flex: 1; align-self: flex-start; min-width: 120px; max-width: 160px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
 .node-top-row .node-qr-wrap .node-qr { margin-top: 0; }
 .node-qr-wrap--full { max-width: 240px; margin: 0 auto; }
-.node-stats-table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 12px; }
+.node-stats-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; overflow: visible; margin-bottom: 12px; }
 .node-stats-table td { padding: 6px 12px; border-bottom: 1px solid var(--border); }
 .node-stats-table tr:last-child td { border-bottom: none; }
-.node-stats-table tr:nth-child(even) { background: var(--row-stripe); }
+/* #382: no overflow clipping (the packet-count help tooltip extends past the
+   table), so stripes and hovers are painted on the cells, which carry the
+   rounded corners themselves (border width 1px inside an 8px radius). */
+.node-stats-table tr:nth-child(even) td { background: var(--row-stripe); }
+.node-stats-table tr:first-child td:first-child { border-top-left-radius: 7px; }
+.node-stats-table tr:first-child td:last-child { border-top-right-radius: 7px; }
+.node-stats-table tr:last-child td:first-child { border-bottom-left-radius: 7px; }
+.node-stats-table tr:last-child td:last-child { border-bottom-right-radius: 7px; }
 .node-stats-table td:first-child { font-weight: 600; color: var(--text-muted); width: 40%; white-space: nowrap; }
 .node-stats-table td:last-child { font-weight: 500; }
 @media (max-width: 768px) {
@@ -3350,12 +4066,16 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
   /* #1243 — On mobile, mirror the desktop split-pane behavior used by the
      compact node detail (.node-map-qr-wrap): overlay the QR on the map
      instead of stacking a 250px-tall QR panel below it. Desktop (≥768px)
-     keeps the side-by-side flex layout untouched. */
+     keeps the side-by-side flex layout untouched.
+     #979 — only a QR beside a map is pinned: a node without one gets
+     node-qr-wrap--full, which has nothing to sit on, so pinned it floated
+     up over the action chips. It stays in the flow, as up to 768px. */
   .node-top-row { position: relative; }
   .node-top-row .node-map-wrap { flex: 1 1 100%; }
-  .node-top-row .node-qr-wrap {
+  .node-top-row .node-qr-wrap:not(.node-qr-wrap--full) {
     position: absolute;
-    bottom: 8px;
+    /* #752 — above the map credit, as .node-map-qr-overlay is. */
+    bottom: var(--mc-credit-compact-clearance);
     right: 8px;
     z-index: 400;
     flex: 0 0 auto;
@@ -3368,11 +4088,11 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
     line-height: 0;
     margin: 0;
   }
-  .node-top-row .node-qr-wrap .node-qr svg { max-width: 72px; height: auto; }
+  .node-top-row .node-qr-wrap:not(.node-qr-wrap--full) .node-qr svg { max-width: 72px; height: auto; }
   /* Hide the redundant pubkey caption inside the overlay QR — it's already
      shown in the card above and would push the overlay too large. */
-  .node-top-row .node-qr-wrap .mono { display: none; }
-  [data-theme="dark"] .node-top-row .node-qr-wrap {
+  .node-top-row .node-qr-wrap:not(.node-qr-wrap--full) .mono { display: none; }
+  [data-theme="dark"] .node-top-row .node-qr-wrap:not(.node-qr-wrap--full) {
     background: var(--card-bg-translucent-dark, rgba(255, 255, 255, 0.4));
   }
 }
@@ -3420,6 +4140,10 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
    groups) being added between the card and the chart media. */
 .analytics-chart-card svg,
 .analytics-chart-card canvas { max-width: 100%; height: auto; display: block; }
+/* #562 — the battery badge icon keeps the shared icon size; the chart-media
+   rule above (height:auto, display:block) must not stretch it. Scoped to the
+   badge so chart SVG responsiveness is unchanged. */
+.analytics-chart-card .battery-status-badge .ph-icon { display: inline-block; width: 16px; height: 16px; max-width: none; }
 .analytics-chart-card h4 { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); margin-bottom: 4px; }
 .analytics-chart-desc { font-size: 10px; color: var(--text-muted); margin-bottom: 8px; font-style: italic; }
 .analytics-heatmap { display: grid; grid-template-columns: 40px repeat(24, 1fr); gap: 2px; }
@@ -3497,7 +4221,7 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .area-dropdown-item.area-item-active { color: var(--accent); font-weight: 600; }
 .region-filter-container { margin: 0; padding: 0; display: inline-flex; align-items: center; }
 .region-pill {
-  display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 16px;
+  display: inline-flex; align-items: center; justify-content: center; padding: 4px 12px; border-radius: 16px;
   font-size: 12px; font-weight: 500; cursor: pointer; border: 1.5px solid var(--border);
   background: transparent; color: var(--text-muted); transition: all 0.15s; white-space: nowrap;
   flex-shrink: 0;
@@ -3514,13 +4238,61 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   font-size: 12px; font-weight: 600; color: var(--text-muted); align-self: center;
   margin-right: 2px; user-select: none; white-space: nowrap; flex-shrink: 0;
 }
+
+/* #416 — named region quick picks. One wrapped row of buttons next to the
+   region control, separated by a hairline so it reads as a shortcut over the
+   same codes rather than more region pills. Rendered only when the operator
+   configured `regionGroups`, which is also what lets the container wrap:
+   without groups the layout is byte-for-byte what it was. */
+.region-filter-container.has-region-quick-picks { flex-wrap: wrap; row-gap: 4px; }
+.region-quick-picks {
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-left: 8px; padding-left: 8px; border-left: 1px solid var(--border);
+}
+.region-quick-pick {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 4px 12px; border-radius: 16px; font-size: 12px; font-weight: 500;
+  font-family: var(--font); cursor: pointer; border: 1.5px dashed var(--border);
+  background: transparent; color: var(--text-muted); transition: all 0.15s;
+  white-space: nowrap; flex-shrink: 0; max-width: 14em;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.region-quick-pick:hover { border-color: var(--accent); color: var(--accent); }
+.region-quick-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Same --accent-strong / --text-on-accent pair as .region-pill-active, kept
+   for the 4.83:1 AA contrast #1668 M5 settled on; the dashed border is what
+   tells a group apart from a single region at a glance. */
+.region-quick-pick-active {
+  background: var(--accent-strong); color: var(--text-on-accent);
+  border-style: solid; border-color: var(--accent-strong);
+}
+.region-quick-pick-active:hover { opacity: 0.85; color: var(--text-on-accent); }
+/* On a phone or small tablet the row wraps away from the control, so the
+   hairline would divide nothing useful: the quick picks become their own
+   full-width row. #620: in dropdown mode that row goes above the control (the
+   wrap gets order: 1), so the menu, which drops below its trigger, never
+   covers the picks, and the container is capped to its host so a long row
+   cannot widen the page. Desktop layout is untouched. */
+@media (max-width: 768px) {
+  .region-filter-container.has-region-quick-picks { max-width: 100%; min-width: 0; }
+  .region-filter-container.has-region-quick-picks .region-dropdown-wrap { order: 1; }
+  .region-quick-picks {
+    margin-left: 0; padding-left: 0; border-left: 0;
+    flex-basis: 100%; width: 100%; min-width: 0;
+  }
+  .region-quick-pick { max-width: 100%; }
+}
+
 .analytics-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
-.analytics-time-window-select {
+/* The one time-window / metric <select> style: Analytics filters and the
+   Perf page's WebSocket-history Period control. */
+.time-window-select {
   height: 34px; min-height: 34px; padding: 0 10px; border-radius: 6px; box-sizing: border-box;
   font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid var(--border);
-  background: var(--input-bg); color: var(--text); transition: border-color 0.15s;
+  background: var(--input-bg); color: var(--text); font-family: var(--font); transition: border-color 0.15s;
 }
-.analytics-time-window-select:hover { border-color: var(--accent); }
+.time-window-select:hover { border-color: var(--accent); }
+.perf-range-control { display: inline-flex; align-items: center; gap: 8px; }
 .region-dropdown-wrap { position: relative; display: inline-flex; align-items: center; }
 .region-dropdown-trigger {
   display: inline-flex; align-items: center; padding: 6px 10px; border-radius: 6px;
@@ -3531,20 +4303,144 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 .region-dropdown-trigger:hover { border-color: var(--accent); color: var(--accent); }
 .region-dropdown-menu {
   position: absolute; top: 100%; left: 0; z-index: var(--z-dropdown);
-  min-width: 220px; width: max-content; max-height: 260px; overflow-y: auto;
+  min-width: min(220px, calc(100vw - 2 * var(--region-menu-gutter)));
+  max-width: calc(100vw - 2 * var(--region-menu-gutter));
+  width: max-content; max-height: 260px; overflow-y: auto;
   background: var(--card-bg, #fff); border: 1px solid var(--border); border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.12); padding: 4px 0;
 }
 .region-dropdown-item {
   display: flex; align-items: center; gap: 6px; padding: 6px 12px;
   font-size: 13px; cursor: pointer; color: var(--text); white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; width: 100%; max-width: 320px;
+  overflow: hidden; text-overflow: ellipsis; width: 100%; max-width: min(320px, calc(100vw - 2 * var(--region-menu-gutter) - 2px));
   background: transparent; border: 0px;
 }
 .region-dropdown-item input[type="checkbox"] {
   width: 14px; height: 14px; margin: 0; flex-shrink: 0;
 }
 .region-dropdown-item:hover { background: var(--row-hover, #f5f5f5); }
+
+/* ─── #740 M3a — Danish areas (DAGI) filter (public/dagi-filter.js) ───
+   A popover under its trigger on desktop; at 600 px and below the same
+   panel is a bottom sheet over a dimmed page (the JS does not branch on
+   width, apart from not placing the sheet as a popover). Colours are the
+   existing tokens only. Every element that sets `display` gets a [hidden]
+   rule, since the class would otherwise beat the attribute. */
+.dagi-filter-container { margin: 0; padding: 0; display: inline-flex; align-items: center; }
+.dagi-filter-wrap { position: relative; display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+.dagi-trigger { gap: 0; min-width: 0; max-width: min(340px, calc(100vw - 2 * var(--region-menu-gutter) - 56px)); }
+.dagi-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dagi-trigger-caret { flex-shrink: 0; white-space: pre; }
+.dagi-filter-wrap.dagi-active .dagi-trigger { border-color: var(--accent-strong); }
+.dagi-clear {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 34px; height: 34px; box-sizing: border-box; padding: 0; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--input-bg); color: var(--text-muted);
+  font-size: 13px; font-family: var(--font); cursor: pointer;
+}
+.dagi-clear:hover { border-color: var(--accent); color: var(--text); }
+.dagi-clear:focus-visible, .dagi-close:focus-visible, .dagi-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dagi-clear[hidden] { display: none; }
+.dagi-backdrop, .dagi-backdrop[hidden] { display: none; }
+.dagi-panel {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: var(--z-dropdown);
+  width: min(360px, calc(100vw - 2 * var(--region-menu-gutter))); max-height: min(70vh, 480px);
+  display: flex; flex-direction: column; box-sizing: border-box;
+  background: var(--card-bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 16px var(--shadow); font-family: var(--font);
+}
+.dagi-panel[hidden] { display: none; }
+/* #740 M3b: opened beside a scrolling panel (the Map's controls), which would
+   clip it; dagi-filter.js sets left and top. */
+.dagi-panel.dagi-panel-beside { position: fixed; }
+/* In the Map's narrow controls panel the trigger shrinks (its label ends in
+   an ellipsis), so the clear button stays inside the panel. */
+.map-controls .dagi-filter-container { display: flex; margin-bottom: 10px; }
+/* On Packets the picker sits in the filter bar, whose inputs are 120 px
+   (100% when expanded on a phone); the search box keeps the panel's width. */
+.filter-bar .dagi-panel input.dagi-search { width: auto; }
+.dagi-panel:focus { outline: none; }
+.dagi-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 6px 2px 12px; }
+.dagi-title { font-size: 13px; font-weight: 600; }
+.dagi-close {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 32px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); font-size: 14px; cursor: pointer;
+}
+.dagi-close:hover { background: var(--row-hover); color: var(--text); }
+.dagi-search {
+  margin: 4px 10px 8px; padding: 7px 10px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--input-bg); color: var(--text); font-family: var(--font); font-size: 13px;
+}
+.dagi-search:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.dagi-tabs { display: flex; gap: 4px; padding: 0 10px 8px; }
+.dagi-tabs[hidden] { display: none; }
+.dagi-tab {
+  flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  padding: 5px 6px; border: 1px solid var(--border); border-radius: 14px; background: transparent;
+  color: var(--text-muted); font-family: var(--font); font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap;
+}
+.dagi-tab:hover { border-color: var(--accent); color: var(--text); }
+.dagi-tab-count { font-variant-numeric: tabular-nums; font-size: 11px; }
+/* The --accent-strong / --text-on-accent pair, as .region-pill-active (#1668). */
+.dagi-tab.dagi-tab-active { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--text-on-accent); }
+.dagi-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--border); padding: 4px 0; }
+.dagi-section[hidden], .dagi-section-head[hidden], .dagi-subhead[hidden], .dagi-more[hidden], .dagi-empty[hidden] { display: none; }
+.dagi-section-head {
+  padding: 8px 12px 2px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted);
+}
+.dagi-subhead { padding: 8px 12px 2px; font-size: 11px; font-weight: 600; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.dagi-option {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px; width: 100%; box-sizing: border-box;
+  padding: 6px 12px; border: 0; background: transparent; color: var(--text); text-align: left;
+  font-family: var(--font); font-size: 13px; cursor: pointer;
+}
+.dagi-option[hidden] { display: none; }
+.dagi-option:hover { background: var(--row-hover); }
+.dagi-option:focus-visible { background: var(--row-hover); outline: 2px solid var(--accent); outline-offset: -2px; }
+.dagi-option[aria-selected="true"] { background: var(--selected-bg); font-weight: 600; }
+.dagi-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dagi-option[aria-selected="true"] .dagi-option-label::after { content: " \2713"; }
+.dagi-option-meta { flex-shrink: 0; font-size: 11px; font-weight: 400; color: var(--text-muted); }
+.dagi-option-meta[hidden] { display: none; }
+.dagi-more, .dagi-empty { padding: 6px 12px; font-size: 12px; font-style: italic; color: var(--text-muted); }
+.dagi-credit { padding: 6px 12px 8px; border-top: 1px solid var(--border); font-size: 11px; line-height: 1.4; color: var(--text-muted); }
+.dagi-credit-link { color: var(--link-color); }
+.dagi-notice { margin: 0; padding: 4px 16px; font-size: 12px; color: var(--text-muted); }
+.dagi-notice[hidden] { display: none; }
+@media (max-width: 600px) {
+  .dagi-backdrop:not([hidden]) {
+    display: block; position: fixed; inset: 0; z-index: var(--z-modal-backdrop); background: var(--shadow);
+  }
+  .dagi-panel {
+    position: fixed; top: auto; left: 0; right: 0; bottom: 0; z-index: var(--z-modal);
+    width: auto; max-height: 85vh; border-radius: 12px 12px 0 0; border-bottom: 0;
+    /* iOS Safari's vh is the large viewport, under the browser bar. */
+    max-height: 85dvh;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .dagi-head { min-height: 44px; }
+  .dagi-title { font-size: 15px; }
+  .dagi-close { min-width: 44px; min-height: 44px; font-size: 16px; }
+  /* 16 px: iOS zooms the page into a smaller field. */
+  .dagi-search { min-height: 44px; font-size: 16px; }
+  .dagi-tab { min-height: 44px; font-size: 13px; }
+  .dagi-option { align-items: center; min-height: 44px; font-size: 15px; }
+  .dagi-option-meta { font-size: 12px; }
+  .dagi-credit { font-size: 12px; }
+  .dagi-notice { padding: 4px 10px; }
+  /* #740 M3b: the Map's controls panel (z-index 1000) and the map area
+     (z-index 0) are stacking contexts, so a sheet opened from the panel
+     would stay under the bottom nav and the map's own controls. */
+  #map-wrap:has(.map-controls .dagi-open),
+  .map-controls:has(.dagi-open) { z-index: var(--z-modal); }
+  /* The Packets dropdown row gained the DAGI control: it wraps instead of
+     pushing Types and Channels off the screen. */
+  .filter-bar .filter-group.filter-group-dropdowns { flex-wrap: wrap; }
+}
+@media (pointer: coarse) {
+  /* As .region-dropdown-trigger beside it: the 48 px house minimum (#630). */
+  .dagi-clear { width: 48px; height: 48px; }
+}
 
 /* Generic multi-select dropdown (Observer, Type filters) */
 .multi-select-wrap { position: relative; display: inline-flex; align-items: center; }
@@ -3584,7 +4480,8 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 .matrix-char span { display: block; text-align: center; white-space: nowrap; line-height: 1; }
 
 /* === Matrix Theme === */
-.matrix-theme .leaflet-tile-pane {
+.matrix-theme .leaflet-tile-pane,
+.matrix-theme .mc-ortho-pane {
   filter: brightness(1.1) contrast(1.2) sepia(0.6) hue-rotate(70deg) saturate(2);
 }
 .matrix-theme.leaflet-container::before {
@@ -4083,6 +4980,33 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 
 .compare-table { font-size: var(--fs-sm); }
 
+/* ── #122 reference-to-many mode ─────────────────────────────────── */
+.compare-mode-toggle {
+  display: flex; gap: var(--space-xs); margin-bottom: var(--space-sm); flex-wrap: wrap;
+}
+.compare-ref-headline {
+  margin-bottom: var(--space-sm);
+}
+.compare-ref-headline-name {
+  font-size: var(--fs-lg); font-weight: var(--fw-semibold); color: var(--text);
+}
+.compare-ref-headline-sub {
+  font-size: var(--fs-sm); color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.compare-ref-note {
+  font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.5;
+  margin: 0 0 var(--space-sm);
+}
+.compare-ref-table { font-size: var(--fs-sm); }
+.compare-ref-table .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.compare-ref-sort-btn {
+  background: transparent; border: none; color: var(--text-muted);
+  font-size: var(--fs-sm); font-weight: var(--fw-semibold); cursor: pointer;
+  padding: 2px 0; white-space: nowrap;
+}
+.compare-ref-sort-btn:hover { color: var(--text); }
+.compare-ref-sort-btn.active { color: var(--accent); }
+
 @media (max-width: 640px) {
   .compare-selector { flex-direction: column; align-items: stretch; }
   .compare-select-group { min-width: 0; }
@@ -4247,6 +5171,11 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 
 .rf-cell-sparkline { height: 24px; margin: 2px 0; overflow: hidden; }
 .rf-cell-stats { display: flex; gap: 8px; font-size: 10px; color: var(--text-muted); }
+/* #479 — a fourth stat ("TX 1h") wraps between items, never inside one */
+.rf-cell-stats { flex-wrap: wrap; row-gap: 0; }
+.rf-cell-stats > span { white-space: nowrap; }
+/* #479 — rolling 1 h TX airtime at or over the duty-cycle threshold */
+.airtime-over { color: var(--danger); font-weight: 600; }
 
 /* Side panel for observer detail */
 .rf-health-detail {
@@ -4382,31 +5311,47 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 
 /* === #630 — Mobile Accessibility Fixes === */
 
-/* #630-1: Touch targets — minimum 44px on touch devices */
+/* #630-1: Touch targets — 48px house minimum on touch devices (#2052, #235) */
 @media (pointer: coarse) {
   .filter-bar .btn,
   .filter-group .btn,
   .tab-btn,
   .filter-bar input,
   .filter-bar select,
-  .nav-btn,
   .region-pill,
+  .region-quick-pick,
   .region-dropdown-trigger,
   .multi-select-trigger,
   .node-count-pill,
   .analytics-time-range button,
   .detail-back-btn,
-  .filter-toggle-btn {
-    min-height: 44px;
-    min-width: 44px;
+  .filter-toggle-btn,
+  .time-window-select {
+    min-height: 48px;
+    min-width: 48px;
   }
   .filter-bar input,
-  .filter-bar select {
-    height: 44px;
+  .filter-bar select,
+  .time-window-select {
+    height: 48px;
   }
   .region-dropdown-trigger,
   .multi-select-trigger {
-    height: 44px;
+    height: 48px;
+  }
+  /* #314: two controls the #239 sweep did not cover. Measured at 375x812
+     with a touch user agent, the swipe tip's "Got it" was 26 px tall and
+     the packets reveal pill 18 px. Both are compact by design on desktop
+     (a hint chip and a column-header badge), so the bump is touch-only,
+     like the rest of this block. Both need the flex centring too: their
+     labels are smaller than the box they now sit in. */
+  .gesture-hint-dismiss,
+  .col-hidden-pill {
+    min-height: 48px;
+    min-width: 48px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 }
 
@@ -4428,6 +5373,19 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
+  /* #839 — a node opens as its own page here, so the empty side pane's
+     "Select a node" placeholder only took height from the list. */
+  .nodes-page .split-layout .panel-right.empty { display: none; }
+}
+
+/* #839 — Nodes in phone landscape (640x360, 568x320): the stacked top bar
+   and region chips fill #app above the bottom nav and left the list's own
+   scroll box ~12px, so no row could be reached. On a short phone the page
+   scrolls as one: the top bar scrolls away and the list follows it. */
+@media (max-width: 640px) and (max-height: 500px) {
+  .nodes-page { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .nodes-page .split-layout { flex: none; height: auto; overflow: visible; }
+  .nodes-page .panel-left { flex: none; }
 }
 
 /* #630-5: Analytics tabs — horizontal scroll on small screens */
@@ -4508,6 +5466,16 @@ th.sort-active { color: var(--accent, #60a5fa); }
 .map-side-pane .pane-toggle { cursor: pointer; padding: 8px; font-size: 14px; text-align: center; }
 .map-side-pane .pane-content { display: none; }
 .map-side-pane.expanded .pane-content { display: block; }
+/* #123: the Map Controls panel and its toggle belong to the Leaflet area, so
+   keep them clear of the Path Inspector pane (collapsed 32px, expanded
+   320px); otherwise they cover the pane and its toggle. Below 641px the pane
+   is hidden and the mobile rules place the controls. */
+@media (min-width: 641px) {
+  #mapSidePane ~ .map-controls { right: calc(32px + 12px); transition: right 0.2s; }
+  #mapSidePane ~ .map-controls-toggle { right: calc(32px + 10px); transition: right 0.2s; }
+  #mapSidePane.expanded ~ .map-controls { right: calc(320px + 12px); }
+  #mapSidePane.expanded ~ .map-controls-toggle { right: calc(320px + 10px); }
+}
 /* #1236: on mobile the path-inspector side pane was eating 32px of horizontal
    width (flex:0 0 32px) inside #map-wrap, leaving an unused gutter on the
    right of the leaflet canvas. Path Inspector is a desktop-only convenience;
@@ -4780,6 +5748,14 @@ body[data-cb-preset="achromat"] {
 .mc-mb-label.status-confirmed { border-left-color: var(--mc-mb-confirmed); }
 .mc-mb-label.status-suspected { border-left-color: var(--mc-mb-suspected); }
 .mc-mb-label.status-unknown   { border-left-color: var(--mc-mb-unknown);   }
+/* #807: hash size unknown (no advert known) — the label shows the 1-byte
+   prefix plus an ellipsis; a dashed outline in the label's own text colour
+   keeps it from reading as a confirmed 1-byte repeater. */
+.mc-mb-label.hs-unknown {
+  font-style: italic;
+  outline: 1px dashed currentColor;
+  outline-offset: -1px;
+}
 
 /* Forced-colors / Windows High Contrast — degrade gracefully (audit item 7). */
 @media (forced-colors: active) {
@@ -4911,18 +5887,31 @@ body[data-cb-preset="achromat"] {
   border-radius: 8px;
   cursor: pointer;
   user-select: none;
+  /* The pill is the last flex item, after the chips that overflow, so on its
+   * own it sat past the clipped edge of .path-hops and never showed (#217).
+   * Stick it to the right edge, over the last chip. */
+  position: sticky; right: 0; z-index: 1;
 }
-.path-overflow-pill:hover { color: var(--text); background: var(--bg-hover, var(--surface)); }
+/* Opaque on hover: the pill sits over the last chip, and --bg-hover is a
+ * translucent tint that let the chip show through. */
+.path-overflow-pill:hover, .path-overflow-pill:focus-visible { color: var(--text); background: var(--row-hover); border-color: var(--accent); }
 .path-popover {
   position: absolute; z-index: var(--z-popover);
   background: var(--surface); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.35);
-  padding: 8px 10px; max-width: min(360px, calc(100vw - 32px)); max-height: 240px; overflow: auto;
+  padding: 8px 10px; max-width: min(480px, calc(100vw - 32px)); max-height: min(420px, 60vh); overflow: auto;
   font-family: var(--mono); font-size: 12px;
 }
 .path-popover .path-popover-title { font-family: var(--font); font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
 .path-popover .hop, .path-popover .hop-named { white-space: nowrap; }
+/* Full path, one hop per line (packets.js _pathPopoverHtml). Each hop sits in
+ * its own .path-hops so chips keep their table styling, minus the 120px cap:
+ * the popover exists to show the names the table had to cut. */
+.path-popover-list { list-style: none; margin: 0; padding: 0; }
+.path-popover-list li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.path-popover-idx { min-width: 2ch; text-align: right; color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.path-popover .path-hops, .path-popover .path-hops .hop-named { max-width: none; }
 .fux-popover-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
 .fux-popover-close { background: transparent; border: none; color: var(--text-muted); font-size: 16px; cursor: pointer; padding: 0 4px; }
 .fux-popover-close:hover { color: var(--text); }
@@ -4948,7 +5937,8 @@ body[data-cb-preset="achromat"] {
 .fux-ctx-item { display: block; width: 100%; text-align: left; background: transparent; border: none; color: var(--text); padding: 5px 12px; font-size: 12px; cursor: pointer; font-family: var(--mono); }
 .fux-ctx-item:hover { background: var(--bg-hover, rgba(120,160,255,0.12)); }
 
-.fux-saved-menu { position: absolute; top: 100%; left: 0; min-width: 320px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; z-index: var(--z-dropdown); box-shadow: 0 4px 14px rgba(0,0,0,0.3); margin-top: 4px; padding: 4px 0; }
+/* #72: the Saved trigger sits at the right end of the filter row — anchor right and bound the width so long expressions ellipsize instead of widening #pktLeft. */
+.fux-saved-menu { position: absolute; top: 100%; right: 0; width: max-content; min-width: 320px; max-width: min(480px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; z-index: var(--z-dropdown); box-shadow: 0 4px 14px rgba(0,0,0,0.3); margin-top: 4px; padding: 4px 0; }
 .fux-saved-menu.hidden { display: none; }
 .fux-saved-header { padding: 6px 10px; font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
 .fux-saved-item { display: flex; align-items: center; gap: 8px; padding: 5px 10px; cursor: pointer; font-size: 12px; }
@@ -5022,7 +6012,9 @@ td[data-filter-field] { cursor: context-menu; }
   justify-content: space-between;
   padding: 14px 16px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface-2, var(--surface));
+  /* nav-drawer.css paints the title and close button with --nav-text(-muted),
+     so the header sits on the nav colours in every theme (#150). */
+  background: var(--nav-bg2);
 }
 .nav-drawer-title {
   font-weight: 700;
@@ -5156,15 +6148,23 @@ body { touch-action: pan-y; }
  * the wrap defaults to block (100% of body width). Combined with
  * .gesture-hint-bottom { left:50%; transform:translateX(-50%) } that
  * pushed the wrap off-screen-left on narrow viewports (#1065 follow-up).
+ * Stacked just under the modal scrim (#818): a hint stays above the
+ * page, the bottom nav and the drawers, but never covers a dialog on the
+ * --z-modal scale (the Skraafoto viewer at 375x560 on a first visit).
+ * The transient status UI at 9000 to 9999 (the warm-up banner, toasts,
+ * the analytics warm-up pill) now lies above a hint, as it should.
  * Comments live ABOVE the rule body, not interleaved, because a stray
  * em-dash or sequence inside the body has historically caused some CSS
- * parsers to drop the entire rule from the CSSOM. */
+ * parsers to drop the entire rule from the CSSOM.
+ * #911: only the Got it button takes taps. The pill body and its text are
+ * pointer-events none, so a tap on them reaches the control underneath. */
 .gesture-hint {
   position: fixed;
-  z-index: 9999;
+  z-index: calc(var(--z-modal-backdrop) - 1);
   width: -moz-fit-content;
   width: fit-content;
   max-width: 360px;
+  max-width: min(360px, calc(100vw - 32px));
   pointer-events: none !important;
   opacity: 1;
   animation-name: gesture-hint-slide-in;
@@ -5188,7 +6188,7 @@ body { touch-action: pan-y; }
   top: 80px;
 }
 .gesture-hint-inner {
-  pointer-events: auto;
+  pointer-events: none;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -5280,7 +6280,7 @@ body { touch-action: pan-y; }
 .ch-back {
   display: none; background: none; border: 0; cursor: pointer;
   color: var(--text); font-size: 24px; line-height: 1;
-  min-width: 40px; min-height: 40px; padding: 0 8px;
+  min-width: 48px; min-height: 48px; padding: 0 8px;
   border-radius: 6px;
   align-items: center; justify-content: center;
   -webkit-tap-highlight-color: rgba(0,0,0,.08);
@@ -5567,6 +6567,10 @@ body.embed #app.app-fixed {
 .path-symbols-legend[open] > summary { color: var(--text, inherit); }
 .path-symbols-legend .path-legend-list {
   position: absolute;
+  right: 0;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 32px));
+  text-align: left;
   z-index: 50;
   margin: 4px 0 0;
   padding: 8px 12px;
@@ -5577,7 +6581,6 @@ body.embed #app.app-fixed {
   box-shadow: 0 2px 6px rgba(0,0,0,0.15);
   font-size: 11px;
   line-height: 1.5;
-  max-width: 360px;
   color: var(--text, inherit);
 }
 .path-symbols-legend .path-legend-list li { padding: 2px 0; }
@@ -5627,6 +6630,64 @@ body.embed #app.app-fixed {
   padding: 0.1rem 0;
 }
 
+/* #894 — stale MQTT source: compact dismissible pill(s), not the banner.
+ * The row sits in normal flow right after .top-nav (warmup-banner.js inserts
+ * it there), right-aligned, so it takes its own row and never overlays page
+ * content. No position / z-index on purpose. Fixed-height pages subtract
+ * its height through --warmup-pills-h (set from JS, 0px when hidden).
+ * Colours: theme variables only. */
+.warmup-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 4px var(--gutter, 8px);
+  min-width: 0;
+}
+.warmup-pills--hidden { display: none; }
+/* Embedded views have no nav and claim the full viewport. */
+body.embed .warmup-pills { display: none !important; }
+.warmup-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding: 0 0 0 12px;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--warning);
+  border-radius: 22px;
+  box-shadow: 0 2px 6px var(--shadow);
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+.warmup-pill__text { min-width: 0; overflow-wrap: anywhere; }
+.warmup-pill__close {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+}
+.warmup-pill__close:focus-visible { outline: 2px solid var(--warning); outline-offset: -4px; }
+.warmup-pill__more {
+  padding: 2px 10px;
+  font-size: 0.75rem;
+  color: var(--text);
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
 /* ============================================================
  * #1715 — Neighbor-graph role swatches (`#ngRoleChecks` labels).
  *
@@ -5651,3 +6712,1099 @@ body.embed #app.app-fixed {
 .privacy-page ul { padding-left: 1.3em; }
 .privacy-page li { margin: 6px 0; }
 .privacy-page a { color: var(--link-color); }
+
+/* Scope audit keeps search/pagination stable and at most 50 rows mounted. */
+.scope-audit-controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:12px 0; }
+.scope-audit-controls input { max-width:100%; padding:6px 8px; background:var(--bg-secondary); color:var(--text); border:1px solid var(--border); border-radius:4px; }
+.scope-audit-table-wrap { overflow-x:auto; }
+.scope-audit-chip { display:inline-block; margin:2px 4px 2px 0; padding:2px 5px; border:1px solid var(--border); border-radius:4px; }
+.scope-audit-caution { color:var(--warning); }
+#scopes-panel-audit .scope-audit-table { width:100%; min-width:900px; table-layout:fixed; }
+#scopes-panel-audit .scope-audit-table th:nth-child(1) { width:20%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(2) { width:15%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(3) { width:25%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(4) { width:15%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(5) { width:25%; }
+#scopes-panel-audit .scope-audit-table th,
+#scopes-panel-audit .scope-audit-table td { white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; vertical-align:top; }
+/* #414 scope transport */
+#scope-audit-intro p { margin:0 0 6px; }
+.scope-audit-controls [hidden] { display:none; }
+.scope-audit-selected { border-color:var(--accent); color:var(--accent); }
+@media (max-width: 640px) {
+  #scopes-panel-audit .scope-transport-table { min-width:0; table-layout:auto; }
+  #scopes-panel-audit .scope-transport-table thead { display:none; }
+  #scopes-panel-audit .scope-transport-table,
+  #scopes-panel-audit .scope-transport-table tbody,
+  #scopes-panel-audit .scope-transport-table tr,
+  #scopes-panel-audit .scope-transport-table td { display:block; width:auto; }
+  #scopes-panel-audit .scope-transport-table tr { border-bottom:1px solid var(--border); padding:6px 0; }
+  #scopes-panel-audit .scope-transport-table td { border:0; padding:2px 4px; max-width:none; }
+  #scopes-panel-audit .scope-transport-table td::before { content:attr(data-label); display:block; font-size:0.8em; color:var(--text-muted); }
+  .scope-audit-transport .scope-audit-controls input { width:100%; }
+}
+/* end #414 */
+
+/* Regions map: an observed-relay footprint, deliberately distinct from RF coverage. */
+.regions-page { display: flex; flex-direction: column; height: 100%; min-height: 420px; padding: 16px; gap: 8px; }
+.regions-page h1, .regions-page p { margin: 0; }
+.regions-note { color: var(--text-muted); max-width: 85ch; }
+.regions-controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.regions-controls label { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.regions-controls select, .regions-controls button { background: var(--surface); color: var(--text-primary); border: 1px solid var(--border); padding: 6px 8px; border-radius: 6px; }
+.regions-controls select { max-width: 100%; }
+.regions-controls button { cursor: pointer; }
+.regions-status { color: var(--text-muted); min-height: 2.4em; }
+.regions-snapshot, .regions-coverage, .regions-details { color: var(--text-muted); font-size: 0.85em; overflow-wrap: anywhere; }
+.regions-details summary { cursor: pointer; }
+.regions-details p { margin-top: 6px; }
+.regions-coverage[data-coverage-state="partial"], .regions-coverage[data-coverage-state="unknown"], .regions-coverage[data-coverage-state="loading"] { border-left: 3px solid var(--warning); padding-left: 8px; }
+.regions-snapshot:empty, .regions-coverage:empty { display: none; }
+.regions-leaflet { flex: 1; min-height: 280px; border: 1px solid var(--border); border-radius: 8px; }
+@media (max-width: 600px) {
+  .regions-page { padding: 10px; overflow-y: auto; }
+  .regions-controls { align-items: stretch; }
+  .regions-controls label { flex: 1 1 140px; }
+  .regions-controls select { min-width: 0; flex: 1; }
+}
+
+/* #614 — "new version available" notice (version-notice.js) */
+.version-notice {
+  position: fixed;
+  left: 50%;
+  bottom: calc(16px + var(--bottom-nav-reserve, 0px));
+  transform: translateX(-50%);
+  z-index: var(--z-popover, 300);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 12px;
+  box-sizing: border-box;
+  max-width: calc(100vw - 32px);
+  padding: 10px 14px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px var(--shadow);
+  font-size: 14px;
+}
+.version-notice-btn {
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.version-notice-reload {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: var(--text-on-accent);
+}
+.version-notice-btn:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+
+/* #634 (upstream 2344): an unrendered chart canvas keeps its 300px intrinsic
+   width, which overflowed the single-column grid on 320px screens. */
+.obs-charts canvas { max-width: 100%; }
+
+/* === #681 M4: Path profile tool (Map page) ===============================
+ * The toggle sits under the map-controls gear; the panel is a bottom sheet
+ * inside #map-wrap, so it never covers the bottom-nav (#app.app-fixed has
+ * already subtracted --bottom-nav-reserve).
+ *
+ * Every interactive control is at least 48px in both axes — #235/#2078 and
+ * #666/#667 are the history here — and the panel body is its own scroll box
+ * with a max-height rather than simply tall, which is what #672 showed a
+ * short landscape viewport needs for the last control to stay reachable.
+ */
+.map-profile-toggle {
+  position: absolute;
+  top: 54px;
+  right: 10px;
+  z-index: 1001;
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px var(--shadow);
+}
+.map-profile-toggle:hover { background: var(--row-hover); }
+.map-profile-toggle:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.map-profile-toggle.active { background: var(--selected-bg); border-color: var(--los-line); }
+/* A mouse does not need a 48px target; keep the gear and the ruler the same
+   size on pointer-precise devices. */
+@media (pointer: fine) {
+  .map-profile-toggle { top: 54px; width: 36px; height: 36px; }
+}
+#mapSidePane ~ .map-profile-toggle { right: calc(32px + 10px); transition: right 0.2s; }
+#mapSidePane.expanded ~ .map-profile-toggle { right: calc(320px + 10px); }
+@media (max-width: 640px) {
+  #mapSidePane ~ .map-profile-toggle,
+  #mapSidePane.expanded ~ .map-profile-toggle { right: 10px; }
+}
+
+/* #941 — Predicted reach: the toggle sits under the Path profile ruler. */
+.map-reach-toggle {
+  position: absolute;
+  top: 110px;
+  right: 10px;
+  z-index: 1001;
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px var(--shadow);
+}
+.map-reach-toggle:hover { background: var(--row-hover); }
+.map-reach-toggle:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.map-reach-toggle.active { background: var(--selected-bg); border-color: var(--reach-centre); }
+/* Without the ruler (no DHM, only the foreign fill) it takes its place. */
+.map-reach-toggle:not(.map-profile-toggle ~ .map-reach-toggle) { top: 54px; }
+@media (pointer: fine) {
+  .map-reach-toggle { top: 98px; width: 36px; height: 36px; }
+  .map-reach-toggle:not(.map-profile-toggle ~ .map-reach-toggle) { top: 54px; }
+}
+#mapSidePane ~ .map-reach-toggle { right: calc(32px + 10px); transition: right 0.2s; }
+#mapSidePane.expanded ~ .map-reach-toggle { right: calc(320px + 10px); }
+@media (max-width: 640px) {
+  #mapSidePane ~ .map-reach-toggle,
+  #mapSidePane.expanded ~ .map-reach-toggle { right: 10px; }
+}
+.leaflet-container.reach-picking { cursor: crosshair; }
+.reach-layer { image-rendering: auto; }
+.reach-centre-dot { fill: var(--reach-centre); stroke: var(--card-bg); }
+
+/* Beside the zoom and layer buttons, never over them. */
+.reach-panel {
+  position: absolute;
+  left: 68px;
+  bottom: 30px;
+  z-index: 1002;
+  width: 300px;
+  max-width: calc(100% - 78px);
+  max-height: calc(100% - 120px);
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  box-shadow: 0 2px 10px var(--shadow);
+}
+.reach-panel[hidden] { display: none; }
+.reach-panel.is-busy .reach-legend { opacity: 0.5; }
+.reach-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.reach-title { margin: 0; font-size: var(--fs-md, 1rem); }
+.reach-close {
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 1.4em;
+  cursor: pointer;
+}
+.reach-close:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.reach-centre, .reach-status, .reach-model, .reach-budget { margin: 4px 0; overflow-wrap: anywhere; }
+.reach-status[hidden] { display: none; }
+.reach-status.is-error { color: var(--danger); }
+.reach-model { color: var(--text-muted); }
+.reach-legend { margin: 6px 0; }
+.reach-legend-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.reach-legend-label { flex: 1; }
+.reach-legend-pct { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.reach-legend-note { margin: 4px 0 0; color: var(--text-muted); }
+.reach-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--border); flex: none; }
+.reach-swatch-good { background: var(--reach-good); }
+.reach-swatch-marginal { background: var(--reach-marginal); }
+.reach-swatch-weak { background: var(--reach-weak); }
+.reach-group { margin: 6px 0; padding: 4px 8px 6px; border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
+.reach-group legend { padding: 0 4px; color: var(--text-muted); }
+.reach-field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; align-items: center; gap: 6px; margin: 3px 0; }
+.reach-field-label { overflow-wrap: anywhere; }
+.reach-field-value { min-width: 4.5em; text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.reach-input { width: 100%; min-width: 0; min-height: 32px; box-sizing: border-box; }
+.reach-input.is-invalid { outline: 2px solid var(--danger); }
+/* #962 — the environment loss's hint and its reset to the operator's value. */
+.reach-field-hint { margin: 0 0 4px; color: var(--text-muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.reach-env-reset {
+  min-height: 32px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.reach-env-reset:hover:not(:disabled) { background: var(--row-hover); }
+.reach-env-reset:disabled { color: var(--text-muted); cursor: default; }
+.reach-env-reset:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.reach-credit { color: var(--text-muted); }
+.reach-credit-line { margin: 4px 0; overflow-wrap: anywhere; }
+/* #941 M2 — nodes in reach: the class chips open the list below them. */
+.reach-nir { margin: 6px 0; }
+.reach-nir[hidden] { display: none; }
+.reach-nir-title { margin: 6px 0 4px; font-size: var(--fs-sm); }
+.reach-nir-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.reach-nir-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.reach-nir-chip[hidden] { display: none; }
+.reach-nir-chip:hover { background: var(--row-hover); }
+.reach-nir-chip.active { background: var(--selected-bg); border-color: var(--reach-centre); }
+.reach-nir-chip:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.reach-nir-count { font-weight: 700; font-variant-numeric: tabular-nums; }
+.reach-nir-note { margin: 4px 0; color: var(--text-muted); overflow-wrap: anywhere; }
+.reach-nir-list { list-style: none; margin: 4px 0; padding: 0; max-height: 220px; overflow-y: auto; border-top: 1px solid var(--border); }
+.reach-nir-list[hidden] { display: none; }
+.reach-nir-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  column-gap: 8px;
+  align-items: center;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.reach-nir-item[hidden] { display: none; }
+.reach-nir-item .reach-swatch { grid-row: 1 / span 2; }
+.reach-nir-link { grid-column: 2; color: var(--link-color); overflow-wrap: anywhere; }
+/* The whole row is the link's tap target, not just its text. */
+.reach-nir-link::after { content: ''; position: absolute; inset: 0; }
+.reach-nir-meta { grid-column: 2; color: var(--text-muted); font-size: 0.9em; }
+.reach-nir-margin { grid-column: 3; grid-row: 1 / span 2; font-variant-numeric: tabular-nums; }
+.reach-swatch-none { background: transparent; }
+@media (max-width: 640px) {
+  /* A sheet along the bottom, its own scroller, so the map keeps the top. */
+  /* scroll-padding-top: an item scrolled into view (focus, a link) is not
+     left under the sticky head. */
+  .reach-panel { left: 8px; right: 8px; bottom: 8px; width: auto; max-width: none; max-height: 46%; scroll-padding-top: 64px; }
+  /* Touch: the chips and list rows are full-size targets. */
+  .reach-nir-chip { min-height: 44px; }
+  .reach-env-reset { min-height: 44px; }
+  .reach-nir-item { min-height: 44px; }
+  /* The list scrolls on its own, shorter than the sheet's body below the
+     head (the sheet is 46% of the map), so a thumb's height of the sheet
+     always shows beside it to swipe the sheet by. */
+  .reach-nir-list { max-height: clamp(96px, calc(46vh - 150px), 220px); }
+  /* Landscape phone (touch, wider than tall, under 480 px high): the map is
+     only about 250 px tall, so no sheet height clears the map controls
+     (zoom, layers, the toggles reach down to y=218 at 640x360) and a
+     full-width sheet always covers some. So the sheet stands between the
+     two control columns, as on desktop (68 px in from each side, 30 px up
+     from the bottom, clear of the attribution), and may use the map's
+     height less its top margin. The list is what is left of its body less
+     a strip (about 80 px) of sheet to swipe by: the sheet is the viewport
+     less 150 px, the head 55 px. One row is the least it shows: 44 px and
+     the list's 1 px top border. The bound is 479 px, so a 640x480 window is
+     not caught, and touch only: a mouse has no swipe to trap. */
+  @media (max-height: 479px) and (orientation: landscape) and (pointer: coarse) {
+    .reach-panel { left: 68px; right: 68px; bottom: 30px; max-height: calc(100% - 42px); }
+    .reach-nir-list { max-height: max(45px, calc(100vh - 285px)); }
+  }
+  /* #959: a map popup is taller than the map above the sheet, and the
+     sheet sits above Leaflet's panes, so it would cover the popup's links.
+     It steps aside while a popup is open (map.js onPopupSheet); the reach
+     stays on the map and the sheet comes back when the popup closes. */
+  .has-map-popup .reach-panel { display: none; }
+  /* #982: so do the map buttons (zoom, layers, the settings, ruler and
+     reach toggles). A popup fills most of a phone's map, and one under them
+     had its × or its text covered; they come back when it closes. */
+  .has-map-popup .leaflet-top .leaflet-control,
+  .has-map-popup .map-controls-toggle,
+  .has-map-popup .map-profile-toggle,
+  .has-map-popup .map-reach-toggle { visibility: hidden; }
+  /* The head and its × stay at the top of the scrolled sheet; it covers
+     the sheet's top padding so nothing scrolls past above it. */
+  .reach-head {
+    position: sticky;
+    top: -10px;
+    z-index: 1;
+    margin: -10px -12px 0;
+    padding: 10px 12px 0;
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+.map-profile-hint {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1002;
+  max-width: min(90%, 420px);
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  box-shadow: 0 2px 6px var(--shadow);
+  text-align: center;
+}
+.map-profile-hint[hidden] { display: none; }
+/* #839 §7: a profile link that could not be read. */
+.map-profile-hint.is-error { border-color: var(--danger); border-left-width: 4px; }
+.leaflet-container.tp-picking { cursor: crosshair; }
+
+.tp-path-line { stroke: var(--los-line); stroke-opacity: 0.95; }
+.tp-path-ghost { stroke: var(--los-line); stroke-opacity: 0.55; }
+/* #781: the chart cursor's point on the path. A ring in the panel's own
+   surface colour keeps the dot readable on any tile. */
+.tp-cursor-dot { fill: var(--tp-cursor-dot); stroke: var(--card-bg); }
+
+/* #721: the draggable A/B ends. The icon box is the 48px touch target and
+   stays transparent; the visible disc inside it is the same white-on-
+   --accent-strong tag as the panel's A/B (4.83:1, see .tp-end-tag). */
+.tp-end-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: grab;
+  touch-action: none;
+}
+.tp-end-marker:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: -6px; border-radius: 50%; }
+.tp-end-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--card-bg);
+  background: var(--accent-strong);
+  color: var(--text-on-accent);
+  font-size: 13px;
+  font-weight: var(--fw-semibold, 600);
+  box-shadow: 0 2px 6px var(--shadow);
+  pointer-events: none;
+}
+.leaflet-dragging .tp-end-marker,
+.leaflet-container.tp-dragging { cursor: grabbing; }
+.tp-end-marker.leaflet-drag-target .tp-end-dot { transform: scale(1.15); }
+
+.tp-panel {
+  /* The cap is a variable so the Map page can keep a linked path clear of
+     the panel before the chart has grown it to the cap (#746). */
+  --tp-panel-max-h: 420px;
+  /* #839 §2: the map the open profile always leaves above it, so the path,
+     its ends and the chart cursor's dot can be seen beside the chart. It is
+     the fit's free strip (FIT_MIN_FREE_PX) plus its two margins; map.js
+     reads both variables back for the fit (TerrainProfile.panelCap). */
+  --tp-map-keep: 184px;
+  --tp-panel-min-h: 120px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1200;
+  display: none;
+  flex-direction: column;
+  min-height: 0;
+  /* Never taller than the map area minus a strip of map, and never taller
+     than the chart plus its controls need; the body scrolls. */
+  max-height: min(var(--tp-panel-max-h), max(var(--tp-panel-min-h), calc(100% - var(--tp-map-keep))));
+  background: var(--card-bg);
+  color: var(--text);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -8px 24px var(--shadow);
+}
+.tp-panel.is-open { display: flex; }
+/* The compact bar and the folded head are short; only the grown panel
+   keeps the strip of map (#790 keeps them whole on any screen). */
+.tp-panel.tp-compact,
+.tp-panel.tp-folded { max-height: min(var(--tp-panel-max-h), calc(100% - 12px)); }
+.tp-head {
+  flex: 0 0 auto;
+  display: flex;
+  /* #796 F5: one line. The chips wrap inside .tp-chips, never the row, so
+     Copy and Close always sit beside the title. */
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card-bg);
+}
+.tp-title { flex: 0 0 auto; margin: 0; font-size: var(--fs-sm); font-weight: var(--fw-semibold, 600); white-space: nowrap; }
+.tp-chips {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.tp-close {
+  flex: 0 0 auto;
+  margin-left: auto;
+  min-width: 48px;
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.tp-close:hover { color: var(--text); background: var(--row-hover); }
+.tp-close:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+
+/* The scroll box. overscroll-behavior keeps a flick inside the panel from
+   panning the map underneath it. */
+.tp-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+}
+.tp-chart { width: 100%; }
+.tp-chart .tp-svg { width: 100%; height: 180px; display: block; }
+
+/* The chart's text is HTML, not SVG <text>. The 820x300 viewBox is
+   stretched to the panel width with preserveAspectRatio="none", which
+   squashed every in-SVG label to about 3px tall on a 360px phone. These
+   spans are positioned in percentages of the same box — exact, because
+   the mapping is linear per axis — and render at a real font size. */
+.tp-plot { position: relative; width: 100%; }
+/* #781: the hover cursor. A horizontal drag along the chart moves it, a
+   vertical one still scrolls the panel. */
+.tp-plot[tabindex] { touch-action: pan-y; cursor: crosshair; border-radius: 4px; }
+.tp-plot[tabindex]:focus-visible { outline: 2px solid var(--los-line); outline-offset: 2px; }
+.tp-plot > .tp-cursor-readout {
+  position: absolute;
+  top: 4px;
+  z-index: 1;
+  padding: 3px 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.tp-plot > .tp-cursor-readout > div:first-child { font-weight: var(--fw-semibold, 600); }
+.tp-plot > span {
+  position: absolute;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+  white-space: nowrap;
+  pointer-events: none;
+  /* A halo in the panel's own surface colour: these labels float over the
+     chart, and a tall profile can push the terrain fill under any of them. */
+  text-shadow: 0 0 3px var(--card-bg), 0 0 3px var(--card-bg), 0 0 2px var(--card-bg);
+}
+/* Right-aligned into the plot's left gutter, centred on its gridline. */
+.tp-ax-y { transform: translate(-100%, -50%); padding-right: 4px; }
+.tp-ax-x0 { transform: translateY(-50%); }
+.tp-ax-x1 { transform: translate(-100%, -50%); }
+.tp-ax-gap { transform: translate(-50%, -100%); }
+.tp-plot > .tp-pin-lab {
+  position: absolute;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+  text-shadow: 0 0 3px var(--card-bg), 0 0 3px var(--card-bg), 0 0 2px var(--card-bg);
+}
+.tp-pin-a { transform: translateY(-100%); }
+.tp-pin-b { transform: translate(-100%, -100%); }
+.tp-plot-msg {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 12px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.tp-status { margin: 0; padding: 18px 8px; text-align: center; color: var(--text-muted); font-size: var(--fs-sm); }
+.tp-detail { margin: 6px 0; font-size: var(--fs-sm); color: var(--text-muted); }
+.tp-meta { margin: 6px 0 0; font-size: var(--fs-sm); color: var(--text-muted); }
+/* The chart's footer: directly under the plot it credits, so the licence
+   line is on screen with the chart rather than at the foot of a scroll box
+   the viewer may never reach. */
+.tp-credit-line { margin: 4px 0 0; font-size: 11px; line-height: 1.3; color: var(--text-muted); }
+/* #738 M2 — the Copernicus credit of a mixed profile, under the DHM one;
+   the full Art. 6(b) line folds out of "Full credit". */
+.tp-credit-fill[hidden], .tp-mixed-note[hidden] { display: none; }
+.tp-credit-full { margin: 0; font-size: 11px; line-height: 1.3; color: var(--text-muted); }
+.tp-credit-more { cursor: pointer; color: var(--link-color, var(--accent)); width: max-content; }
+.tp-credit-more:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+/* A touch target of its own on a phone, like the credit links (#711). */
+@media (pointer: coarse) { .tp-credit-more { padding: 15px 0; } }
+/* The note a mixed verdict carries: a caveat on the verdict, in the warn
+   tone the other caveats use. */
+.tp-mixed-note {
+  margin: 2px 0 0;
+  padding-left: 6px;
+  border-left: 3px solid var(--warning);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.tp-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: var(--fw-medium, 500);
+  border: 1px solid var(--border);
+  background: var(--surface-2, var(--input-bg));
+  color: var(--text);
+}
+.tp-chip-ok { border-color: var(--success); color: var(--success); }
+.tp-chip-warn { border-color: var(--warning); color: var(--warning); }
+.tp-chip-bad { border-color: var(--danger); color: var(--danger); }
+.tp-chip-unknown { border-color: var(--border); color: var(--text-muted); }
+/* Plan §3.2 — the caveat that rides alongside the verdict until the viewer
+   has set both antenna heights. */
+.tp-chip-assumed { border-color: var(--warning); color: var(--warning); font-style: italic; }
+.tp-chip[hidden] { display: none; }
+/* #729 — the surface (buildings/trees) verdict. It takes the warn tone from
+   .tp-chip-warn, which is the same --warning pair the assumed caveat already
+   holds to 4.5:1 in both themes; only the wrapping differs, because
+   "Buildings/trees: Blocked" is the longest chip in the row. */
+.tp-chip-surface { white-space: normal; }
+/* #730 M3 — "Through trees" and its kin: trees mostly attenuate, so the
+   chip is a milder caveat than a building's. The warn border keeps it a
+   caveat; the text is the plain text colour, and the border dashed, so it
+   reads quieter without colour alone. Never the ok or bad pair: it is
+   not a second verdict (#729). */
+.tp-chip-mild { border-color: var(--warning); border-style: dashed; color: var(--text); }
+/* #724 M4 — the interference hint: a cellular transmitter in the 700/800/900
+   MHz bands near an end. The antenna-site layer's interference colour, so
+   the chip and the map ring read as one thing; the strong tier (within
+   100 m) is filled. Its line under the detail text says what it means. */
+.tp-chip-mast { border-color: var(--mast-interference); color: var(--mast-interference); white-space: normal; }
+.tp-chip-mast-strong { background: var(--mast-interference); color: var(--surface-1, var(--card-bg)); }
+.tp-mast-note {
+  margin: 2px 0 0;
+  padding-left: 6px;
+  border-left: 3px solid var(--mast-interference);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+.tp-mast-note[hidden] { display: none; }
+/* #723 M3 — a protected ancient monument at an end. The chip takes the
+   warn tone from .tp-chip-warn and sits under the detail line, above the
+   note that carries the wording, the type and the distance; it is kept out
+   of the title row so it can never wrap Copy/Close and push the chart
+   down in a short landscape panel. */
+.tp-chip-heritage { margin-top: 4px; white-space: nowrap; }
+.tp-heritage-note {
+  margin: 2px 0 0;
+  padding-left: 6px;
+  border-left: 3px solid var(--warning);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+.tp-heritage-note[hidden] { display: none; }
+.tp-heritage-warning { color: var(--text); font-weight: var(--fw-semibold, 600); }
+.tp-heritage-credit { font-size: 11px; }
+/* The line that explains what a surface verdict means for a radio link.
+   Shown only with the chip it explains, so it is hidden by default. */
+.tp-surface-note {
+  margin: 2px 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+.tp-surface-note[hidden] { display: none; }
+/* #730 M3 — the band's legend under the chart, and the muted note of a
+   partial classification. */
+.tp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 2px 0 0;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-muted);
+}
+.tp-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.tp-swatch { display: inline-block; width: 12px; height: 8px; border-radius: 2px; }
+.tp-swatch-b { background: var(--terrain-building); }
+.tp-swatch-v { background: var(--terrain-vegetation); }
+.tp-swatch-none { background: var(--terrain-clutter); }
+.tp-class-note {
+  margin: 2px 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+  font-style: italic;
+}
+.tp-class-note[hidden] { display: none; }
+
+/* #681 M5 — copy link sits left of close; the pair shares the auto margin. */
+.tp-copy { margin-left: auto; }
+.tp-copy + .tp-close { margin-left: 0; }
+.tp-copy:disabled { opacity: 0.45; cursor: default; }
+/* On a phone the title row cannot hold two chips and two 48 px buttons, and
+   the close button used to wrap onto a line of its own. Keep the buttons
+   beside the title and let the chip row take the second line instead. */
+@media (max-width: 520px) {
+  .tp-head { flex-wrap: wrap; }
+  .tp-chips { order: 2; flex-basis: 100%; }
+}
+/* #790: while an end is still to be picked (A, B, or a pending Move A/B) the
+   panel is a compact bar: title, the next step, Cancel and Close. The body
+   and the copy button are [hidden] by terrain-profile.js and the chips
+   leave the bar here, so a phone keeps the map above it free to tap. */
+.tp-cancel { flex: 0 0 auto; margin-left: auto; }
+/* .tp-close makes the copy button inline-flex, which beats [hidden]. */
+.tp-copy[hidden] { display: none; }
+.tp-panel.tp-compact .tp-chips { display: none; }
+/* #790 F4: the title of a finished profile is the ▾/▴ fold toggle. It
+   looks like the title, is 48 px tall, and costs the title row only the
+   glyph. Folded, the body goes and the head keeps the title, the chips
+   and the verdict as the status line. */
+.tp-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 48px;
+  min-height: 48px;
+  margin: 0;
+  padding: 0 4px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.tp-fold[hidden] { display: none; }
+.tp-fold-glyph { font-size: 14px; }
+.tp-fold:hover { background: var(--row-hover); }
+.tp-fold:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.tp-pick-status {
+  margin: 0;
+  padding: 6px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.tp-copy-status { margin: 0; padding: 2px 8px; font-size: var(--fs-sm); color: var(--text-muted); }
+.tp-copy-status:empty { display: none; }
+/* Each credit link keeps the credit line's size, but gets a 48 px hit box
+   from padding cancelled by negative margins, so the line height is not
+   disturbed. position + z-index lift that padding band above the chart and
+   the detail line it overlaps; without them it is a 48 px box but only a
+   ~36-40 px target (#711). min-width alone gives a short mark its 48 px of
+   width, so the band grows vertically only: #733 puts a second link (the
+   dataset) on this line, and horizontal padding cancelled by a negative
+   margin would make each link's box overlap its neighbour's by 4 px — the
+   later one wins the hit test, and the earlier one is no longer 48 px of
+   its own target. */
+.tp-credit-link {
+  position: relative;
+  z-index: 1;
+  display: inline-block;
+  min-width: 48px;
+  padding: 18px 0;
+  margin: -18px 0;
+  color: inherit;
+  text-decoration: underline;
+  text-align: center;
+}
+.tp-credit-link:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: -14px; }
+
+/* Where the antenna height comes from: default / operator / yours / link. */
+.tp-src-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tp-hbadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 18px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface-2, var(--input-bg));
+}
+.tp-hbadge[hidden] { display: none; }
+.tp-hbadge-default { border-style: dashed; border-color: var(--warning); color: var(--text); }
+.tp-hbadge-operator { border-color: var(--accent, var(--link-color)); color: var(--text); }
+.tp-hbadge-estimate { border-style: dashed; border-color: var(--accent, var(--link-color)); color: var(--text); }
+.tp-hbadge-yours { border-color: var(--success); color: var(--text); }
+.tp-hbadge-owner { border-width: 2px; border-color: var(--owner-badge); color: var(--text); }
+.tp-hbadge-link { border-color: var(--border); color: var(--text); }
+
+/* #920 — every node action is one compact chip: on the full node page
+   Copy URL, Copy short URL, Analytics, Reach and Observer →; in the side
+   pane Details, Analytics and Reach; in both, the module actions "Terrain
+   profile" and "Oblique photo" (#681 M5, #737 M2). 12 px on the page,
+   11 px in the pane; on phones every chip grows to a 44 px tap target, so
+   a row keeps one height. */
+.node-action-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.2;
+  text-decoration: none;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+/* The side pane gives the module chips a row of their own under the
+   Details / Analytics / Reach chips, rather than letting them wrap there
+   and double the height of that row (#711). Both rows align their chips to
+   the top instead of stretching them, so a chip that drifts in size shows
+   as a different height instead of being stretched to match its line. */
+.node-full-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+.node-detail-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 8px; align-items: flex-start; }
+.node-detail-actions:empty { display: none; }
+.node-detail .node-action-chip { padding: 2px 8px; font-size: 11px; }
+.node-terrain-icon { display: inline-flex; }
+@media (max-width: 768px) {
+  .node-action-chip { min-height: 44px; min-width: 44px; justify-content: center; }
+}
+/* #959: the same chips in the Map page's node popup, a row under View Node
+   and Show Neighbors. Leaflet colours every popup link, so the chip text
+   is set again here. */
+.map-popup-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: flex-start; }
+.map-popup-tools:empty { display: none; }
+.leaflet-container .map-popup-tools .node-action-chip { color: var(--text-on-accent); }
+/* #982: on a phone View Node and Show Neighbors are finger-sized, like the
+   chips under them, and so is the popup's × (on a dense map it is how a
+   popup is closed); the title keeps clear of the larger ×. */
+@media (max-width: 768px) {
+  .map-popup-links a { display: inline-flex; align-items: center; min-height: 44px; }
+  #map-wrap .leaflet-popup a.leaflet-popup-close-button { width: 44px; height: 44px; line-height: 44px; font-size: 24px; }
+  #map-wrap .map-popup h3 { padding-right: 24px; }
+}
+
+/* #737 M2 — "Oblique photo": the node-detail button is a node action chip
+   (#920) beside "Terrain profile"; in the Path profile a row of
+   its own under the chart (A, B, the clicked chart point). */
+.sf-icon { display: inline-flex; }
+.tp-sf-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 0; }
+.tp-sf-row[hidden] { display: none; }
+.tp-sf-label { font-size: var(--fs-sm); color: var(--text-muted); margin-right: 2px; }
+.tp-sf-btn { min-width: 48px; }
+/* #839 §12: why Chart point is off, visible on a touch screen too. */
+.tp-sf-hint { font-size: var(--fs-sm); color: var(--text-muted); }
+.tp-sf-hint[hidden] { display: none; }
+/* Both open a dialog over themselves: the browser's tap highlight would
+   be painted over the photo until the next touch. */
+.tp-sf-btn, .sf-node-action { -webkit-tap-highlight-color: transparent; }
+
+/* The viewer: a modal on the modal tokens, one step above a SlideOver
+   panel (#180) so a deep link opened on a tablet stacks over it too, and
+   so its scrim covers the bottom nav (1200) and the profile panel. On a phone the dialog stops at
+   the bottom nav's reserve, so the nav never covers any of it; the dialog
+   scrolls inside itself with the head (and Close) pinned. */
+.sf-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-modal) + 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 12px calc(12px + var(--bottom-nav-reserve, 0px));
+  background: var(--shadow);
+}
+@media (max-height: 480px), (max-width: 480px) {
+  .sf-overlay { padding: 4px 4px calc(4px + var(--bottom-nav-reserve, 0px)); }
+}
+.sf-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 760px);
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 10px);
+  box-shadow: 0 16px 48px var(--shadow);
+}
+.sf-dialog:focus { outline: none; }
+.sf-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 0 14px;
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+}
+.sf-titles { flex: 1 1 auto; min-width: 0; }
+.sf-title { margin: 0; font-size: var(--fs-md); font-weight: var(--fw-semibold, 600); }
+.sf-where { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-close {
+  flex: 0 0 auto;
+  min-width: 48px;
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+}
+.sf-close:hover { color: var(--text); background: var(--row-hover); }
+.sf-controls { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 14px; }
+.sf-dirs { display: inline-flex; gap: 4px; }
+.sf-dir {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold, 600);
+  cursor: pointer;
+}
+.sf-dir.active { background: var(--selected-bg); border-color: var(--accent); }
+.sf-dir:disabled { opacity: 0.45; cursor: default; }
+.sf-year-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--text-muted); }
+.sf-year-wrap[hidden] { display: none; }
+.sf-year {
+  min-width: 88px;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.sf-zoom {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold, 600);
+  cursor: pointer;
+}
+.sf-zoom[aria-pressed="true"] { background: var(--selected-bg); border-color: var(--accent); }
+.sf-zoom:disabled { opacity: 0.45; cursor: default; }
+.sf-close:focus-visible, .sf-dir:focus-visible, .sf-year:focus-visible, .sf-zoom:focus-visible, .sf-full:focus-visible, .sf-credit a:focus-visible {
+  outline: 2px solid var(--accent, var(--link-color));
+  outline-offset: 2px;
+}
+/* A column: the frame (empty while there is no photo) stacks above the
+   status, which stays centred instead of beside it (#839). */
+.sf-stage {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  margin: 0 14px;
+  border-radius: 6px;
+  background: var(--section-bg);
+  overflow: hidden;
+}
+.sf-img { display: block; width: 100%; height: auto; max-height: min(62vh, 680px); object-fit: contain; }
+/* A short (landscape) screen: the whole photo fits under the head and the
+   controls, so it is seen without scrolling; the rest scrolls below it. */
+@media (max-height: 480px) {
+  .sf-img { max-height: calc(100vh - var(--bottom-nav-reserve, 0px) - 128px); }
+  .sf-controls { padding: 4px 14px; }
+}
+.sf-img[hidden], .sf-status[hidden], .sf-full[hidden] { display: none; }
+/* #737 M3c: the marks layer covers the image element exactly and, with
+   xMidYMid meet, letterboxes as its object-fit: contain does, so the
+   crosshair and the line stay on the photo through any resize. */
+.sf-frame { position: relative; width: 100%; }
+.sf-marks { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: hidden; }
+.sf-marks[hidden] { display: none; }
+.sf-marks line, .sf-marks polyline { fill: none; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+.sf-cross-halo, .sf-los-halo { stroke: var(--card-bg); stroke-width: 5; opacity: 0.85; }
+.sf-cross-line { stroke: var(--danger); stroke-width: 2.5; }
+.sf-cross-approx .sf-cross-line { stroke-dasharray: 3 3; }
+.sf-los { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 8 5; }
+/* #839: the drop from the crosshair (the ground) up to the line (antenna height). */
+.sf-drop-halo { stroke: var(--card-bg); stroke-width: 4; opacity: 0.85; }
+.sf-drop { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 1 4; }
+.sf-status { margin: 0; padding: 24px 16px; text-align: center; font-size: var(--fs-sm); color: var(--text-muted); }
+.sf-dialog[data-state="error"] .sf-status { color: var(--danger); }
+.sf-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 12px; margin: 4px 14px 0; font-size: var(--fs-sm); }
+.sf-full { display: inline-flex; align-items: center; min-height: 44px; color: var(--link-color, var(--accent)); font-weight: var(--fw-semibold, 600); }
+.sf-los-note, .sf-note, .sf-credit { margin: 2px 14px 0; font-size: 12px; line-height: 1.35; color: var(--text-muted); }
+.sf-credit { margin-bottom: 12px; }
+.sf-credit a { color: inherit; text-decoration: underline; }
+/* A touch target of their own on a phone, like the profile's credit links (#711). */
+@media (pointer: coarse) { .sf-credit a { display: inline-block; min-width: 44px; padding: 12px 0; text-align: center; } }
+
+.tp-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: flex-start;
+  margin-top: 8px;
+}
+.tp-field { display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
+.tp-field-label { font-size: 11px; color: var(--text-muted); }
+.tp-end-head { display: flex; align-items: baseline; gap: 6px; }
+/* The A/B tag is white text on a solid blue disc, so it follows the
+   #1668 M2 rule for exactly that: --accent-strong (#2563eb in both themes)
+   carries --text-on-accent at 4.83:1. --los-line is a *line* colour and
+   lightens to #60a5fa on dark, where white on it is ~2.4:1 — a WCAG AA
+   failure that axe only reports as "incomplete" because the disc is
+   small and rounded. The chart's own A/B pins keep --los-line: they are
+   the line, not text on it. */
+.tp-end-tag {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent-strong); color: var(--text-on-accent, #fff);
+  font-size: 11px; font-weight: var(--fw-semibold, 600);
+}
+.tp-end-name { font-size: var(--fs-sm); font-weight: var(--fw-medium, 500); word-break: break-word; }
+.tp-assumed { font-size: 11px; color: var(--text-muted); }
+.tp-assumed.is-assumed { font-style: italic; }
+
+.tp-stepper { display: flex; align-items: stretch; gap: 4px; }
+.tp-step {
+  min-width: 48px;
+  min-height: 48px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tp-step:hover { background: var(--row-hover); }
+.tp-step:focus-visible,
+.tp-height:focus-visible,
+.tp-seg-btn:focus-visible,
+.tp-cancel:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.tp-height {
+  width: 72px;
+  min-height: 48px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+.tp-seg { display: flex; gap: 4px; flex-wrap: wrap; }
+.tp-seg-btn,
+.tp-cancel {
+  min-height: 48px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.tp-seg-btn.active { background: var(--selected-bg); border-color: var(--los-line); }
+.tp-cancel:hover { background: var(--row-hover); }
+.tp-seg-btn:disabled { opacity: 0.45; cursor: default; }
+/* #721: Move A / Move B sit under their end's name; Swap between the ends. */
+.tp-move { align-self: flex-start; min-width: 48px; }
+.tp-swap-field { min-width: 0; align-self: center; }
+.tp-swap { min-width: 48px; }
+
+/* Short screens (#666/#672): the chart gives up height first, and the body
+   still scrolls. */
+@media (max-height: 560px) {
+  .tp-chart .tp-svg { height: 108px; }
+  .tp-head { padding: 2px 8px; }
+}
+@media (max-width: 600px) {
+  .tp-field { min-width: 100%; }
+  .tp-controls { gap: 8px; }
+}
+@media (max-width: 600px) and (max-height: 560px) {
+  .tp-field { min-width: 46%; }
+}
+/* #839 §2: a short landscape screen has no height to spare for a strip of
+   map above the grown panel, so the panel docks at the right, full height,
+   and the path is fitted into the map beside it (--tp-dock, read by
+   map.js). The compact bar and the folded head stay at the bottom (#790). */
+/* Narrower still (568x320): no room to dock and no height for a strip
+   without losing the chart (#723), so the grown panel takes nearly the
+   whole map as before; folding it gives the map back. */
+@media (max-height: 560px) and (orientation: landscape) and (max-width: 599px) {
+  .tp-panel { --tp-map-keep: 12px; }
+}
+@media (max-height: 560px) and (orientation: landscape) and (min-width: 600px) {
+  .tp-panel:not(.tp-compact):not(.tp-folded) {
+    --tp-dock: right;
+    top: 0;
+    left: auto;
+    width: min(60%, 460px);
+    max-height: none;
+    border-top: none;
+    border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px var(--shadow);
+  }
+}

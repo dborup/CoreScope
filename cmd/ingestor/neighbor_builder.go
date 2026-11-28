@@ -79,18 +79,39 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 	if err := s.RefreshNeighborGraph(); err != nil {
 		log.Printf("[neighbor-build] initial neighbor-graph refresh error: %v", err)
 	}
+	//
+	// Each call reads at most neighborBuilderMaxBatch observations, so the
+	// loop ends when a call read fewer than that (caught up), not when it
+	// produced few edges (PR #190 review). Every row read is newer than the
+	// watermark, so a call that persists an edge moves the watermark; a full
+	// batch with no edge cannot, and the next call would read the same rows.
+	caughtUp := false
 	for {
-		n, err := s.buildAndPersistNeighborEdges()
+		b, err := s.buildNeighborEdges()
 		if err != nil {
 			log.Printf("[neighbor-build] initial build error: %v", err)
 			break
 		}
-		wuTotal += n
-		if n < neighborBuilderMaxBatch {
+		wuTotal += b.edges
+		if b.caughtUp() {
+			caughtUp = true
+			break
+		}
+		if b.edges == 0 {
+			log.Printf("[neighbor-build] initial build cannot move past its watermark: %d observations yielded no edge; neighbor_edges stays incomplete and the resolved_path backfill waits", b.scanned)
 			break
 		}
 	}
 	log.Printf("[neighbor-build] initial build: %d edges upserted in %s", wuTotal, time.Since(wuStart))
+	// Publish the graph with the edges the warm-up just persisted (#188):
+	// the snapshot primed above predates them, and on a fresh or restored DB
+	// it is empty. Only a build that caught up publishes a post-build graph;
+	// otherwise the first tick that catches up does it.
+	if caughtUp {
+		if err := s.refreshBuiltNeighborGraph(); err != nil {
+			log.Printf("[neighbor-build] post-build neighbor-graph refresh error: %v", err)
+		}
+	}
 
 	var stopOnce sync.Once
 	go func() {
@@ -106,11 +127,18 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 				if err := s.RefreshPrefixIndex(); err != nil {
 					log.Printf("[neighbor-build] prefix-index refresh error: %v", err)
 				}
-				n, err := s.buildAndPersistNeighborEdges()
+				b, err := s.buildNeighborEdges()
+				n := b.edges
 				// Refresh the neighbor-graph snapshot after the edges
 				// build (#1560) so the context-aware resolver picks up
-				// newly persisted adjacencies on the next ingest.
-				if grErr := s.RefreshNeighborGraph(); grErr != nil {
+				// newly persisted adjacencies on the next ingest. After a
+				// successful build that caught up, it is a post-build
+				// snapshot (#188).
+				refresh := s.RefreshNeighborGraph
+				if err == nil && b.caughtUp() {
+					refresh = s.refreshBuiltNeighborGraph
+				}
+				if grErr := refresh(); grErr != nil {
 					log.Printf("[neighbor-build] neighbor-graph refresh error: %v", grErr)
 				}
 				dur := time.Since(start)
@@ -137,10 +165,30 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 	}
 }
 
-// buildAndPersistNeighborEdges scans transmissions + observations,
+// neighborEdgesBuild reports one buildNeighborEdges call.
+type neighborEdgesBuild struct {
+	edges   int // edge rows upserted
+	scanned int // observation rows read, at most neighborBuilderMaxBatch
+}
+
+// caughtUp reports whether the scan read every observation newer than the
+// watermark it started from: it read fewer rows than the cap.
+func (b neighborEdgesBuild) caughtUp() bool {
+	return b.scanned < neighborBuilderMaxBatch
+}
+
+// buildAndPersistNeighborEdges is buildNeighborEdges reporting only the
+// number of edge upserts.
+func (s *Store) buildAndPersistNeighborEdges() (int, error) {
+	b, err := s.buildNeighborEdges()
+	return b.edges, err
+}
+
+// buildNeighborEdges scans transmissions + observations,
 // extracts edge candidates (originator↔first-hop on ADVERTs;
-// observer↔last-hop on all packet types) and upserts them into
-// neighbor_edges. Returns count of attempted upserts.
+// observer↔last-hop on flood routes) and upserts them into
+// neighbor_edges. It reports the edge upserts and the observation rows
+// read; fewer rows than neighborBuilderMaxBatch means it caught up.
 //
 // Watermark / delta semantics (#1339): the builder derives a watermark
 // from MAX(neighbor_edges.last_seen). On an empty edges table (fresh
@@ -159,12 +207,16 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 //
 // Resolution of hop-prefix → full pubkey is done via a one-shot
 // SELECT of (lowered) pubkey prefixes from nodes. Prefixes with
-// multiple candidates are skipped (matches the conservative
-// resolution rule in cmd/server/extractEdgesFromObs).
-func (s *Store) buildAndPersistNeighborEdges() (int, error) {
+// multiple candidates are skipped. The server's live builder,
+// cmd/server/neighbor_graph.go buildFromStoreWithNodes, is less strict: it
+// keeps an ambiguous prefix as a prefix edge and resolves it later
+// (resolveAmbiguousEdges, disambiguate). The flood-only last-hop rule and
+// the self-edge guards are the same on both sides.
+func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
+	var b neighborEdgesBuild
 	prefixIdx, err := buildPrefixIndex(s.db)
 	if err != nil {
-		return 0, fmt.Errorf("build prefix index: %w", err)
+		return b, fmt.Errorf("build prefix index: %w", err)
 	}
 
 	// Derive the watermark from the existing edges table. RFC3339
@@ -173,7 +225,7 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 	// query and the parse return zero → full warm-up scan.
 	var watermarkRFC sql.NullString
 	if err := s.db.QueryRow(`SELECT MAX(last_seen) FROM neighbor_edges`).Scan(&watermarkRFC); err != nil {
-		return 0, fmt.Errorf("read watermark: %w", err)
+		return b, fmt.Errorf("read watermark: %w", err)
 	}
 	var watermarkEpoch int64
 	if watermarkRFC.Valid && watermarkRFC.String != "" {
@@ -184,6 +236,9 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 
 	rows, err := s.db.Query(`SELECT
 		t.payload_type,
+		COALESCE(substr(o.raw_hex, 1, 2), ''),
+		COALESCE(t.route_type, -1),
+		t.route_mask,
 		t.decoded_json,
 		COALESCE(t.from_pubkey, ''),
 		COALESCE(o.path_json, ''),
@@ -193,21 +248,25 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 	JOIN transmissions t ON t.id = o.transmission_id
 	LEFT JOIN observers obs ON obs.rowid = o.observer_idx
 	WHERE o.timestamp > ?
+	AND o.direction IS NOT 'tx' -- TX is not a reception; NULL legacy rows still count.
 	ORDER BY o.timestamp
 	LIMIT ?`, watermarkEpoch, neighborBuilderMaxBatch)
 	if err != nil {
-		return 0, fmt.Errorf("scan observations: %w", err)
+		return b, fmt.Errorf("scan observations: %w", err)
 	}
 	defer rows.Close()
 
 	var edges []edgeRow
 	for rows.Next() {
-		var payloadType sql.NullInt64
-		var decodedJSON, fromPubkey, pathJSON, observerID string
+		b.scanned++
+		var payloadType, routeMask sql.NullInt64
+		var txRoute int
+		var header, decodedJSON, fromPubkey, pathJSON, observerID string
 		var epochTs int64
-		if err := rows.Scan(&payloadType, &decodedJSON, &fromPubkey, &pathJSON, &observerID, &epochTs); err != nil {
+		if err := rows.Scan(&payloadType, &header, &txRoute, &routeMask, &decodedJSON, &fromPubkey, &pathJSON, &observerID, &epochTs); err != nil {
 			continue
 		}
+		routeType := observationRouteType(header, txRoute, routeMask)
 		fromNode := strings.ToLower(fromPubkey)
 		if fromNode == "" {
 			fromNode = strings.ToLower(extractPubkeyFromAdvertJSON(decodedJSON))
@@ -228,7 +287,15 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 				edges = append(edges, canonEdge(fromNode, resolved, ts))
 			}
 		}
-		if observerPK != "" {
+		// The last hop is the node the observer heard only on a flood
+		// route: flood forwarders append their hash (MeshCore Mesh.cpp:346-350
+		// routeRecvPacket, at a366955). A DIRECT path is the remaining
+		// planned route, from which each forwarder strips itself at the
+		// front (Mesh.cpp:89, removeSelfFromPath :334-342), so its last hop
+		// is the route's far end (PR #190 review). The route type is the
+		// observation's own (observationRouteType, #289); unknown route
+		// types are skipped too.
+		if observerPK != "" && isFloodRoute(routeType) {
 			last := path[len(path)-1]
 			if resolved, ok := resolvePrefix(prefixIdx, last); ok && resolved != observerPK {
 				edges = append(edges, canonEdge(observerPK, resolved, ts))
@@ -274,14 +341,24 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 	}
 
 	if len(edges) == 0 {
-		return 0, nil
+		return b, nil
 	}
 
-	// Wrap the whole edge-persist tx under writer-perf instrumentation
-	// (#1340). Slow neighbor-builder ticks (the #1339 root cause) now
-	// show up on /api/perf under component=neighbor_builder.
-	var inserted int
-	err = s.WriterTx("neighbor_builder", func(tx *sql.Tx) error {
+	if err := s.persistNeighborEdges(edges); err != nil {
+		return b, err
+	}
+	b.edges = len(edges)
+	return b, nil
+}
+
+// persistNeighborEdges credits each edge row once: a new pair starts at
+// count 1, an existing pair gains 1 and keeps the later last_seen.
+//
+// The whole edge-persist tx runs under writer-perf instrumentation
+// (#1340). Slow neighbor-builder ticks (the #1339 root cause) show up on
+// /api/perf under component=neighbor_builder.
+func (s *Store) persistNeighborEdges(edges []edgeRow) error {
+	return s.WriterTx("neighbor_builder", func(tx *sql.Tx) error {
 		stmt, err := tx.Prepare(`INSERT INTO neighbor_edges (node_a, node_b, count, last_seen)
 			VALUES (?, ?, 1, ?)
 			ON CONFLICT(node_a, node_b) DO UPDATE SET
@@ -300,13 +377,8 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 		if firstErr != nil {
 			return fmt.Errorf("upsert: %w", firstErr)
 		}
-		inserted = len(edges)
 		return nil
 	})
-	if err != nil {
-		return 0, err
-	}
-	return inserted, nil
 }
 
 // canonEdge orders the pair so node_a <= node_b (matches the existing
@@ -336,11 +408,11 @@ func parsePathArray(s string) []string {
 // considered ambiguous and skipped during resolution.
 type prefixIndex map[string][]string
 
-// buildPrefixIndex reads nodes.public_key and builds the prefix → pubkey
-// map. We index every 1-byte (2 hex char) prefix length the firmware
-// uses (1, 2, 3, 4, 6, 8). Memory cost is O(nodes × len(prefixLens)).
+// buildPrefixIndex reads the relay nodes (isRelayRole) and builds the
+// prefix → pubkey map. We index every 1-byte (2 hex char) prefix length the
+// firmware uses (1, 2, 3, 4, 6, 8). Memory cost is O(nodes × len(prefixLens)).
 func buildPrefixIndex(db *sql.DB) (prefixIndex, error) {
-	rows, err := db.Query(`SELECT public_key FROM nodes`)
+	rows, err := db.Query(`SELECT public_key, COALESCE(role, '') FROM nodes`)
 	if err != nil {
 		return nil, err
 	}
@@ -348,8 +420,11 @@ func buildPrefixIndex(db *sql.DB) (prefixIndex, error) {
 	idx := make(prefixIndex, 1024)
 	var prefixLens = []int{1 * 2, 2 * 2, 3 * 2, 4 * 2, 6 * 2, 8 * 2}
 	for rows.Next() {
-		var pk string
-		if err := rows.Scan(&pk); err != nil {
+		var pk, role string
+		if err := rows.Scan(&pk, &role); err != nil {
+			continue
+		}
+		if !isRelayRole(role) {
 			continue
 		}
 		pkLower := strings.ToLower(pk)
@@ -364,10 +439,29 @@ func buildPrefixIndex(db *sql.DB) (prefixIndex, error) {
 	return idx, nil
 }
 
+// isRelayRole reports whether a node of this role can appear as a hop in a
+// path (#188). It is the server's canAppearInPath (cmd/server/store.go),
+// duplicated because the two binaries share no package for it; the test
+// cases mirror the server's TestCanAppearInPath.
+//
+// Firmware: repeaters and room servers forward unless disable_fwd is set
+// (examples/simple_repeater and simple_room_server MyMesh::allowPacketForward).
+// Companions and sensors ship with forwarding off (companion_radio
+// NodePrefs.h repeat.disable_fwd = 1; simple_sensor SensorMesh.cpp
+// disable_fwd = true) and can only opt in, so a hop through an opted-in
+// companion stays unresolved, or resolves to the one relay that shares its
+// prefix. That is the server's trade-off too.
+func isRelayRole(role string) bool {
+	r := strings.ToLower(role)
+	return strings.Contains(r, "repeater") || strings.Contains(r, "room_server") || r == "room"
+}
+
 // resolvePrefix returns the single resolved pubkey if exactly one
-// candidate matches, otherwise (zero || multiple), it returns ok=false
-// (matches the conservative server-side resolver in
-// cmd/server/extractEdgesFromObs).
+// candidate matches, otherwise (zero || multiple), it returns ok=false.
+// This is stricter than the server's live builder,
+// cmd/server/neighbor_graph.go buildFromStoreWithNodes, which keeps an
+// ambiguous prefix as a prefix edge and resolves it later
+// (upsertEdgeWithCandidates, disambiguate).
 func resolvePrefix(idx prefixIndex, hop string) (string, bool) {
 	h := strings.ToLower(hop)
 	candidates := idx[h]

@@ -75,21 +75,7 @@ func TestHandleNodePaths_AnchorBiasInconsistency_Issue1278(t *testing.T) {
 	hub := NewHub()
 	srv := NewServer(db, cfg, hub)
 	store := NewPacketStore(db, nil)
-	if err := store.Load(); err != nil {
-		t.Fatalf("store.Load: %v", err)
-	}
-	// The path-hop index that /paths reads is built in a background goroutine
-	// (#1008); querying before it is ready races the build and yields a
-	// non-deterministic membership/canonical result (the flake). Wait for
-	// readiness so the test asserts against the fully-built index.
-	pathHopDeadline := time.After(5 * time.Second)
-	for !store.PathHopIndexReady() {
-		select {
-		case <-pathHopDeadline:
-			t.Fatal("path-hop index not ready within 5s")
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
+	loadStoreIndexed(t, store)
 	srv.store = store
 	router := mux.NewRouter()
 	srv.RegisterRoutes(router)

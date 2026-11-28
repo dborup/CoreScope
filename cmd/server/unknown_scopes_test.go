@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+
+	regionutil "github.com/meshcore-analyzer/regions"
+)
 
 func strPtr(s string) *string { return &s }
 
@@ -115,5 +121,33 @@ func TestComputeUnknownScopes_FallsBackToPubkeyWhenNameUnresolved(t *testing.T) 
 	got := computeUnknownScopes(entries, nil)
 	if len(got) != 1 || len(got[0].Examples) != 1 || got[0].Examples[0] != "deadbeef00" {
 		t.Fatalf("got %+v, want a single entry with example 'deadbeef00'", got)
+	}
+}
+
+// Review round 2 of #355, finding 6: candidate names follow the same rules as
+// regions.Normalize, which the ingestor's observed check and the configured
+// list use, so a name the server offers is byte for byte the name the
+// ingestor finds. The "*" wildcard stays excluded.
+func TestComputeUnknownScopesNormalizesLikeRegions(t *testing.T) {
+	raw := []string{" dk-a ", "#dk-b ", "　dk-c", "#dk-d", " #dk-e\u0085", "*", " * ", "", " ", " #cfg "}
+	entries := []AllObserverNeighborsEntry{{NeighborPubkey: "pk1", Scopes: strPtr(strings.Join(raw, ","))}}
+	got := map[string]bool{}
+	for _, u := range computeUnknownScopes(entries, []string{"cfg"}) {
+		got[u.Scope] = true
+	}
+	want := map[string]bool{}
+	for _, r := range raw {
+		if strings.TrimSpace(r) == "*" {
+			continue
+		}
+		if name, ok := regionutil.Normalize(r); ok && name != "#cfg" {
+			want[name] = true
+		}
+	}
+	if len(want) != 5 {
+		t.Fatalf("fixture: want %d names, expected 5: %v", len(want), want)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unknown scopes = %v, want %v", got, want)
 	}
 }

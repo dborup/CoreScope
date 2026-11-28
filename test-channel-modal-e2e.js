@@ -6,7 +6,8 @@
  *   - sidebar [+ Add Channel] opens modal
  *   - modal renders three labeled sections + privacy footer + QR placeholders
  *   - close (✕) hides modal
- *   - sectioned sidebar renders My Channels / Network / Encrypted sections
+ *   - sectioned sidebar renders Network / Encrypted sections, and My Channels
+ *     only once this browser holds a key (#1111)
  *   - PSK add flow: invalid hex → error; valid hex → modal closes
  *
  * Usage: BASE_URL=http://localhost:38201 node test-channel-modal-e2e.js
@@ -42,8 +43,13 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   });
 
   await step('Add Channel button is visible', async () => {
-    const text = await page.textContent('#chAddChannelBtn');
-    assert(/Add Channel/.test(text), 'button text: ' + text);
+    // #1227 (#1224) shortened the label to a "+ Add" chip; the accessible
+    // name is still "Add channel".
+    assert(await page.isVisible('#chAddChannelBtn'), '#chAddChannelBtn not visible');
+    const text = (await page.textContent('#chAddChannelBtn')).trim();
+    assert(/^\+\s*Add\b/.test(text), 'button text: ' + text);
+    const label = await page.getAttribute('#chAddChannelBtn', 'aria-label');
+    assert(/^Add channel$/i.test(label || ''), 'aria-label: ' + label);
   });
 
   await step('modal hidden on load', async () => {
@@ -104,20 +110,20 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     }, { timeout: 3000 });
   });
 
-  await step('sidebar renders three sections (My Channels / Network / Encrypted)', async () => {
+  await step('sidebar renders Network + Encrypted, and no My Channels without a key (#1111)', async () => {
     // Wait for channel list to populate from API (or render empty-state).
     await page.waitForFunction(() => {
       const el = document.getElementById('chList');
       if (!el) return false;
-      return el.querySelector('.ch-section-mychannels') &&
-             el.querySelector('.ch-section-network') &&
+      return el.querySelector('.ch-section-network') &&
              el.querySelector('.ch-section-encrypted');
     }, { timeout: 8000 });
     const headers = await page.$$eval('.ch-section-header', els => els.map(e => e.textContent.trim()));
     const joined = headers.join(' | ');
-    assert(/My Channels/.test(joined), 'My Channels header missing: ' + joined);
-    assert(/Network/.test(joined), 'Network header missing');
-    assert(/Encrypted/.test(joined), 'Encrypted header missing');
+    assert(/Network/.test(joined), 'Network header missing: ' + joined);
+    assert(/Encrypted/.test(joined), 'Encrypted header missing: ' + joined);
+    // 12d96a9d (#1111): the My Channels section is hidden while empty.
+    assert(!(await page.$('.ch-section-mychannels')), 'My Channels must not render without a stored key: ' + joined);
   });
 
   await step('Encrypted section is collapsed by default', async () => {
@@ -152,6 +158,13 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     }, { timeout: 5000 });
     const stored = await page.evaluate(() => localStorage.getItem('corescope_channel_keys') || '');
     assert(/cafebabe/i.test(stored), 'expected stored key in localStorage corescope_channel_keys, got: ' + stored);
+  });
+
+  await step('sidebar now renders My Channels with the new channel', async () => {
+    await page.waitForFunction(() => {
+      const sec = document.querySelector('#chList .ch-section-mychannels');
+      return sec && /My Channels/.test(sec.textContent) && /E2E Test Channel/.test(sec.textContent);
+    }, { timeout: 5000 });
   });
 
   await browser.close();

@@ -7,7 +7,7 @@ import (
 )
 
 // This file holds additive, read-only bulk-query helpers for Ping Scores
-// Phase 4B: batched siblings of GetPacketPath and nearestPositionedNeighbor
+// Phase 4B: batched siblings of getPacketPath and nearestPositionedNeighbor
 // that answer the same question for many inputs in O(chunks) queries
 // instead of O(N). None of these are wired into main.go, the recomputer, or
 // the public API yet -- that's Phase 4C+. See buildPacketPathResponseFromReduction
@@ -330,7 +330,7 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 	return nil
 }
 
-// GetPacketPathsBulk computes the same PacketPathResponse GetPacketPath
+// getPacketPathsBulk computes the same PacketPathResponse getPacketPath
 // would for each hash in hashes. All branch-assembly logic is the single
 // shared buildPacketPathResponseFromReduction (db.go), so the two can never
 // silently diverge in output shape or field values.
@@ -357,9 +357,12 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 //
 // A hash with no observation rows at all (never observed, or unknown to
 // this DB) is simply absent from the returned map -- not an error,
-// matching GetPacketPath's own contract of returning an empty-Branches
+// matching getPacketPath's own contract of returning an empty-Branches
 // response rather than erroring for an unknown hash.
-func (db *DB) GetPacketPathsBulk(hashes []string, maxEdgeKm float64) (map[string]*PacketPathResponse, error) {
+// getPacketPathsBulk takes the caller's immutable operator policy
+// explicitly, for the same reason getPacketPath does: there is no
+// always-estimating exported wrapper to bypass the #315 setting with.
+func (db *DB) getPacketPathsBulk(hashes []string, maxEdgeKm float64, estimatesEnabled bool) (map[string]*PacketPathResponse, error) {
 	// result is created and the empty-input check runs BEFORE the
 	// hasResolvedPath schema check on purpose: an empty request should
 	// short-circuit to an empty, error-free result without touching the
@@ -489,18 +492,23 @@ func (db *DB) GetPacketPathsBulk(hashes []string, maxEdgeKm float64) (map[string
 	}
 
 	fallbackSet := make(map[string]bool)
-	for _, red := range reductions {
-		for pk := range collectPacketPathFallbackCandidates(red.first, red.best, nodeByPK, nodeByName) {
-			fallbackSet[pk] = true
+	if estimatesEnabled {
+		for _, red := range reductions {
+			for pk := range collectPacketPathFallbackCandidates(red.first, red.best, nodeByPK, nodeByName) {
+				fallbackSet[pk] = true
+			}
 		}
 	}
 	fallbackList := make([]string, 0, len(fallbackSet))
 	for pk := range fallbackSet {
 		fallbackList = append(fallbackList, pk)
 	}
-	estimates, err := db.nearestPositionedNeighborsBulk(fallbackList, maxEdgeKm)
-	if err != nil {
-		return nil, fmt.Errorf("packet path bulk neighbor estimate: %w", err)
+	var estimates map[string]neighborEstimate
+	if estimatesEnabled {
+		estimates, err = db.nearestPositionedNeighborsBulk(fallbackList, maxEdgeKm)
+		if err != nil {
+			return nil, fmt.Errorf("packet path bulk neighbor estimate: %w", err)
+		}
 	}
 	neighborLookup := func(pk string) (neighborEstimate, bool) {
 		e, ok := estimates[pk]

@@ -47,7 +47,8 @@ function loadInCtx(ctx, file) {
 
 function makeSandbox() {
   const ctx = {
-    window: { addEventListener: () => {}, dispatchEvent: () => {} },
+    requestAnimationFrame: () => 0, cancelAnimationFrame: () => {},
+    window: { addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => {} },
     document: {
       readyState: 'complete',
       createElement: () => ({ id: '', textContent: '', innerHTML: '', style: {}, classList: { add(){}, remove(){}, toggle(){}, contains(){return false;} }, appendChild(){}, addEventListener(){} }),
@@ -117,7 +118,7 @@ function makeNodesEnv(fixture) {
         id, innerHTML: '', textContent: '', value: '', scrollTop: 0,
         style: {}, dataset: {},
         classList: { add(){}, remove(){}, toggle(){}, contains(){return false;} },
-        addEventListener() {}, querySelectorAll() { return []; }, querySelector() { return null; },
+        addEventListener() {}, removeEventListener() {}, querySelectorAll() { return []; }, querySelector() { return null; },
         getAttribute() { return null; }, setAttribute() {}, appendChild() {},
       };
     }

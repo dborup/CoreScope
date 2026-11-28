@@ -9,7 +9,7 @@
  *   - Extract the _applyTilesToNodeMap function source from public/nodes.js
  *     by regex and run it in the same sandbox.
  *   - Mock L.tileLayer / L.map to capture the URL + options the helper passes
- *     and the .addTo() target. Assert that selecting voyager-inverted in the
+ *     and the .addTo() target. Assert that selecting carto-voyager-dark in the
  *     customizer ends up calling tileLayer with the voyager URL AND setting
  *     the tile pane filter to the provider.invertFilter string.
  *
@@ -21,6 +21,7 @@ const vm = require('vm');
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
+const { makeAttributionStub } = require('./tests/map-overlay-sandbox');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -44,6 +45,9 @@ function makeLeafletMock() {
   const fakeMap = {
     _tileLayers: [],
     getPane: (name) => name === 'tilePane' ? tilePane : null,
+    // #752 — the helper gives an inset map the registry's attribution
+    // control, so the mock models the two Leaflet members that needs.
+    eachLayer(fn) { fakeMap._tileLayers.forEach(fn); return fakeMap; },
   };
   const L = {
     tileLayer(url, opts) {
@@ -59,6 +63,7 @@ function makeLeafletMock() {
     },
     map() { return fakeMap; },
     marker() { return { addTo: () => ({ bindPopup: () => {} }) }; },
+    control: { attribution: makeAttributionStub() },
   };
   return { L, calls, fakeMap, tilePane };
 }
@@ -94,6 +99,8 @@ function makeSandbox(opts) {
   };
   ctx.window.localStorage = ctx.localStorage;
   ctx.window.document = ctx.document;
+  // #845: CARTO is opt-in now; these cases use its styles as examples.
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { carto: { enabled: true } } } };
   ctx.globalThis = ctx;
   vm.createContext(ctx);
   // After context creation, make the sandbox global object also be `window`
@@ -134,43 +141,61 @@ function extractApplyTilesHelper() {
   return nodesSrc.slice(start, i);
 }
 
+// The provider id used to be 'voyager-inverted'; #1533 renamed it to
+// 'carto-voyager-dark'. MC_setDarkTileProvider() silently returns false for an
+// unknown id, which left the default carto-dark active, so assert it took.
+function assertProviderSet(ctx, id) {
+  assert.strictEqual(ctx.window.MC_setDarkTileProvider(id), true, 'MC_setDarkTileProvider(' + id + ') accepted');
+}
+
 console.log('── #1470 node-detail inset-map tile-provider routing ──');
 
-test('roles.js + providers: getActiveTileProvider returns null in light mode', () => {
+// #332 — getActiveTileProvider() used to return null in light mode, so the
+// node-detail inset map credited a generic fallback instead of the operator's
+// configured light provider. It now resolves both themes; the light style
+// carries no invertFilter, so the rendered result is unchanged.
+test('roles.js + providers: getActiveTileProvider returns the LIGHT provider in light mode (#332)', () => {
   const ctx = makeSandbox({ theme: 'light', prefersDark: false });
   loadInto(ctx, 'public/map-tile-providers.js');
   loadInto(ctx, 'public/roles.js');
   const p = ctx.window.getActiveTileProvider();
-  assert.strictEqual(p, null, 'expected null in light mode, got ' + JSON.stringify(p));
+  assert.ok(p, 'expected a provider in light mode, got ' + JSON.stringify(p));
+  assert.strictEqual(p.type, 'light', 'must be a light style, got ' + p.type);
+  assert.strictEqual(p.invertFilter, null, 'a light style must not carry an invert filter');
+  assert.strictEqual(ctx.window.MC_setLightTileProvider('carto-light'), true);
+  const q = ctx.window.getActiveTileProvider();
+  assert.ok(/CartoDB/.test(q.attribution), 'follows the selected light provider, got ' + q.attribution);
 });
 
 test('roles.js + providers: getActiveTileProvider returns selected provider in dark mode', () => {
   const ctx = makeSandbox({ theme: 'dark' });
   loadInto(ctx, 'public/map-tile-providers.js');
   loadInto(ctx, 'public/roles.js');
-  ctx.window.MC_setDarkTileProvider('voyager-inverted');
+  assertProviderSet(ctx, 'carto-voyager-dark');
   const p = ctx.window.getActiveTileProvider();
   assert.ok(p, 'provider returned in dark mode');
-  assert.ok(typeof p.url === 'string' && /voyager/.test(p.url),
-    'provider url is voyager — got ' + JSON.stringify(p.url));
+  // #1614: provider urls are lazy functions that resolve to the template string.
+  const providerUrl = typeof p.url === 'function' ? p.url() : p.url;
+  assert.ok(typeof providerUrl === 'string' && /voyager/.test(providerUrl),
+    'provider url is voyager — got ' + JSON.stringify(providerUrl));
   assert.ok(typeof p.invertFilter === 'string' && /invert\(/.test(p.invertFilter),
-    'voyager-inverted invertFilter present — got ' + JSON.stringify(p.invertFilter));
+    'carto-voyager-dark invertFilter present — got ' + JSON.stringify(p.invertFilter));
 });
 
-test('roles.js: getTileUrl returns voyager URL in dark mode when voyager-inverted selected', () => {
+test('roles.js: getTileUrl returns voyager URL in dark mode when carto-voyager-dark selected', () => {
   const ctx = makeSandbox({ theme: 'dark' });
   loadInto(ctx, 'public/map-tile-providers.js');
   loadInto(ctx, 'public/roles.js');
-  ctx.window.MC_setDarkTileProvider('voyager-inverted');
+  assertProviderSet(ctx, 'carto-voyager-dark');
   const url = ctx.window.getTileUrl();
   assert.ok(/voyager/.test(url), 'getTileUrl returns voyager URL — got ' + url);
 });
 
-test('_applyTilesToNodeMap: dark + voyager-inverted → tileLayer(voyagerURL) + invert filter', () => {
+test('_applyTilesToNodeMap: dark + carto-voyager-dark → tileLayer(voyagerURL) + invert filter', () => {
   const ctx = makeSandbox({ theme: 'dark' });
   loadInto(ctx, 'public/map-tile-providers.js');
   loadInto(ctx, 'public/roles.js');
-  ctx.window.MC_setDarkTileProvider('voyager-inverted');
+  assertProviderSet(ctx, 'carto-voyager-dark');
 
   const mock = makeLeafletMock();
   ctx.L = mock.L;
@@ -190,7 +215,7 @@ test('_applyTilesToNodeMap: dark + carto-dark (non-inverted) → no invert filte
   const ctx = makeSandbox({ theme: 'dark' });
   loadInto(ctx, 'public/map-tile-providers.js');
   loadInto(ctx, 'public/roles.js');
-  ctx.window.MC_setDarkTileProvider('carto-dark');
+  assertProviderSet(ctx, 'carto-dark');
 
   const mock = makeLeafletMock();
   ctx.L = mock.L;
@@ -205,7 +230,7 @@ test('_applyTilesToNodeMap: dark + carto-dark (non-inverted) → no invert filte
     'no invert filter for carto-dark — got ' + JSON.stringify(mock.tilePane.style.filter));
 });
 
-test('_applyTilesToNodeMap: light mode → uses TILE_LIGHT (carto light_all), no invert', () => {
+test('_applyTilesToNodeMap: light mode → uses the configured light tile URL, no invert', () => {
   const ctx = makeSandbox({ theme: 'light', prefersDark: false });
   loadInto(ctx, 'public/map-tile-providers.js');
   loadInto(ctx, 'public/roles.js');

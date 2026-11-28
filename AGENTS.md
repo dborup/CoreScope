@@ -182,6 +182,14 @@ If you need to know how something works — a flag, a field, a timing, a behavio
 ### Theming
 All colors MUST use CSS variables. Never hardcode `#hex` values outside of `:root` definitions. The customizer controls colors via `THEME_CSS_MAP` in customize.js. If you add a new color, add it as a CSS variable and map it in the customizer.
 
+### XSS preflight gate (CI)
+`scripts/check-xss-sinks.sh --diff` runs on every PR and flags HTML sinks (`innerHTML`, `bindPopup`, URL/`on*` `setAttribute`, …) that interpolate a node-controlled field. In CI a flagged line passes only via:
+- an escape helper on the same line (`escapeHtml` / `escapeAttr` / `esc`), or
+- building the DOM with `createElement` + `textContent` / non-URL `setAttribute` instead of an HTML string — **the preferred fix for false positives**, or
+- `PREFLIGHT-XSS-OPTOUT: <file>:<line> reason="…"` in the PR body **plus** the `xss-optout` label.
+
+Existing or same-PR tests do **not** count in CI: the workflow never sets `PREFLIGHT_TEST_FILES`, so that route only applies to local/skill-side runs that set it.
+
 ### Shared Helpers (roles.js)
 - `getNodeStatus(role, lastSeenMs)` → 'active' | 'stale'
 - `getHealthThresholds(role)` → `{ staleMs, degradedMs, silentMs }`
@@ -257,6 +265,27 @@ node test-e2e-playwright.js       # 8 Playwright browser tests (default: localho
 - **ARM machines**: Basic Playwright tests work with system chromium (`CHROMIUM_PATH=/usr/bin/chromium-browser`). Heavy coverage collection scripts may crash — use CI for those.
 
 Tests that need live mesh data can use `https://analyzer.00id.net` — all API endpoints are public, no auth required.
+
+### Go server test shards (CI)
+CI runs the `cmd/server` tests (with `-race` and coverage) in three jobs, `go-server-1..3`. `scripts/go-server-shards.json` pins the slowest Tests to shards 1 and 2 (`go test -run`). Shard 3 is the catch-all: it runs every Test, Fuzz seed target and Example that is not pinned (`go test -skip` of the pinned names).
+- **Adding, renaming or moving a Test needs no manifest edit.** It runs in shard 3. The `📋 Verify Go Test Assignments` job checks that every active entry is selected by exactly one shard and that the AST inventory matches `go test -list`. Run the same check locally with `node scripts/run-go-server-shard.js --validate`.
+- **When to rebalance:** the `✅ Go Build & Test` job summary prints the test seconds per shard. Rebalance when the slowest shard stays above 1.25× the fastest on two green runs, after adding a Test that takes more than ~10 s on CI, or when `--validate` reports stale pins or an empty shard.
+- **How:** download the shard artifacts of one or more green runs (they are kept for one day), regenerate and commit the manifest:
+  ```bash
+  gh run download <run-id> -p 'go-server-*' -D /tmp/go-run-<run-id>
+  node scripts/rebalance-go-server-shards.js /tmp/go-run-<run-id> [/tmp/go-run-<other-id> ...]
+  ```
+  The script averages each Test's top-level `go test -json` time on the GitHub runners, fills shard 3 with the cheapest entries up to a third of the total and pins the rest longest-first.
+- Each pattern is one argv string for the test binary (`-test.run=…`), and Linux caps one string at 128 KiB (`MAX_ARG_STRLEN`). Only pinned names go into a pattern, and the guard refuses any pattern over 96 KiB.
+
+### Playwright E2E shards (CI)
+`scripts/e2e-shards.json` assigns every E2E suite to exactly one of three shards (`e2e-test-1..3`); `node scripts/run-e2e-shard.js --validate` checks it. A new suite must be added to the manifest (assign it to the lightest shard).
+- **When to rebalance:** when the slowest `Playwright E2E Tests (N/3)` job stays above 1.25× the fastest on two green runs, or after adding several slow suites.
+- **How:** download the shard receipts of several green runs and regenerate and commit the manifest (suites are averaged per run, assigned longest-first to the lightest shard; a suite no run measured keeps its old `meanSeconds`):
+  ```bash
+  gh run download <run-id> -p 'e2e-shard-*' -D /tmp/e2e-run-<run-id>
+  node scripts/rebalance-e2e-shards.js /tmp/e2e-run-<run-id> [/tmp/e2e-run-<other-id> ...]
+  ```
 
 ### What Needs Tests
 - Parsers and decoders (packet-filter, decoder)

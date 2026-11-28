@@ -41,6 +41,9 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+// The fixture is freshened once per shard: pin the packets window so the
+// rows do not depend on when this suite runs in it (#787).
+const { pinPacketsTimeWindow } = require('./tests/e2e-packets-window');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const SHOT_DIR = 'e2e-screenshots';
@@ -69,14 +72,11 @@ async function gotoPackets(page) {
   await page.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#packetFilterInput', { timeout: 8000 });
   await page.waitForFunction(() => !!document.querySelector('#filterUxBar'), { timeout: 8000 });
-  await page.evaluate(() => {
-    const sel = document.getElementById('fTimeWindow');
-    if (sel) { sel.value = '0'; sel.dispatchEvent(new Event('change', { bubbles: true })); }
-  });
-  await page.waitForFunction(
-    () => Array.from(document.querySelectorAll('#pktBody tr'))
-            .filter(r => r.id !== 'vscroll-top' && r.id !== 'vscroll-bottom').length > 0,
-    { timeout: 8000 });
+  // The window comes from pinPacketsTimeWindow. Choosing All time here did
+  // not widen it at 768px: a phone or tablet has no All time option, so the
+  // select fell back to the 15-minute default (#787).
+  // A packet row: an empty list also has one row, "No packets found" (#787).
+  await page.waitForSelector('#pktBody tr[data-hash]', { state: 'attached', timeout: 8000 });
   await page.waitForTimeout(400); // hop-resolver
 }
 
@@ -93,6 +93,7 @@ async function gotoPackets(page) {
 
   for (const vp of VIEWPORTS) {
     const ctx = await browser.newContext({ viewport: { width: vp.w, height: vp.h } });
+    await pinPacketsTimeWindow(ctx);
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
     page.on('pageerror', (e) => console.error('[pageerror]', e.message));
@@ -178,6 +179,7 @@ async function gotoPackets(page) {
 
   // Single z-scale + line-height + col-path checks are viewport-agnostic.
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await pinPacketsTimeWindow(ctx);
   const page = await ctx.newPage();
   page.setDefaultTimeout(8000);
   await gotoPackets(page);
