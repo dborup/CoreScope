@@ -24,7 +24,11 @@
  *   4. Home's My Mesh grid shows the account's list: 24 cards of 30, then
  *      "Show more" renders the rest;
  *   5. every control is at least 44 px and nothing scrolls sideways;
- *   6. sign out returns to the sign-in card and to the browser's list.
+ *   6. sign out returns to the sign-in card and to the browser's list;
+ *   7. (#1020 review N2, N4) "Sign out everywhere" and "Delete account":
+ *      the confirm box opens in view above the bottom nav at 375x560; the
+ *      page waits for GET /api/account/requests/{id} and shows success only
+ *      once it answers done, and the server's error otherwise.
  *
  * Usage:
  *   BASE_URL=http://localhost:13700 node test-1018-account-e2e.js
@@ -77,7 +81,8 @@ const pathOf = (u) => new URL(u).pathname;
         }
       } catch (_) {}
     }, [theme, o.local || []]);
-    const rec = { logins: [], sessions: [], writes: [], statusCalls: 0, signedIn: false, myNodes: o.accountNodes || [] };
+    const rec = { logins: [], sessions: [], writes: [], statusCalls: 0, signedIn: !!o.signedIn, myNodes: o.accountNodes || [],
+      revokes: [], requestPolls: 0, outcome: o.outcome || ['queued', 'done'] };
     if (o.off) return { ctx, rec };
     const json = (r, status, body, headers) => r.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(body) });
     await ctx.route((u) => pathOf(u).startsWith('/api/account') || pathOf(u) === '/api/nodes/search', (r) => {
@@ -108,6 +113,14 @@ const pathOf = (u) => new URL(u).pathname;
       if (p === '/api/account' && m === 'GET') {
         if (!rec.signedIn) return json(r, 401, { error: 'not signed in' });
         return json(r, 200, { identityPrefix: PK.slice(0, 8), identityName: 'Anna T-Echo', signedInAt: Date.now(), myNodes: rec.myNodes, limits: { maxMyNodes: 200 } });
+      }
+      if ((p === '/api/account/sign-out-all' && m === 'POST') || (p === '/api/account' && m === 'DELETE')) {
+        rec.revokes.push(m + ' ' + p);
+        return json(r, 202, { requestId: 'f00000000000000a' });
+      }
+      if (p === '/api/account/requests/f00000000000000a') {
+        const st = rec.outcome[Math.min(rec.requestPolls++, rec.outcome.length - 1)];
+        return json(r, 200, st === 'error' ? { status: 'error', error: 'the request could not be saved' } : { status: st });
       }
       if (p === '/api/account/my-nodes' && m === 'POST') {
         const body = JSON.parse(req.postData() || '{}');
@@ -230,6 +243,58 @@ const pathOf = (u) => new URL(u).pathname;
       assert(!errors.length, 'page errors: ' + errors.join(' | '));
     });
     await ctx.close();
+  }
+
+  // #1020 review N2 + N4: revocation waits for the server, in view at 375x560.
+  for (const v of [
+    { name: 'sign out everywhere, confirmed', btn: 'account-sign-out-all', outcome: ['queued', 'queued', 'done'], ok: /Signed out everywhere/ },
+    { name: 'delete account, refused by the ingestor', btn: 'account-delete', outcome: ['queued', 'error'], ok: /was not deleted.*could not be saved/ },
+  ]) {
+    await step(`375x560: ${v.name}`, async () => {
+      // A few nodes push the danger zone below the fold, as in the review.
+      const accountNodes = Array.from({ length: 4 }, (_, i) => ({ pubkey: key(40 + i), name: 'Mast ' + i, addedAt: i + 1 }));
+      const { ctx, rec } = await newCtx('light', { signedIn: true, outcome: v.outcome, accountNodes });
+      const page = await ctx.newPage();
+      const errors = [];
+      page.on('pageerror', (e) => errors.push(String(e)));
+      await page.goto(BASE + '/#/home', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('[data-testid="home-account"]', { timeout: 15000 });
+      await page.goto(BASE + '/#/account', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('[data-testid="account-signed-in"]', { timeout: 10000 });
+      await tapWhenSettled(page, '[data-testid="' + v.btn + '"]');
+      const yes = page.locator('[data-testid="account-confirm-yes"]');
+      await yes.waitFor({ timeout: 5000 });
+      await page.waitForTimeout(300);
+      const box = await page.evaluate(() => {
+        const q = document.querySelector('#acctConfirm p').getBoundingClientRect();
+        const y = document.querySelector('[data-testid="account-confirm-yes"]').getBoundingClientRect();
+        const nav = document.querySelector('.bottom-nav');
+        // The nav is position: fixed, so offsetParent is always null: use
+        // its box and its computed display instead.
+        const nr = nav && getComputedStyle(nav).display !== 'none' ? nav.getBoundingClientRect() : null;
+        const navTop = nr && nr.height > 0 ? nr.top : window.innerHeight;
+        return { qTop: q.top, yBottom: y.bottom, navTop, vh: window.innerHeight, scrolled: window.scrollY || document.scrollingElement.scrollTop };
+      });
+      assert(box.qTop >= 0 && box.yBottom <= box.navTop, 'the confirm box is not in view above the bottom nav: ' + JSON.stringify(box));
+      await shot(page, 'account-7-confirm-' + v.btn);
+      await tapWhenSettled(page, '[data-testid="account-confirm-yes"]');
+      // Right after the 202 the page says it is waiting, not that it worked.
+      await page.waitForFunction(() => {
+        const s = document.querySelector('[data-testid="account-confirm-status"]');
+        return s && /…/.test(s.textContent);
+      }, null, { timeout: 5000 });
+      assert(await page.locator('[data-testid="account-outcome"]').count() === 0, 'an outcome before the server confirmed');
+      const out = page.locator('[data-testid="account-outcome"]');
+      await out.waitFor({ timeout: 20000 });
+      const text = await out.textContent();
+      assert(v.ok.test(text), 'outcome: ' + text);
+      assert(rec.revokes.length === 1, 'one revocation request: ' + rec.revokes.join());
+      assert(rec.requestPolls >= v.outcome.length, 'the page polled the request until it ended: ' + rec.requestPolls);
+      assert(await out.getAttribute('data-kind') === (v.btn === 'account-delete' ? 'error' : 'success'), 'outcome kind');
+      await page.waitForSelector('[data-testid="account-signin"]', { timeout: 5000 });
+      assert(!errors.length, 'page errors: ' + errors.join(' | '));
+      await ctx.close();
+    });
   }
 
   await browser.close();

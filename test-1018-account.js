@@ -174,6 +174,20 @@ test('status lines: proven redeems, the end states stop polling', () => {
   assert.ok(/few minutes/.test(A.loginError({ status: 429 })));
 });
 
+test('#1020 N2: revocation is success only on the server\'s done', () => {
+  const T = A.REVOKE_TEXT.signOutAll;
+  const q = A.revocationLine({ status: 'queued' }, T);
+  assert.ok(!q.done && !q.ok, 'queued keeps waiting');
+  const d = A.revocationLine({ status: 'done' }, T);
+  assert.ok(d.done && d.ok && d.kind === 'success' && d.text === T.done);
+  const e = A.revocationLine({ status: 'error', error: 'this session has ended, please sign in again' }, T);
+  assert.ok(e.done && !e.ok && e.kind === 'error' && /did not complete/.test(e.text) && /session has ended/.test(e.text));
+  for (const st of [{ status: 'gone' }, null, {}, { status: 'proven' }]) {
+    const l = A.revocationLine(st, A.REVOKE_TEXT.del);
+    assert.ok(l.done && !l.ok && l.kind === 'error', JSON.stringify(st));
+  }
+});
+
 test('pasted keys, companions only, server node shape, stored sign-in lifetime', () => {
   assert.strictEqual(A.normalizeKey('  ' + K('A') + ' '), K('a'));
   assert.strictEqual(A.normalizeKey(K('a').slice(1)), '');

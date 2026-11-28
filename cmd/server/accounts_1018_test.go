@@ -97,7 +97,20 @@ func (e *acc1018Env) addNode(pk, name, role string, withPos bool) {
 	}
 }
 
+// queued is the queued commands without the OpRedeem records every redeem
+// adds (allQueued has them).
 func (e *acc1018Env) queued() []account.Command {
+	e.t.Helper()
+	var out []account.Command
+	for _, c := range e.allQueued() {
+		if c.Op != account.OpRedeem {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (e *acc1018Env) allQueued() []account.Command {
 	e.t.Helper()
 	raw, err := e.svc.queue.PendingValues()
 	if err != nil {
@@ -115,7 +128,8 @@ func (e *acc1018Env) queued() []account.Command {
 }
 
 // proven writes, as the ingestor would (test fixture), an account for pk
-// and a sign-in proven at provenAt with accSecret's hash.
+// and a sign-in proven at provenAt with accSecret's hash, under the
+// account's current session generation.
 func (e *acc1018Env) proven(id, pk string, provenAt time.Time) {
 	e.t.Helper()
 	c := e.srv.db.conn
@@ -123,9 +137,9 @@ func (e *acc1018Env) proven(id, pk string, provenAt time.Time) {
 		accAID, pk, provenAt.UnixMilli(), provenAt.UnixMilli()); err != nil {
 		e.t.Fatal(err)
 	}
-	if _, err := c.Exec(`INSERT INTO account_proofs (request_id, kind, account_id, pubkey, code, redeem_hash, status, created_at, expires_at, proven_at, proof_hash)
-		VALUES (?, 'login', ?, ?, '3HQ7ZB', ?, 'proven', ?, ?, ?, 'abcd')`, id, accAID, pk, account.HashRedeemSecret(accSecret),
-		provenAt.UnixMilli(), provenAt.Add(15*time.Minute).UnixMilli(), provenAt.UnixMilli()); err != nil {
+	if _, err := c.Exec(`INSERT INTO account_proofs (request_id, kind, account_id, pubkey, code, redeem_hash, status, created_at, expires_at, proven_at, proof_hash, proven_gen)
+		VALUES (?, 'login', ?, ?, '3HQ7ZB', ?, 'proven', ?, ?, ?, 'abcd', (SELECT session_gen FROM accounts WHERE account_id = ?))`, id, accAID, pk, account.HashRedeemSecret(accSecret),
+		provenAt.UnixMilli(), provenAt.Add(15*time.Minute).UnixMilli(), provenAt.UnixMilli(), accAID); err != nil {
 		e.t.Fatal(err)
 	}
 }
@@ -256,11 +270,35 @@ func TestAccounts1018_CSRFGuard(t *testing.T) {
 			t.Errorf("%s: %d, want 403", name, w.Code)
 		}
 	}
-	if w := e.req("POST", "/api/account/login", body, func(r *http.Request) {
+	// X-Forwarded-Host names this site only from a trusted proxy (#1020
+	// review N1): from anyone else it is the client's own claim.
+	viaProxy := func(r *http.Request) {
+		r.RemoteAddr = "10.0.0.7:4000"
+		r.Header.Set("Origin", "https://evil.example")
+		r.Header.Set("X-Forwarded-Host", "evil.example")
+	}
+	if w := e.req("POST", "/api/account/login", body, viaProxy); w.Code != http.StatusForbidden {
+		t.Errorf("X-Forwarded-Host without trustedProxies: %d, want 403", w.Code)
+	}
+	px := newAcc1018Env(t, accountAdminKey, accountsOn(nil))
+	px.srv.cfg.WebSocket = &WebSocketConfig{TrustedProxies: []string{"10.0.0.0/8"}}
+	px.svc = newAccountService(px.srv.cfg, px.srv.db.conn, filepath.Join(t.TempDir(), "meshcore.db"))
+	px.svc.now = func() time.Time { return px.now }
+	px.svc.readKey = func() ([]byte, error) { return accKey, nil }
+	px.srv.accounts = px.svc
+	px.addNode(pk, "Anna", "companion", false)
+	if w := px.req("POST", "/api/account/login", body, func(r *http.Request) {
+		viaProxy(r)
+		r.RemoteAddr = "203.0.113.9:4000" // public, not the proxy
+	}); w.Code != http.StatusForbidden {
+		t.Errorf("X-Forwarded-Host from an untrusted peer: %d, want 403", w.Code)
+	}
+	if w := px.req("POST", "/api/account/login", body, func(r *http.Request) {
+		viaProxy(r)
 		r.Header.Set("Origin", "https://proxy.example")
 		r.Header.Set("X-Forwarded-Host", "proxy.example")
 	}); w.Code != http.StatusAccepted {
-		t.Errorf("behind a proxy: %d", w.Code)
+		t.Errorf("behind a trusted proxy: %d %s", w.Code, w.Body)
 	}
 }
 

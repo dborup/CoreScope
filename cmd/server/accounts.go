@@ -28,8 +28,21 @@ package main
 // database and the session key file; a global sliding window of
 // loginsPerHour sign-ins (per-IP limits are skipped without trustedProxies,
 // so the global cap is what holds) plus loginsPerMinutePerIP; a global window
-// of writesPerHour account writes; MaxQueuedRequests command files; the
-// ingestor enforces the pending caps and maxMyNodes.
+// of writesPerHour account writes and a per-account one of
+// writesPerHourPerAccount; MaxQueuedRequests command files; the ingestor
+// enforces the pending caps and maxMyNodes.
+//
+// Revocation never waits on a budget (#1020 review F1): sign out everywhere
+// and delete skip both write windows and may use the queue's headroom, so a
+// stolen session cannot stop the owner from ending it. They cannot flood the
+// queue either: a repeat while the account's first one is still queued
+// answers with that request instead of queueing another.
+//
+// A proven sign-in is redeemed once (#1020 review F2): the proof carries the
+// session generation it was proven under (proven_gen), so a sign-out
+// everywhere after the proof makes it useless; a redeem is claimed in memory
+// under a lock, so two at once cannot both succeed, and queued as OpRedeem
+// so the ingestor records it (redeemed_at) and a restart does not reopen it.
 
 import (
 	"context"
@@ -38,8 +51,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -164,9 +179,21 @@ type accountService struct {
 	now     func() time.Time
 	readKey func() ([]byte, error)
 
-	logins    submissionWindow // global sign-in cap
-	writes    submissionWindow // global account-write cap
-	ipLimiter *ipRateLimiter   // per-IP sign-ins; a no-op without trustedProxies
+	logins     submissionWindow // global sign-in cap
+	writes     submissionWindow // global account-write cap
+	acctWrites *ipRateLimiter   // per-account write cap, keyed by account id
+	ipLimiter  *ipRateLimiter   // per-IP sign-ins; a no-op without trustedProxies
+	trusted    []*net.IPNet     // webSocket.trustedProxies: who may send X-Forwarded-Host
+
+	// claimMu guards redeemed and revocations, the two in-memory claims.
+	claimMu sync.Mutex
+	// redeemed maps a redeemed proof's request id to the end of its redeem
+	// window (Unix ms); past it the window refuses anyway, so it is
+	// dropped. Bounded by MaxPendingLogins.
+	redeemed map[string]int64
+	// revocations maps op|account|generation to its queued request id,
+	// kept while that request is queued. Bounded by revocationCap.
+	revocations map[string]string
 
 	keyMu        sync.Mutex
 	key          []byte
@@ -182,7 +209,10 @@ func newAccountService(cfg *Config, db *sql.DB, dbPath string) *accountService {
 		strongKey = cfg.APIKey != "" && !IsWeakAPIKey(cfg.APIKey)
 		trusted = cfg.WSTrustedProxies()
 	}
-	svc := &accountService{limits: ac.Limits(), db: db, now: time.Now}
+	svc := &accountService{limits: ac.Limits(), db: db, now: time.Now, trusted: parseCIDRListQuiet(trusted),
+		redeemed: map[string]int64{}, revocations: map[string]string{}}
+	svc.acctWrites = newKeyedRateLimiter(svc.limits.WritesPerHourPerAcct, time.Hour)
+	svc.acctWrites.now = func() time.Time { return svc.now() }
 	if dbPath != "" {
 		svc.queue = channelregistry.NewQueue(account.QueueDir(dbPath))
 		svc.readKey = func() ([]byte, error) { return account.ReadKey(dbPath) }
@@ -194,7 +224,7 @@ func newAccountService(cfg *Config, db *sql.DB, dbPath string) *accountService {
 	}
 	if svc.enabled {
 		svc.ipLimiter = newIPRateLimiter("accounts", "accounts.loginsPerMinutePerIP", svc.limits.LoginsPerMinutePerIP,
-			parseCIDRListQuiet(trusted), log.Printf)
+			svc.trusted, log.Printf)
 	}
 	return svc
 }
@@ -257,7 +287,9 @@ func isMissingAccountTable(err error) bool {
 // sameOriginWrite is the CSRF defence in depth under the SameSite=Strict
 // cookie: a state-changing request must name this site in Origin and, when
 // it has a body, send JSON. A form post from another site has neither.
-func sameOriginWrite(r *http.Request, withBody bool) bool {
+// X-Forwarded-Host counts as this site only from a trusted proxy (#1020
+// review N1): anyone else could send it.
+func sameOriginWrite(r *http.Request, withBody bool, trusted []*net.IPNet) bool {
 	if withBody && !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
 		return false
 	}
@@ -275,8 +307,24 @@ func sameOriginWrite(r *http.Request, withBody bool) bool {
 	if strings.EqualFold(u.Host, r.Host) {
 		return true
 	}
+	if !fromTrustedProxy(r, trusted) {
+		return false
+	}
 	fwd, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Host"), ",")
 	return fwd != "" && strings.EqualFold(u.Host, strings.TrimSpace(fwd))
+}
+
+// fromTrustedProxy reports whether r's peer is one of trusted.
+func fromTrustedProxy(r *http.Request, trusted []*net.IPNet) bool {
+	if len(trusted) == 0 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer := net.ParseIP(strings.TrimSpace(host))
+	return peer != nil && ipInAny(peer, trusted)
 }
 
 func setSessionCookie(w http.ResponseWriter, tok string, expMs, nowMs int64) {
@@ -417,7 +465,7 @@ func (s *Server) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "sign-in is disabled")
 		return
 	}
-	if !sameOriginWrite(r, true) {
+	if !sameOriginWrite(r, true, a.trusted) {
 		writeError(w, http.StatusForbidden, "cross-site request refused")
 		return
 	}
@@ -487,6 +535,10 @@ func (s *Server) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 // enqueue writes cmd, answering 503 when the queue is full and 500 on other
 // errors; it writes nothing on success.
 func (a *accountService) enqueue(w http.ResponseWriter, cmd account.Command) bool {
+	return a.enqueueMax(w, cmd, a.limits.MaxQueuedRequests)
+}
+
+func (a *accountService) enqueueMax(w http.ResponseWriter, cmd account.Command, max int) bool {
 	if a.queue == nil {
 		writeError(w, http.StatusServiceUnavailable, "accounts are unavailable")
 		return false
@@ -495,7 +547,7 @@ func (a *accountService) enqueue(w http.ResponseWriter, cmd account.Command) boo
 		writeError(w, http.StatusBadRequest, err.Error())
 		return false
 	}
-	if err := a.queue.EnqueueValue(cmd.RequestID, cmd, a.limits.MaxQueuedRequests); err != nil {
+	if err := a.queue.EnqueueValue(cmd.RequestID, cmd, max); err != nil {
 		if errors.Is(err, channelregistry.ErrQueueFull) {
 			setRetryAfter(w, time.Minute)
 			writeError(w, http.StatusServiceUnavailable, "the account queue is full, please try again later")
@@ -574,8 +626,10 @@ func (s *Server) handleAccountRequestStatus(w http.ResponseWriter, r *http.Reque
 
 // POST /api/account/session: redeem a proven sign-in. Read-only: the
 // sign-in must be proven, redeemed within RedeemWindow of its proof, with the
-// secret whose hash was queued, and its account must exist. Redeeming twice
-// inside the window is harmless: only the secret's holder can.
+// secret whose hash was queued, under the session generation it was proven
+// under (no sign-out everywhere since), and its account must exist. It is
+// redeemed once: claimRedeem refuses a second redeem at once, and the
+// queued OpRedeem makes the ingestor record it for good.
 func (s *Server) handleAccountSession(w http.ResponseWriter, r *http.Request) {
 	a := s.accountsSvc()
 	noStore(w)
@@ -583,7 +637,7 @@ func (s *Server) handleAccountSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "sign-in is disabled")
 		return
 	}
-	if !sameOriginWrite(r, true) {
+	if !sameOriginWrite(r, true, a.trusted) {
 		writeError(w, http.StatusForbidden, "cross-site request refused")
 		return
 	}
@@ -599,15 +653,16 @@ func (s *Server) handleAccountSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var (
-		status, hash, aid, pk string
-		provenAt, gen         sql.NullInt64
-		identityName          sql.NullString
+		status, hash, aid, pk           string
+		provenAt, gen, provenGen, spent sql.NullInt64
+		identityName                    sql.NullString
 	)
-	err := a.db.QueryRowContext(r.Context(), `SELECT p.status, p.redeem_hash, p.proven_at, COALESCE(a.account_id, ''),
-		COALESCE(a.session_gen, 0), COALESCE(a.identity_pubkey, ''), n.name
+	err := a.db.QueryRowContext(r.Context(), `SELECT p.status, p.redeem_hash, p.proven_at, p.proven_gen, p.redeemed_at,
+		COALESCE(a.account_id, ''), COALESCE(a.session_gen, 0), COALESCE(a.identity_pubkey, ''), n.name
 		FROM account_proofs p LEFT JOIN accounts a ON a.account_id = p.account_id
 		LEFT JOIN nodes n ON n.public_key = a.identity_pubkey
-		WHERE p.request_id = ? AND p.kind = 'login'`, body.RequestID).Scan(&status, &hash, &provenAt, &aid, &gen, &pk, &identityName)
+		WHERE p.request_id = ? AND p.kind = 'login'`, body.RequestID).Scan(&status, &hash, &provenAt, &provenGen, &spent,
+		&aid, &gen, &pk, &identityName)
 	refused := func() { writeError(w, http.StatusUnauthorized, "this sign-in cannot be used") }
 	if err == sql.ErrNoRows || isMissingAccountTable(err) {
 		refused()
@@ -624,13 +679,28 @@ func (s *Server) handleAccountSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if status != account.StatusProven || !provenAt.Valid || aid == "" || nowMs-provenAt.Int64 > a.limits.RedeemWindow.Milliseconds() ||
-		identityHidden(s.cfg, pk) {
+		spent.Valid || !provenGen.Valid || provenGen.Int64 != gen.Int64 || identityHidden(s.cfg, pk) {
 		refused()
 		return
 	}
 	claims, err := account.NewClaims(aid, gen.Int64, provenAt.Int64, nowMs, a.limits)
 	if err != nil {
 		refused()
+		return
+	}
+	switch a.claimRedeem(body.RequestID, provenAt.Int64+a.limits.RedeemWindow.Milliseconds(), nowMs) {
+	case claimTaken:
+		refused()
+		return
+	case claimFull:
+		setRetryAfter(w, time.Minute)
+		writeError(w, http.StatusServiceUnavailable, "too many sign-ins right now, please try again later")
+		return
+	}
+	mark := account.Command{RequestID: channelregistry.NewID(), Op: account.OpRedeem, AccountID: aid, Gen: gen.Int64,
+		ProofID: body.RequestID, CreatedAt: nowMs}
+	if !a.enqueueWithHeadroom(w, mark) {
+		a.releaseRedeem(body.RequestID) // nothing recorded it: the owner may try again
 		return
 	}
 	tok, err := account.SignSession(key, claims)
@@ -642,11 +712,55 @@ func (s *Server) handleAccountSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, AccountSessionResponse{IdentityPrefix: pk[:identityPrefixLen], IdentityName: identityName.String, ExpiresAt: claims.ExpiresAt})
 }
 
+type claimResult int
+
+const (
+	claimOK    claimResult = iota
+	claimTaken             // redeemed already
+	claimFull              // the table is at its bound
+)
+
+// claimRedeem claims proof id for one redeem until untilMs. The lock makes
+// the check and the claim one step: of two redeems at once, one wins.
+func (a *accountService) claimRedeem(id string, untilMs, nowMs int64) claimResult {
+	a.claimMu.Lock()
+	defer a.claimMu.Unlock()
+	if _, ok := a.redeemed[id]; ok {
+		return claimTaken
+	}
+	if len(a.redeemed) >= a.limits.MaxPendingLogins {
+		for k, until := range a.redeemed {
+			if until < nowMs {
+				delete(a.redeemed, k)
+			}
+		}
+		if len(a.redeemed) >= a.limits.MaxPendingLogins {
+			return claimFull
+		}
+	}
+	a.redeemed[id] = untilMs
+	return claimOK
+}
+
+func (a *accountService) releaseRedeem(id string) {
+	a.claimMu.Lock()
+	delete(a.redeemed, id)
+	a.claimMu.Unlock()
+}
+
+// enqueueWithHeadroom is enqueue for the requests an owner must always be
+// able to make (a revocation, recording a redeem): they may use up to
+// MaxQueuedRequests more files than other writes, so a queue that other
+// writes filled does not stop them.
+func (a *accountService) enqueueWithHeadroom(w http.ResponseWriter, cmd account.Command) bool {
+	return a.enqueueMax(w, cmd, 2*a.limits.MaxQueuedRequests)
+}
+
 // DELETE /api/account/session: sign out in this browser. A copy of the token
 // stays valid until it expires unless the owner signs out everywhere.
 func (s *Server) handleAccountSignOut(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	if !sameOriginWrite(r, false) {
+	if !sameOriginWrite(r, false, s.accountsSvc().trusted) {
 		writeError(w, http.StatusForbidden, "cross-site request refused")
 		return
 	}
@@ -721,13 +835,14 @@ func (s *Server) readAccount(ctx context.Context, sess accountSession) (AccountR
 }
 
 // accountWrite is the shared front of every account write: the gate, the
-// CSRF check, the session, the global write window and the queue. build
-// fills the op-specific fields; a false return means it answered already.
-// endSession clears this browser's cookie once the write is queued.
+// CSRF check, the session, the per-account and global write windows and the
+// queue. build fills the op-specific fields; a false return means it
+// answered already. endSession clears this browser's cookie once the write
+// is queued. A revocation skips the windows (queueRevocation).
 func (s *Server) accountWrite(w http.ResponseWriter, r *http.Request, withBody, endSession bool, build func(*account.Command) bool) (accountSession, bool) {
 	a := s.accountsSvc()
 	noStore(w)
-	if !sameOriginWrite(r, withBody) {
+	if !sameOriginWrite(r, withBody, a.trusted) {
 		writeError(w, http.StatusForbidden, "cross-site request refused")
 		return accountSession{}, false
 	}
@@ -739,13 +854,13 @@ func (s *Server) accountWrite(w http.ResponseWriter, r *http.Request, withBody, 
 	if !build(&cmd) {
 		return sess, false
 	}
-	if ok, wait := a.writes.allow(a.now(), a.limits.WritesPerHour); !ok {
-		setRetryAfter(w, wait)
-		writeError(w, http.StatusTooManyRequests, "too many account changes right now, please try again later")
-		return sess, false
-	}
-	if !a.enqueue(w, cmd) {
-		a.writes.refund()
+	if account.IsRevocation(cmd.Op) {
+		id, ok := a.queueRevocation(w, cmd)
+		if !ok {
+			return sess, false
+		}
+		cmd.RequestID = id
+	} else if !a.queueWrite(w, cmd) {
 		return sess, false
 	}
 	if endSession {
@@ -755,6 +870,72 @@ func (s *Server) accountWrite(w http.ResponseWriter, r *http.Request, withBody, 
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(AccountAcceptedResponse{RequestID: cmd.RequestID})
 	return sess, true
+}
+
+// queueWrite charges cmd to its account's window, then to the global one,
+// and queues it; a refusal or a failed enqueue gives both charges back.
+func (a *accountService) queueWrite(w http.ResponseWriter, cmd account.Command) bool {
+	tooMany := func(wait time.Duration) bool {
+		setRetryAfter(w, wait)
+		writeError(w, http.StatusTooManyRequests, "too many account changes right now, please try again later")
+		return false
+	}
+	if ok, wait := a.acctWrites.allowKey(cmd.AccountID); !ok {
+		return tooMany(wait)
+	}
+	if ok, wait := a.writes.allow(a.now(), a.limits.WritesPerHour); !ok {
+		a.acctWrites.refundKey(cmd.AccountID)
+		return tooMany(wait)
+	}
+	if !a.enqueue(w, cmd) {
+		a.writes.refund()
+		a.acctWrites.refundKey(cmd.AccountID)
+		return false
+	}
+	return true
+}
+
+// revocationCap bounds the revocations table: one entry per queued
+// revocation, and the queue holds at most this many with its headroom.
+func (a *accountService) revocationCap() int { return 2 * a.limits.MaxQueuedRequests }
+
+// queueRevocation queues a sign-out everywhere or a delete without a write
+// budget. A repeat for the same account, generation and op while the first
+// is still queued returns the first's request id: a stolen session can
+// neither be refused nor fill the queue. A first that finished or failed is
+// forgotten, so a retry queues afresh. The lock is held over the queue file
+// checks so two at once cannot both queue; revocations are rare.
+func (a *accountService) queueRevocation(w http.ResponseWriter, cmd account.Command) (string, bool) {
+	key := cmd.Op + "|" + cmd.AccountID + "|" + strconv.FormatInt(cmd.Gen, 10)
+	a.claimMu.Lock()
+	defer a.claimMu.Unlock()
+	if id, ok := a.revocations[key]; ok {
+		if a.stillQueued(id) {
+			return id, true
+		}
+		delete(a.revocations, key)
+	}
+	if len(a.revocations) >= a.revocationCap() {
+		for k, id := range a.revocations {
+			if !a.stillQueued(id) {
+				delete(a.revocations, k)
+			}
+		}
+	}
+	if !a.enqueueWithHeadroom(w, cmd) {
+		return "", false
+	}
+	if len(a.revocations) < a.revocationCap() {
+		a.revocations[key] = cmd.RequestID
+	}
+	return cmd.RequestID, true
+}
+
+// stillQueued reports whether request id waits for the ingestor.
+func (a *accountService) stillQueued(id string) bool {
+	var res account.Result
+	queued, err := a.queue.LookupValue(id, &res)
+	return err == nil && queued
 }
 
 // POST /api/account/my-nodes

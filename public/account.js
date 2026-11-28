@@ -508,34 +508,104 @@
     el.querySelector('.acct-signout-all').addEventListener('click', function () {
       confirmStep('End every session of this account, on all devices?', 'Sign out everywhere', function () {
         return call('POST', '/account/sign-out-all');
-      });
+      }, REVOKE_TEXT.signOutAll);
     });
     el.querySelector('.acct-delete').addEventListener('click', function () {
       confirmStep('Delete your account and its My nodes list? This browser keeps its own saved nodes.', 'Delete account', function () {
         return call('DELETE', '/account');
-      });
+      }, REVOKE_TEXT.del);
     });
   }
 
-  function confirmStep(question, action, run) {
+  var REVOKE_TEXT = {
+    signOutAll: {
+      waiting: 'Signing out everywhere…',
+      done: 'Signed out everywhere. Every session of this account has ended.',
+      failed: 'Sign out everywhere did not complete, so other devices may still be signed in. Sign in again and retry.'
+    },
+    del: {
+      waiting: 'Deleting your account…',
+      done: 'Your account and its My nodes list are deleted.',
+      failed: 'The account was not deleted. Sign in again and retry.'
+    }
+  };
+
+  // revocationLine maps the status of a queued sign-out-everywhere or
+  // delete (GET /api/account/requests/{id}) to the page. Only the server's
+  // "done" is success: the 202 alone means queued, not applied (#1020
+  // review N2). "gone" is the poller's 404: the request is unknown.
+  function revocationLine(st, text) {
+    var s = st && st.status;
+    if (s === 'done') return { done: true, ok: true, text: text.done, kind: 'success' };
+    if (s === 'queued') return { done: false, ok: false, text: text.waiting, kind: '' };
+    var why = s === 'error' && st.error ? ' (' + String(st.error) + ')' : '';
+    return { done: true, ok: false, text: text.failed + why, kind: 'error' };
+  }
+
+  function confirmStep(question, action, run, text) {
     var box = page() && page().querySelector('#acctConfirm');
     if (!box) return;
     box.hidden = false;
     box.innerHTML = '<p>' + esc(question) + '</p><div class="acct-actions">' +
       '<button type="button" class="btn btn-secondary acct-btn-danger acct-confirm-yes" data-testid="account-confirm-yes">' + esc(action) + '</button>' +
-      '<button type="button" class="btn btn-secondary acct-confirm-no">Keep</button></div>';
-    box.querySelector('.acct-confirm-no').addEventListener('click', function () { box.hidden = true; box.innerHTML = ''; });
-    box.querySelector('.acct-confirm-yes').addEventListener('click', function () {
-      run().then(afterSignOut, function (e) {
+      '<button type="button" class="btn btn-secondary acct-confirm-no">Keep</button></div>' +
+      '<p class="acct-status" data-testid="account-confirm-status" aria-live="polite"></p>';
+    // At phone height the box opens under the fold (and the bottom nav):
+    // bring the question to the middle of the screen (#1020 review N4).
+    if (typeof box.scrollIntoView === 'function') box.scrollIntoView({ block: 'center' });
+    var yes = box.querySelector('.acct-confirm-yes');
+    var no = box.querySelector('.acct-confirm-no');
+    var line = box.querySelector('.acct-status');
+    function show(l) { line.textContent = l.text; line.setAttribute('data-kind', l.kind); }
+    no.addEventListener('click', function () { box.hidden = true; box.innerHTML = ''; });
+    yes.addEventListener('click', function () {
+      yes.disabled = no.disabled = true;
+      show({ text: text.waiting, kind: '' });
+      run().then(function (res) {
+        // The server ended this browser's cookie already; the others end
+        // once the ingestor applies it, which the poll confirms.
+        signedOut();
+        waitForRevocation(res && res.requestId, text, show);
+      }, function (e) {
+        yes.disabled = no.disabled = false;
         writeFailed(e);
-        showStatus({ text: 'That did not work. Try again.', kind: 'error' });
+        show({ text: (e && e.status === 401) ? 'This session has already ended. Sign in again.' : 'That did not work. Try again.', kind: 'error' });
       });
     });
   }
 
-  function afterSignOut() {
+  function waitForRevocation(id, text, show) {
+    var v = view;
+    if (!v) return;
+    if (!id) { afterSignOut(revocationLine(null, text)); return; }
+    v.poller = root.AntennaClaims.createStatusPoller({
+      settings: root.AntennaClaims.DEFAULT_SETTINGS,
+      isAlive: function () { return v.alive; },
+      fetchStatus: function (rid) { return call('GET', '/account/requests/' + encodeURIComponent(rid)); },
+      keepGoing: function (st) { return !revocationLine(st, text).done; },
+      onUpdate: function (st) {
+        var l = revocationLine(st, text);
+        if (l.done) afterSignOut(l);
+        else show(l);
+      },
+      onGiveUp: function () {
+        afterSignOut({ text: 'Not confirmed yet: the server has not applied it. Sign in again and retry if other devices stay signed in.', kind: 'warn' });
+      }
+    });
+    v.poller.start(id);
+  }
+
+  // afterSignOut shows the sign-in step, with line (the outcome) if given.
+  function afterSignOut(line) {
     signedOut();
-    if (view) renderChoose('');
+    if (!view) return;
+    renderChoose('');
+    var p = line && line.text && page() && page().querySelector('#acctError');
+    if (p) {
+      p.textContent = line.text;
+      p.setAttribute('data-kind', line.kind);
+      p.setAttribute('data-testid', 'account-outcome');
+    }
   }
 
   if (typeof root.registerPage === 'function') root.registerPage('account', { init: init, destroy: destroy });
@@ -549,6 +619,8 @@
     nameFits: nameFits,
     nameFitsText: nameFitsText,
     statusLine: statusLine,
+    revocationLine: revocationLine,
+    REVOKE_TEXT: REVOKE_TEXT,
     loginError: loginError,
     normalizeKey: normalizeKey,
     companions: companions,

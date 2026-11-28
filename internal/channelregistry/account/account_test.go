@@ -105,6 +105,14 @@ func TestSessionHardCapAndRenewal(t *testing.T) {
 	if _, err := VerifySession(testKeyA, tok, auth+100*day, maxMs); err != ErrTokenExpired {
 		t.Fatalf("past the cap: %v", err)
 	}
+	// #1020 review N5 (R7): it is refused from its first use, not only
+	// once the cap has passed: a token that claims to outlive the cap is
+	// not one this server mints (NewClaims caps ExpiresAt), so it is
+	// refused on sight, e.g. one minted before an operator lowered
+	// sessionMaxDays.
+	if _, err := VerifySession(testKeyA, tok, auth+10*day, maxMs); err != ErrTokenExpired {
+		t.Fatalf("a token outliving the cap, inside the cap: %v", err)
+	}
 	fresh, _ := NewClaims(testAID, 1, auth, auth, l)
 	if fresh.NeedsRenewal(auth+day/2, l) {
 		t.Error("a token younger than a day is not renewed")
@@ -157,6 +165,7 @@ func TestCommandValidate(t *testing.T) {
 		{RequestID: "0123456789abcdef", Op: OpProfileSet, AccountID: testAID, Gen: 1, DisplayName: &empty},
 		{RequestID: "0123456789abcdef", Op: OpSignOutAll, AccountID: testAID, Gen: 1},
 		{RequestID: "0123456789abcdef", Op: OpDelete, AccountID: testAID, Gen: 1},
+		{RequestID: "0123456789abcdef", Op: OpRedeem, AccountID: testAID, Gen: 1, ProofID: "e000000000000001"},
 	}
 	for i, c := range good {
 		if err := c.Validate(); err != nil {
@@ -177,6 +186,11 @@ func TestCommandValidate(t *testing.T) {
 		"profile missing":    {RequestID: "0123456789abcdef", Op: OpProfileSet, AccountID: testAID, Gen: 1},
 		"unknown op":         {RequestID: "0123456789abcdef", Op: "link", AccountID: testAID, Gen: 1},
 		"bad request id":     {RequestID: "xyz", Op: OpDelete, AccountID: testAID, Gen: 1},
+		"redeem no proof":    {RequestID: "0123456789abcdef", Op: OpRedeem, AccountID: testAID, Gen: 1},
+		"redeem bad proof":   {RequestID: "0123456789abcdef", Op: OpRedeem, AccountID: testAID, Gen: 1, ProofID: "XYZ"},
+		"redeem no account":  {RequestID: "0123456789abcdef", Op: OpRedeem, Gen: 1, ProofID: "e000000000000001"},
+		"proof on a write":   {RequestID: "0123456789abcdef", Op: OpSignOutAll, AccountID: testAID, Gen: 1, ProofID: "e000000000000001"},
+		"proof on a login":   {RequestID: "0123456789abcdef", Op: OpLogin, PubKey: testPK, Code: "7KX9QM", RedeemHash: hash, ProofID: "e000000000000001"},
 		"name hint control":  {RequestID: "0123456789abcdef", Op: OpMyNodesSet, AccountID: testAID, Gen: 1, Nodes: []MyNode{{PubKey: testPK, Name: "a\nb"}}},
 	}
 	bad["add two"] = Command{RequestID: "0123456789abcdef", Op: OpMyNodeAdd, AccountID: testAID, Gen: 1, Nodes: []MyNode{{PubKey: testPK}, {PubKey: strings.Repeat("ef", 32)}}}
@@ -214,6 +228,12 @@ func TestLimitsDefaultsAndBounds(t *testing.T) {
 	if l.SessionMax != 20*24*time.Hour || l.SessionTTL != l.SessionMax || l.MaxMyNodes != 200 {
 		t.Fatalf("bounds: %+v", l)
 	}
+	if l.WritesPerHourPerAcct != DefaultWritesPerHourPerAcct || (&Config{WritesPerHourPerAcct: 7}).Limits().WritesPerHourPerAcct != 7 {
+		t.Fatalf("writesPerHourPerAccount: %+v", l)
+	}
+	if !IsRevocation(OpSignOutAll) || !IsRevocation(OpDelete) || IsRevocation(OpProfileSet) || IsRevocation(OpRedeem) {
+		t.Fatal("IsRevocation")
+	}
 	var c *Config
 	if c.Requested() {
 		t.Fatal("nil config is off")
@@ -222,5 +242,40 @@ func TestLimitsDefaultsAndBounds(t *testing.T) {
 	c.ApplyGates(func(p ...string) bool { return strings.Join(p, ".") == "accounts.enabled" })
 	if !c.Requested() {
 		t.Fatal("accounts.enabled opens it")
+	}
+}
+
+// #1020 review N3: owner decision 3 is a 90-day hard cap. Asking for more
+// gets 90, never the asked-for value nor a fallback above the cap.
+func TestLimitsSessionHardCap90Days(t *testing.T) {
+	const d = 24 * time.Hour
+	cases := []struct {
+		days, maxDays int
+		ttl, max      time.Duration
+	}{
+		{0, 0, 30 * d, 90 * d},
+		{0, 365, 30 * d, 90 * d},
+		{0, 91, 30 * d, 90 * d},
+		{120, 0, 90 * d, 90 * d},
+		{365, 365, 90 * d, 90 * d},
+		{120, 60, 60 * d, 60 * d},
+		{7, 14, 7 * d, 14 * d},
+		{-5, -5, 30 * d, 90 * d},
+	}
+	for _, c := range cases {
+		l := (&Config{SessionDays: c.days, SessionMaxDays: c.maxDays}).Limits()
+		if l.SessionTTL != c.ttl || l.SessionMax != c.max {
+			t.Errorf("sessionDays %d sessionMaxDays %d: ttl %v max %v, want %v %v", c.days, c.maxDays, l.SessionTTL, l.SessionMax, c.ttl, c.max)
+		}
+		if l.SessionMax > HardSessionMaxDays*d || l.SessionTTL > l.SessionMax {
+			t.Errorf("past the hard cap: %+v", l)
+		}
+	}
+	// No configuration yields a session that outlives the cap.
+	l := (&Config{SessionDays: 365, SessionMaxDays: 365}).Limits()
+	auth := int64(1_800_000_000_000)
+	c, err := NewClaims(testAID, 1, auth, auth+89*day, l)
+	if err != nil || c.ExpiresAt != auth+90*day {
+		t.Fatalf("renewed at day 89: exp day %d, err %v", (c.ExpiresAt-auth)/day, err)
 	}
 }

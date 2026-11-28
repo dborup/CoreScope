@@ -52,7 +52,13 @@ const (
 	OpProfileSet   = "profile-set"    // set or clear the display name
 	OpSignOutAll   = "sign-out-all"   // end every session: session_gen + 1
 	OpDelete       = "delete"         // delete the account and its list
+	OpRedeem       = "redeem"         // mark a proven sign-in as redeemed (ProofID)
 )
+
+// IsRevocation reports whether op ends the account's sessions. The server
+// never makes these wait on a write budget: an owner can always sign out
+// everywhere or delete the account, even when a stolen session spent it.
+func IsRevocation(op string) bool { return op == OpSignOutAll || op == OpDelete }
 
 // Login statuses, as stored in account_proofs.status.
 const (
@@ -170,7 +176,8 @@ type MyNode struct {
 }
 
 // Command is one queued request. OpLogin carries PubKey, Code and
-// RedeemHash, and no account. Every other op carries AccountID and Gen, the
+// RedeemHash, and no account. OpRedeem carries the proof's request id as
+// ProofID. Every other op carries AccountID and Gen, the
 // session generation of the token that asked for it: the ingestor refuses a
 // command whose Gen is no longer the account's, so nothing queued before a
 // sign-out-everywhere or a delete applies after it.
@@ -182,6 +189,7 @@ type Command struct {
 	PubKey      string   `json:"pubkey,omitempty"`
 	Code        string   `json:"code,omitempty"`
 	RedeemHash  string   `json:"redeemHash,omitempty"`
+	ProofID     string   `json:"proofId,omitempty"`
 	Nodes       []MyNode `json:"nodes,omitempty"`
 	DisplayName *string  `json:"displayName,omitempty"`
 	CreatedAt   int64    `json:"createdAt"`
@@ -198,12 +206,15 @@ func (c Command) Validate() error {
 	}
 	if c.Op == OpLogin {
 		if c.AccountID != "" || c.Gen != 0 || !antennaclaim.ValidPubKey(c.PubKey) ||
-			!antennaclaim.ValidCode(c.Code) || !validHash(c.RedeemHash) || len(c.Nodes) > 0 || c.DisplayName != nil {
+			!antennaclaim.ValidCode(c.Code) || !validHash(c.RedeemHash) || len(c.Nodes) > 0 || c.DisplayName != nil || c.ProofID != "" {
 			return ErrInvalidCommand
 		}
 		return nil
 	}
 	if !ValidAccountID(c.AccountID) || c.Gen < 1 || c.Code != "" || c.RedeemHash != "" {
+		return ErrInvalidCommand
+	}
+	if (c.Op == OpRedeem) != (c.ProofID != "") {
 		return ErrInvalidCommand
 	}
 	switch c.Op {
@@ -221,6 +232,10 @@ func (c Command) Validate() error {
 		}
 	case OpProfileSet:
 		if c.DisplayName == nil || (*c.DisplayName != "" && !ValidDisplayName(*c.DisplayName)) || c.PubKey != "" || len(c.Nodes) > 0 {
+			return ErrInvalidCommand
+		}
+	case OpRedeem:
+		if !validRequestID(c.ProofID) || c.PubKey != "" || len(c.Nodes) > 0 || c.DisplayName != nil {
 			return ErrInvalidCommand
 		}
 	case OpSignOutAll, OpDelete:
@@ -262,10 +277,12 @@ type Result struct {
 
 // Defaults. Every limit is bounded.
 const (
-	DefaultSessionDays          = 30
-	MaxSessionDays              = 90
-	DefaultSessionMaxDays       = 90
-	MaxSessionMaxDays           = 365
+	DefaultSessionDays = 30
+	// HardSessionMaxDays is the hard cap of owner decision 3: no session
+	// lasts longer than 90 days after the proof that signed in, whatever
+	// the config says. sessionDays and sessionMaxDays are clamped to it.
+	HardSessionMaxDays          = 90
+	DefaultSessionMaxDays       = HardSessionMaxDays
 	DefaultLoginCodeMinutes     = 15
 	MaxLoginCodeMinutes         = 60
 	DefaultRedeemMinutes        = 10
@@ -273,6 +290,7 @@ const (
 	DefaultLoginsPerHour        = 120
 	DefaultLoginsPerMinutePerIP = 2
 	DefaultWritesPerHour        = 600
+	DefaultWritesPerHourPerAcct = 120
 	DefaultMaxPendingLogins     = 512
 	DefaultMaxPendingPerKey     = 8
 	DefaultMaxQueuedRequests    = 256
@@ -303,6 +321,7 @@ type Config struct {
 	LoginsPerHour        int   `json:"loginsPerHour,omitempty"`
 	LoginsPerMinutePerIP int   `json:"loginsPerMinutePerIP,omitempty"`
 	WritesPerHour        int   `json:"writesPerHour,omitempty"`
+	WritesPerHourPerAcct int   `json:"writesPerHourPerAccount,omitempty"`
 	MaxPendingLogins     int   `json:"maxPendingLogins,omitempty"`
 	MaxPendingPerKey     int   `json:"maxPendingPerKey,omitempty"`
 	MaxQueuedRequests    int   `json:"maxQueuedRequests,omitempty"`
@@ -332,7 +351,8 @@ type Limits struct {
 	MaxMyNodes           int
 	LoginsPerHour        int
 	LoginsPerMinutePerIP int
-	WritesPerHour        int
+	WritesPerHour        int // all accounts together; never charged for a revocation
+	WritesPerHourPerAcct int // one account; never charged for a revocation
 	MaxPendingLogins     int
 	MaxPendingPerKey     int
 	MaxQueuedRequests    int
@@ -347,8 +367,8 @@ func (c *Config) Limits() Limits {
 	if c != nil {
 		in = *c
 	}
-	maxDays := bounded(in.SessionMaxDays, MaxSessionMaxDays, DefaultSessionMaxDays)
-	days := min(bounded(in.SessionDays, MaxSessionDays, DefaultSessionDays), maxDays)
+	maxDays := clamped(in.SessionMaxDays, HardSessionMaxDays, DefaultSessionMaxDays)
+	days := min(clamped(in.SessionDays, HardSessionMaxDays, DefaultSessionDays), maxDays)
 	l := Limits{
 		SessionTTL:           time.Duration(days) * 24 * time.Hour,
 		SessionMax:           time.Duration(maxDays) * 24 * time.Hour,
@@ -358,6 +378,7 @@ func (c *Config) Limits() Limits {
 		LoginsPerHour:        bounded(in.LoginsPerHour, 100000, DefaultLoginsPerHour),
 		LoginsPerMinutePerIP: bounded(in.LoginsPerMinutePerIP, 1000, DefaultLoginsPerMinutePerIP),
 		WritesPerHour:        bounded(in.WritesPerHour, 100000, DefaultWritesPerHour),
+		WritesPerHourPerAcct: bounded(in.WritesPerHourPerAcct, 100000, DefaultWritesPerHourPerAcct),
 		MaxPendingLogins:     bounded(in.MaxPendingLogins, 100000, DefaultMaxPendingLogins),
 		MaxPendingPerKey:     bounded(in.MaxPendingPerKey, 100, DefaultMaxPendingPerKey),
 		MaxQueuedRequests:    bounded(in.MaxQueuedRequests, 100000, DefaultMaxQueuedRequests),
@@ -366,6 +387,15 @@ func (c *Config) Limits() Limits {
 	}
 	l.MaxResults = l.MaxQueuedRequests * maxResultFactor
 	return l
+}
+
+// clamped is def when v <= 0, hi when v > hi, else v: for a hard cap,
+// where asking for more must still get the most that is allowed.
+func clamped(v, hi, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return min(v, hi)
 }
 
 // bounded is v when 0 < v <= hi, else def.

@@ -1473,8 +1473,11 @@ func EnsureNodeAntennaClaims(rw *sql.DB) error {
 var AccountTables = []string{"accounts", "account_proofs", "account_my_nodes"}
 
 // accountDDL creates the account tables. account_proofs holds one row per
-// sign-in code (kind 'login'; M2 adds 'link'); account_my_nodes is the
-// synced watch list, which proves nothing, as My Mesh never did.
+// sign-in code (kind 'login'; M2 adds 'link'): proven_gen is the account's
+// session_gen when the code was proven, so a sign-out-everywhere makes an
+// unredeemed proof useless, and redeemed_at marks the one redeem a proof
+// allows. account_my_nodes is the synced watch list, which proves nothing,
+// as My Mesh never did.
 var accountDDL = []string{
 	`CREATE TABLE IF NOT EXISTS accounts (
 		account_id TEXT PRIMARY KEY CHECK(length(account_id) = 32),
@@ -1497,6 +1500,8 @@ var accountDDL = []string{
 		expires_at INTEGER NOT NULL,
 		proven_at INTEGER NULL,
 		proof_hash TEXT NULL,
+		proven_gen INTEGER NULL,
+		redeemed_at INTEGER NULL,
 		CHECK((status = 'proven') = (proven_at IS NOT NULL)),
 		CHECK(kind != 'login' OR status != 'proven' OR account_id IS NOT NULL)
 	)`,
@@ -1517,6 +1522,19 @@ func EnsureAccounts(rw *sql.DB) error {
 	for _, q := range accountDDL {
 		if _, err := rw.Exec(q); err != nil {
 			return err
+		}
+	}
+	// Tables created before the proof columns existed (the #1018 M1 branch
+	// on a test instance) get them added.
+	for _, col := range []string{"proven_gen", "redeemed_at"} {
+		has, err := TableHasColumn(rw, "account_proofs", col)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := rw.Exec("ALTER TABLE account_proofs ADD COLUMN " + col + " INTEGER NULL"); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

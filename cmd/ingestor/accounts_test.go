@@ -419,3 +419,87 @@ func BenchmarkAccount1018_ObserveAdvert(b *testing.B) {
 		r.observeAdvert(p, "h", true)
 	}
 }
+
+// #1020 review F2: a proof records the generation it was proven under, and
+// OpRedeem records its one redeem; neither applies once the generation moved.
+func TestAccount1020_ProofGenerationAndRedeemRecord(t *testing.T) {
+	r := newAccountRig(t, nil)
+	aid := r.signIn(loginA)
+	provenGen := func(id string) (gen, redeemed sql.NullInt64) {
+		t.Helper()
+		if err := r.store.db.QueryRow(`SELECT proven_gen, redeemed_at FROM account_proofs WHERE request_id = ?`, id).Scan(&gen, &redeemed); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if g, red := provenGen(loginA); !g.Valid || g.Int64 != 1 || red.Valid {
+		t.Fatalf("new account's proof: gen %v redeemed %v", g, red)
+	}
+	r.send(account.Command{RequestID: writeA, Op: account.OpRedeem, AccountID: aid, Gen: 1, ProofID: loginA})
+	if res := r.res(writeA); res.Status != account.RequestDone {
+		t.Fatalf("redeem record: %+v", res)
+	}
+	_, red := provenGen(loginA)
+	if !red.Valid || red.Int64 != r.clock.UnixMilli() {
+		t.Fatalf("redeemed_at %v", red)
+	}
+	// A second record does not move it.
+	r.clock = r.clock.Add(time.Minute)
+	r.send(account.Command{RequestID: writeB, Op: account.OpRedeem, AccountID: aid, Gen: 1, ProofID: loginA})
+	if _, again := provenGen(loginA); again.Int64 != red.Int64 {
+		t.Fatalf("redeemed_at moved: %v -> %v", red, again)
+	}
+
+	// Sign out everywhere, then a new sign-in: its proof carries gen 2, and
+	// a redeem record under the old generation is refused.
+	r.send(account.Command{RequestID: writeC, Op: account.OpSignOutAll, AccountID: aid, Gen: 1})
+	if again := r.signIn(loginB); again != aid {
+		t.Fatalf("a new sign-in made another account: %s", again)
+	}
+	if g, _ := provenGen(loginB); g.Int64 != 2 {
+		t.Fatalf("proof after sign-out-all: gen %v, want 2", g)
+	}
+	r.send(account.Command{RequestID: "f000000000000009", Op: account.OpRedeem, AccountID: aid, Gen: 1, ProofID: loginB})
+	if res := r.res("f000000000000009"); res.Status != account.RequestError || !strings.Contains(res.Error, "session has ended") {
+		t.Fatalf("stale-generation redeem record: %+v", res)
+	}
+	if _, red := provenGen(loginB); red.Valid {
+		t.Fatal("a stale-generation redeem record was applied")
+	}
+}
+
+// #1020 review N5 (R5): the in-memory map never hands out an expired code,
+// even before the next reload drops it.
+func TestAccount1020_MatchSkipsExpiredCode(t *testing.T) {
+	r := newAccountRig(t, nil)
+	nowMs := r.clock.UnixMilli()
+	r.acc.pending[r.pk] = []pendingLogin{{id: loginA, code: loginCode, expiresAt: nowMs - 1}}
+	if _, ok := r.acc.match(r.pk, "Anna "+loginCode, 31); ok {
+		t.Fatal("an expired code matched")
+	}
+	if len(r.acc.pending[r.pk]) != 1 {
+		t.Fatal("an expired code was used up by the map")
+	}
+	r.acc.pending[r.pk][0].expiresAt = nowMs
+	if pl, ok := r.acc.match(r.pk, "Anna "+loginCode, 31); !ok || pl.id != loginA {
+		t.Fatal("a code at its last millisecond did not match")
+	}
+}
+
+// #1020 review N5 (R6): when the map and the table disagree about the key,
+// the proof never crosses to another companion.
+func TestAccount1020_ProveLoginRefusesAnotherKey(t *testing.T) {
+	r := newAccountRig(t, nil)
+	r.login(loginA, loginCode)
+	other := strings.Repeat("b2", 32)
+	ok, err := r.store.proveLogin(context.Background(), loginA, other, "h", r.clock.UnixMilli())
+	if err != nil || ok {
+		t.Fatalf("proveLogin with another key: ok=%v err=%v", ok, err)
+	}
+	if st, aid := r.proof(loginA); st != account.StatusPending || aid != "" {
+		t.Fatalf("proof %s %q, want still pending", st, aid)
+	}
+	if n := r.count(`SELECT COUNT(*) FROM accounts`); n != 0 {
+		t.Fatalf("%d accounts created for the wrong key", n)
+	}
+}

@@ -41,7 +41,7 @@ Signed in, **My Mesh** on Home shows your account's list. Add a node with the se
 ## Signing out and deleting
 
 - **Sign out** ends the session in this browser.
-- **Sign out everywhere** ends every session of the account, on every device, within a few seconds. Use it if you lost a phone or signed in on a shared computer.
+- **Sign out everywhere** ends every session of the account, on every device, within a few seconds. Use it if you lost a phone or signed in on a shared computer. It always works, however many changes the account made before, and the page says it is done only once the server confirms it; if it could not be applied, the page says so. A sign-in code you proved but did not finish using cannot be used after it either.
 - **Delete account** deletes the account and its list. Station data you set for your nodes is not touched (it is not part of the account).
 - An account nobody signs in to for 24 months is deleted automatically.
 - A session lasts 30 days and is renewed while you use it, but you must sign in again with your companion at least every 90 days.

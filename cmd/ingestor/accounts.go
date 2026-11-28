@@ -28,7 +28,10 @@ package main
 //
 // Writes carry the session generation of the token that asked for them; a
 // command whose generation is no longer the account's is refused, so nothing
-// queued before "sign out everywhere" or a delete applies after it.
+// queued before "sign out everywhere" or a delete applies after it. A proof
+// records the generation it was proven under (proven_gen) and, once the
+// server redeemed it, when (redeemed_at, OpRedeem): the server refuses a
+// proof that was redeemed or whose generation has moved on.
 
 import (
 	"context"
@@ -196,7 +199,8 @@ func (s *Store) proveLogin(ctx context.Context, id, pubkey, hash string, nowMs i
 		return false, nil
 	}
 	var aid string
-	err = tx.QueryRowContext(ctx, `SELECT account_id FROM accounts WHERE identity_pubkey = ?`, pubkey).Scan(&aid)
+	gen := int64(1) // a new account's first generation (the column default)
+	err = tx.QueryRowContext(ctx, `SELECT account_id, session_gen FROM accounts WHERE identity_pubkey = ?`, pubkey).Scan(&aid, &gen)
 	switch {
 	case err == sql.ErrNoRows:
 		if aid, err = account.NewID(); err != nil {
@@ -213,8 +217,10 @@ func (s *Store) proveLogin(ctx context.Context, id, pubkey, hash string, nowMs i
 			return false, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE account_proofs SET status = 'proven', proven_at = ?, proof_hash = ?, account_id = ?
-		WHERE request_id = ? AND status = 'pending'`, nowMs, hash, aid, id); err != nil {
+	// proven_gen binds the proof to this generation: a sign-out everywhere
+	// before the redeem makes it useless (#1020 review F2).
+	if _, err := tx.ExecContext(ctx, `UPDATE account_proofs SET status = 'proven', proven_at = ?, proof_hash = ?, account_id = ?, proven_gen = ?
+		WHERE request_id = ? AND status = 'pending'`, nowMs, hash, aid, gen, id); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
@@ -317,6 +323,14 @@ func (s *Store) applyAccountWrite(ctx context.Context, cmd account.Command, l ac
 	case account.OpProfileSet:
 		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET display_name = ? WHERE account_id = ?`,
 			nullString(*cmd.DisplayName), aid); err != nil {
+			return err
+		}
+	case account.OpRedeem:
+		// Records the one redeem a proof allows; the server already refused
+		// any other in memory, this keeps it refused after a restart.
+		if _, err := tx.ExecContext(ctx, `UPDATE account_proofs SET redeemed_at = ?
+			WHERE request_id = ? AND account_id = ? AND kind = 'login' AND status = 'proven' AND redeemed_at IS NULL`,
+			nowMs, cmd.ProofID, aid); err != nil {
 			return err
 		}
 	case account.OpSignOutAll:

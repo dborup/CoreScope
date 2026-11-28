@@ -243,19 +243,20 @@ An approved height ranks below a per-node height in `radio.antennaHeightsM` and 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `false` | Opens sign-in. Only takes effect with a strong `apiKey` (16+ characters, not a placeholder). Read by its exact spelling. With it on, the ingestor creates the session key file at its start. |
-| `sessionDays` | `30` | How long a session lasts. It is renewed on use once it is a day old. At most 90, and never more than `sessionMaxDays`. |
-| `sessionMaxDays` | `90` | The hard cap: no session lasts longer than this after the sign-in, renewed or not. At most 365. |
+| `sessionDays` | `30` | How long a session lasts. It is renewed on use once it is a day old. Never more than `sessionMaxDays`; a larger value is clamped to it. |
+| `sessionMaxDays` | `90` | The cap: no session lasts longer than this after the sign-in, renewed or not. It can be lowered but never raised: a value above 90 is clamped to 90 (owner decision 3, a 90-day hard cap). |
 | `loginCodeMinutes` | `15` | A sign-in code's lifetime. At most 60. |
 | `maxMyNodes` | `200` | Nodes on one account's list. At most 1000. |
 | `loginsPerHour` | `120` | Global sliding window on new sign-ins. This is the limit that holds in the shipped Docker setup, where per-client limits cannot tell clients apart. |
 | `loginsPerMinutePerIP` | `2` | Per-client limit on new sign-ins. Only enforced when `webSocket.trustedProxies` names your reverse proxy. |
-| `writesPerHour` | `600` | Global sliding window on account changes (list, display name, sign-out-everywhere, delete). |
+| `writesPerHour` | `600` | Global sliding window on account changes (the list and the display name). Sign out everywhere and delete account are never counted, so an owner can always end a stolen session. |
+| `writesPerHourPerAccount` | `120` | The same window for one account, so one session cannot spend the global window for everyone. Sign out everywhere and delete account are not counted here either. |
 | `maxPendingLogins` | `512` | Unproven sign-ins over all companions. A sign-in over the limit is refused; it never evicts another. |
 | `maxPendingPerKey` | `8` | Unproven sign-ins per companion. |
 | `maxQueuedRequests` | `256` | Requests waiting for the ingestor in `account-requests/` next to the database. |
 | `inactiveMonths` | `24` | Accounts without a sign-in for this long are deleted with their list (owner decision 9). At most 120. |
 
-A value outside its range falls back to its default.
+A value outside its range falls back to its default, except `sessionDays` and `sessionMaxDays`, which are clamped to the 90-day cap.
 
 **The session.** The cookie is `__Host-mv_session`: `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`. Browsers drop a `Secure` cookie on plain `http://` (except `localhost`), so serve the site over HTTPS. Every change (`POST`, `DELETE`) must come from the site itself: a missing or foreign `Origin` is refused with 403. Behind a proxy that rewrites `Host`, pass `X-Forwarded-Host`.
 
