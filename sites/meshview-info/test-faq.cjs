@@ -64,6 +64,25 @@ const timeout = setTimeout(() => { console.error('TIMEOUT'); process.exit(1); },
   await page.locator('#roller a[href="#observer"]').evaluate(a => a.closest('details').open = true);
   await page.locator('#roller a[href="#observer"]').tap();
   await page.waitForFunction(() => document.getElementById('observer').open);
+  // Tapping the same in-page link again after closing the answer reopens it (the hash does not change).
+  await page.locator('#observer').evaluate(d => { d.open = false; });
+  await page.locator('#roller a[href="#observer"]').tap();
+  await page.waitForFunction(() => document.getElementById('observer').open, null, { timeout: 2000 });
+
+  // Facts fixed after review: repeaters get the longer grace period, hidden is not deleted,
+  // and hashtag channels are readable by anyone who knows the name.
+  const text = id => page.locator('#' + id).evaluate(d => d.textContent.replace(/\s+/g, ' '));
+  const grey = await text('graa-noder');
+  assert(!/repeatere skal høres oftere/i.test(grey), 'repeaters are not the ones that must be heard more often');
+  assert(/Repeatere og room servers[^.]*lang tid/.test(grey) && /Companions[^.]*en time og et døgn/.test(grey), 'role thresholds stated the right way round');
+  const hide = await text('skjul-node');
+  assert(/ikke det samme som at slette/.test(hide) && !/fjerner/.test(hide), 'hiding is not presented as removal');
+  assert(/alle, der kender navnet, kan derfor læse med/i.test(await text('beskeder')), 'hashtag channel keys come from the name');
+
+  // Reduced motion turns smooth scrolling off.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).scrollBehavior), 'auto');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
 
   // Site-relative links point at pages that exist.
   const rel = await page.evaluate(() => [...new Set([...document.querySelectorAll('a[href^="/"]')].map(a => a.getAttribute('href').split('#')[0]))]);

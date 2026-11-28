@@ -24,6 +24,7 @@
       --main:    'Syne', sans-serif;
     }
     html { scroll-behavior: smooth; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
     body { background:var(--bg); color:var(--text); font-family:var(--main); min-height:100vh; overflow-x:hidden; }
     body::before {
       content:''; position:fixed; inset:0; z-index:0;
@@ -388,7 +389,7 @@
       <details class="faq-item" id="graa-noder">
         <summary>Hvorfor er nogle noder grå eller blege på kortet?</summary>
         <div class="faq-a">
-          <p>En node bliver bleg, når den ikke er hørt i et stykke tid. Grænsen afhænger af rollen: repeatere skal høres oftere end companions, der ofte er slukket.</p>
+          <p>En node bliver bleg, når den ikke er hørt i et stykke tid. Grænsen afhænger af rollen. Repeatere og room servers står normalt tændt hele tiden, så de får lang tid: de bliver blege efter et døgn uden at blive hørt og regnes som tavse efter tre døgn. Companions er ofte slukket eller uden for rækkevidde, så for dem er grænserne en time og et døgn.</p>
           <p>Hvis den stadig er aktiv, kommer den tilbage, så snart en observer hører den igen.</p>
         </div>
       </details>
@@ -505,14 +506,17 @@
         <summary>Kan andre læse mine beskeder?</summary>
         <div class="faq-a">
           <p>Nej, ikke dine private beskeder. Direkte beskeder mellem to noder er krypteret, og MeshView kan ikke læse dem.</p>
-          <p>Beskeder på <strong>offentlige kanaler</strong> kan alle læse, også i MeshView: Public-kanalen, Meshview.dk-kanalen og hashtag-kanaler (kanaler med <code>#</code> i navnet, hvor nøglen kommer af navnet). En privat kanal med din egen nøgle kan MeshView ikke læse.</p>
+          <p>Beskeder på <strong>offentlige kanaler</strong> kan alle læse, også i MeshView: Public-kanalen og Meshview.dk-kanalen.</p>
+          <p><strong>Hashtag-kanaler</strong> (kanaler med <code>#</code> i navnet) har en nøgle, der kommer af navnet. Alle, der kender navnet, kan derfor læse med. MeshView viser de hashtag-kanaler, den kender navnet på: en liste med almindelige navne og de kanaler, brugere har foreslået, og som er godkendt. Kender MeshView ikke navnet, vises kanalen ikke, men den er stadig ikke hemmelig for andre, der kender det.</p>
+          <p>Skal en kanal være privat, så brug en privat kanal med din egen nøgle. Den kan MeshView ikke læse.</p>
         </div>
       </details>
       <details class="faq-item" id="skjul-node">
-        <summary>Hvordan skjuler eller fjerner jeg min node?</summary>
+        <summary>Hvordan skjuler jeg min node?</summary>
         <div class="faq-a">
           <p>Omdøb noden, så navnet starter med <code>🚫</code>, og send et advert. Så vises den ikke længere på MeshViews kort og lister. Noden virker stadig i netværket som normalt; den er kun skjult her.</p>
-          <p>Vil du have den fjernet på en anden måde, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>.</p>
+          <p>At skjule er ikke det samme som at slette. Pakker, som noden allerede har sendt eller videresendt, bliver liggende, til de udløber efter 30 dage, og de kan stadig indgå i statistik over ruter og dækning.</p>
+          <p>Vil du have dine data slettet, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>.</p>
         </div>
       </details>
     </div>
@@ -584,6 +588,14 @@
       if (el && el.tagName === 'DETAILS') el.open = true;
     }
     window.addEventListener('hashchange', openHash);
+    // Same link tapped again after closing the answer: the hash does not
+    // change, so hashchange never fires. Open it on the click as well.
+    document.addEventListener('click', function (e) {
+      var a = e.target.closest && e.target.closest('a[href^="#"]');
+      if (!a) return;
+      var el = document.getElementById(decodeURIComponent(a.getAttribute('href').slice(1)));
+      if (el && el.tagName === 'DETAILS') el.open = true;
+    });
     openHash();
   })();
 </script>
