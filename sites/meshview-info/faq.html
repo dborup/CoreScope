@@ -233,7 +233,7 @@
       <details class="faq-item" id="radio-indstillinger">
         <summary>Hvilke radio-indstillinger skal jeg bruge?</summary>
         <div class="faq-a">
-          <p>Preset <strong>EU/UK (Narrow)</strong>: 869,618 MHz, båndbredde 62,5 kHz, SF8. Alle detaljer, også til repeatere, står på <a href="/radio">radio-indstillingerne</a>.</p>
+          <p>869,618 MHz, båndbredde 62,5 kHz, SF8 og coding rate 8. Tjek værdierne, ikke kun preset-navnet (<strong>EU/UK (Narrow)</strong>). Alle detaljer, også til repeatere, står på <a href="/radio">radio-indstillingerne</a>.</p>
         </div>
       </details>
       <details class="faq-item" id="kun-sent">
@@ -305,7 +305,7 @@
       <details class="faq-item" id="companion-adgangskode">
         <summary>Skal min companion have et brugernavn og en adgangskode?</summary>
         <div class="faq-a">
-          <p>Nej. En companion taler kun med din telefon over Bluetooth og har intet med MQTT at gøre. Det er kun en observer, der sender data til MeshView.</p>
+          <p>Nej. En companion taler med din telefon eller computer over Bluetooth, USB eller WiFi og har intet med MQTT at gøre. Det er kun en observer, der sender data til MeshView.</p>
         </div>
       </details>
       <details class="faq-item" id="observer-registrering">
@@ -360,7 +360,7 @@
       <details class="faq-item" id="efter-opdatering">
         <summary>Jeg har opdateret firmwaren, og nu forbinder den ikke. Hvad skal jeg gøre?</summary>
         <div class="faq-a">
-          <p>En opdatering kan nulstille MQTT-opsætningen. Indtast kommandoerne fra <a href="/observer">guiden</a> igen, og genstart. Har du valgt "Erase device", har radioen fået en ny identitet. Så kommer den frem som en ny node, og den gamle forsvinder af sig selv efter 7 dage.</p>
+          <p>En opdatering kan nulstille MQTT-opsætningen. Indtast kommandoerne fra <a href="/observer">guiden</a> igen, og genstart. Har du valgt "Erase device", har radioen fået en ny identitet. Så kommer den frem som en ny node, og den gamle forsvinder fra kort og lister, når den ikke har sendt et advert i 7 dage.</p>
         </div>
       </details>
       <details class="faq-item" id="iata">
@@ -389,7 +389,8 @@
       <details class="faq-item" id="graa-noder">
         <summary>Hvorfor er nogle noder grå eller blege på kortet?</summary>
         <div class="faq-a">
-          <p>En node bliver bleg, når den ikke er hørt i et stykke tid. Grænsen afhænger af rollen. Repeatere og room servers står normalt tændt hele tiden, så de får lang tid: de bliver blege efter et døgn uden at blive hørt og regnes som tavse efter tre døgn. Companions er ofte slukket eller uden for rækkevidde, så for dem er grænserne en time og et døgn.</p>
+          <p>En node bliver grå på kortet, når den ikke er hørt i et stykke tid. Grænsen afhænger af rollen. På meshview.dk er den ca. 4 døgn for companions, som ofte er slukket eller uden for rækkevidde, og ca. 10 døgn for repeatere og room servers, som normalt står tændt hele tiden.</p>
+          <p>En node, der hverken har sendt et advert eller er genkendt i en pakkes rute i 7 dage, forsvinder helt fra kortet. En repeater, der er helt væk, forsvinder derfor typisk, før den når at blive grå.</p>
           <p>Hvis den stadig er aktiv, kommer den tilbage, så snart en observer hører den igen.</p>
         </div>
       </details>
@@ -420,19 +421,19 @@
       <details class="faq-item" id="spoegelse">
         <summary>Hvordan får jeg fjernet en gammel eller dobbelt node (et "spøgelse")?</summary>
         <div class="faq-a">
-          <p>Den forsvinder af sig selv: en node, der ikke er hørt i 7 dage, flyttes til listen over inaktive noder. Det sker typisk efter en genflashing, hvor radioen har fået en ny nøgle. Vil du have den væk med det samme, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a> med nodens public key.</p>
+          <p>Den forsvinder af sig selv fra kort og lister: en node, der hverken har sendt et advert eller er genkendt i en pakkes rute i 7 dage, flyttes til listen over inaktive noder. Det sker typisk efter en genflashing, hvor radioen har fået en ny nøgle. Vil du have den væk med det samme, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a> med nodens public key.</p>
         </div>
       </details>
       <details class="faq-item" id="repeater-forsvinder">
         <summary>Min repeater forsvinder fra kortet en gang imellem. Hvorfor?</summary>
         <div class="faq-a">
-          <p>MeshView kan kun vise det, en observer hører. Står din repeater langt fra den nærmeste observer, bliver den kun hørt, når forholdene er gode. En observer tæt på løser det.</p>
+          <p>MeshView kan kun vise det, en observer hører. Står din repeater langt fra den nærmeste observer, bliver den kun hørt, når forholdene er gode. Så bliver den grå på kortet, og har ingen observer hørt den i 7 dage, forsvinder den. En observer tæt på løser det.</p>
         </div>
       </details>
       <details class="faq-item" id="scope">
         <summary>Hvad er scope (region)?</summary>
         <div class="faq-a">
-          <p>Scope bestemmer, hvilke pakker en repeater sender videre. En repeater med <code>#dk</code> sender pakker videre, som er mærket <code>#dk</code>. Scope bestemmer ikke, hvad der kan høres: alle i nærheden kan stadig høre pakken. Se anbefalingerne på <a href="https://meshguide.dk" target="_blank" rel="noopener">meshguide.dk</a>.</p>
+          <p>Scope bestemmer, hvilke pakker en repeater sender videre. En repeater med <code>#dk</code> sender pakker videre, som er mærket <code>#dk</code>. Scope gælder kun pakker, der sendes ud til alle (flood), ikke direkte rutede pakker. Pakker uden scope sender en repeater også videre, medmindre den er sat til at afvise dem. Scope bestemmer ikke, hvad der kan høres: alle i nærheden kan stadig høre pakken. Se anbefalingerne på <a href="https://meshguide.dk" target="_blank" rel="noopener">meshguide.dk</a>.</p>
         </div>
       </details>
       <details class="faq-item" id="hash-kollisioner">
@@ -454,7 +455,7 @@
       <details class="faq-item" id="ingen-noder">
         <summary>Hvorfor er der ingen noder i mit område?</summary>
         <div class="faq-a">
-          <p>Fordi ingen har sat en repeater op endnu. Netværket bygges af frivillige, én station ad gangen. En repeater højt oppe hos dig er netop det, der fylder hullet.</p>
+          <p>Enten har ingen sat en repeater op endnu, eller også er der ingen observer, der hører området. Netværket bygges af frivillige, én station ad gangen. En repeater højt oppe hos dig, eller en observer, er netop det, der fylder hullet.</p>
         </div>
       </details>
       <details class="faq-item" id="antennens-hoejde">
@@ -484,7 +485,7 @@
       <details class="faq-item" id="tyskland-sverige">
         <summary>Kan vi forbinde os med de tyske og svenske netværk?</summary>
         <div class="faq-a">
-          <p>Ja, hvis de bruger de samme radio-indstillinger. Kan din repeater høre en tysk eller svensk repeater med samme indstillinger, sender den bare videre.</p>
+          <p>Ja, hvis de bruger de samme radio-indstillinger. Kan din repeater høre en tysk eller svensk repeater med samme indstillinger, sender den deres pakker videre, medmindre en pakke er mærket med et scope, din repeater ikke kender, eller din repeater er sat til kun at sende sit eget scope videre (se <a href="#scope">scope</a>).</p>
         </div>
       </details>
     </div>
@@ -495,11 +496,14 @@
         <summary>Hvilke data gemmer MeshView, og hvor længe?</summary>
         <div class="faq-a">
           <p>MeshView gemmer det, observerne hører i luften: pakker med deres rute og signalstyrke, og nodernes adverts med navn, rolle, offentlig nøgle og position. Det er data, som alle med en MeshCore-radio i nærheden kan modtage.</p>
+          <p>Teksten i beskeder på offentlige kanaler og på de hashtag-kanaler, MeshView kender, gemmes og vises også.</p>
           <ul>
-            <li>Pakker gemmes i 30 dage.</li>
-            <li>En node, der ikke er hørt i 7 dage, flyttes til listen over inaktive noder.</li>
-            <li>En observer, der ikke har sendt data i 7 dage, fjernes.</li>
+            <li>Pakker, også kanalbeskeder, gemmes i 30 dage.</li>
+            <li>En node, der hverken har sendt et advert eller er genkendt i en pakkes rute i 7 dage, forsvinder fra kort og lister. Dens navn, nøgle og sidste position gemmes stadig i listen over inaktive noder, og dens nodeside kan stadig åbnes.</li>
+            <li>En observer, der ikke har sendt data i 7 dage, vises ikke længere, men den gemmes stadig.</li>
+            <li>Ping Scores gemmer navnet på den, der satte en ping i gang, så rekorderne kan bevares.</li>
           </ul>
+          <p>Vil du have data om din node slettet, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a> med nodens public key.</p>
         </div>
       </details>
       <details class="faq-item" id="beskeder">
@@ -514,8 +518,8 @@
       <details class="faq-item" id="skjul-node">
         <summary>Hvordan skjuler jeg min node?</summary>
         <div class="faq-a">
-          <p>Omdøb noden, så navnet starter med <code>🚫</code>, og send et advert. Så vises den ikke længere på MeshViews kort og lister. Noden virker stadig i netværket som normalt; den er kun skjult her.</p>
-          <p>At skjule er ikke det samme som at slette. Pakker, som noden allerede har sendt eller videresendt, bliver liggende, til de udløber efter 30 dage, og de kan stadig indgå i statistik over ruter og dækning.</p>
+          <p>Omdøb noden, så navnet starter med <code>🚫</code>, og send et advert. Så forsvinder den fra MeshViews kort, nodeliste og søgning. Noden virker stadig i netværket som normalt.</p>
+          <p>At skjule er ikke det samme som at slette. Pakker, som noden har sendt, også dens adverts med navn og position, kan stadig ses på pakkesiden, til de udløber efter 30 dage. Det gælder også adverts, den sender efter omdøbningen. Vil du ikke vise din position, så fjern den fra noden, før du sender et nyt advert.</p>
           <p>Vil du have dine data slettet, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>.</p>
         </div>
       </details>
@@ -538,8 +542,8 @@
       <details class="faq-item" id="sabotage">
         <summary>Hvor svært er det at sabotere netværket?</summary>
         <div class="faq-a">
-          <p>Som al radio kan det forstyrres lokalt med en kraftig sender, men det er ulovligt. Nettet har ingen central server, der kan lukkes, så en forstyrrelse rammer kun det område, hvor den sker.</p>
-          <p>Nodernes adverts er signeret med deres nøgle, og direkte beskeder er krypteret, så de kan ikke forfalskes. På offentlige kanaler kan alle med kanalnøglen derimod skrive, og afsendernavnet er bare tekst. Stol derfor ikke blindt på et navn i en offentlig kanal.</p>
+          <p>Som al radio kan det forstyrres lokalt med en kraftig sender, men det er ulovligt. Nettet har ingen central server, der kan lukkes. Støjer nogen på frekvensen, rammer det kun området omkring senderen. Spam med pakker sendes derimod videre af repeaterne og kan belaste hele nettet.</p>
+          <p>Nodernes adverts er signeret med deres nøgle, så ingen kan udgive sig for at være en eksisterende node. Men alle kan lave en ny node med et hvilket som helst navn og en hvilken som helst position. Direkte beskeder er krypteret. På offentlige kanaler kan alle med kanalnøglen derimod skrive, og afsendernavnet er bare tekst. Stol derfor ikke blindt på et navn i en offentlig kanal.</p>
         </div>
       </details>
       <details class="faq-item" id="hvem-staar-bag">

@@ -72,12 +72,25 @@ const timeout = setTimeout(() => { console.error('TIMEOUT'); process.exit(1); },
   // Facts fixed after review: repeaters get the longer grace period, hidden is not deleted,
   // and hashtag channels are readable by anyone who knows the name.
   const text = id => page.locator('#' + id).evaluate(d => d.textContent.replace(/\s+/g, ' '));
+  // The numbers are meshview.dk's: healthThresholds infraSilentHours 250 and nodeSilentHours 92
+  // (the map greys a node at the silent threshold), retention nodeDays 7 and packetDays 30.
   const grey = await text('graa-noder');
   assert(!/repeatere skal høres oftere/i.test(grey), 'repeaters are not the ones that must be heard more often');
-  assert(/Repeatere og room servers[^.]*lang tid/.test(grey) && /Companions[^.]*en time og et døgn/.test(grey), 'role thresholds stated the right way round');
+  assert(/ca\. 4 døgn for companions/.test(grey) && /ca\. 10 døgn for repeatere og room servers/.test(grey), 'map grey thresholds per role');
+  assert(/i 7 dage, forsvinder helt fra kortet/.test(grey), 'nodes leave the map after 7 days');
   const hide = await text('skjul-node');
   assert(/ikke det samme som at slette/.test(hide) && !/fjerner/.test(hide), 'hiding is not presented as removal');
-  assert(/alle, der kender navnet, kan derfor læse med/i.test(await text('beskeder')), 'hashtag channel keys come from the name');
+  assert(/adverts med navn og position, kan stadig ses på pakkesiden, til de udløber efter 30 dage/.test(hide), 'hidden nodes stay visible on the packets page for 30 days');
+  const msgs = await text('beskeder');
+  assert(/alle, der kender navnet, kan derfor læse med/i.test(msgs), 'hashtag channel keys come from the name');
+  assert(/privat kanal med din egen nøgle\. Den kan MeshView ikke læse/.test(msgs), 'a private channel with its own key is not readable');
+  const data = await text('hvilke-data');
+  assert(/Pakker, også kanalbeskeder, gemmes i 30 dage/.test(data), 'packet retention');
+  assert(/navn, nøgle og sidste position gemmes stadig/.test(data) && /Ping Scores gemmer navnet/.test(data), 'says what is kept');
+  assert(/ikke kun preset-navnet/.test(await text('radio-indstillinger')) && /coding rate 8/.test(await text('radio-indstillinger')), 'radio values incl. coding rate');
+  // Observer server address matches the observer guide.
+  const guideServer = fs.readFileSync(path.join(__dirname, 'observer.html'), 'utf8').match(/wss:\/\/[^\s<"]+/)[0];
+  assert((await page.locator('details.faq-item').evaluateAll(ds => ds.map(d => d.textContent).join(' '))).includes(guideServer), 'FAQ names the same observer server as /observer');
 
   // Reduced motion turns smooth scrolling off.
   await page.emulateMedia({ reducedMotion: 'reduce' });
