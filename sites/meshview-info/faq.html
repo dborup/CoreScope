@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FAQ — MeshView.dk</title>
+  <meta name="description" content="Ofte stillede spørgsmål om MeshView og det danske MeshCore-netværk: kom i gang, kortet, data og privatliv." />
+  <link rel="stylesheet" href="/meshview-info-assets/site.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:      #080c10;
+      --bg2:     #0d1520;
+      --bg3:     #111d2c;
+      --accent:  #00e5a0;
+      --accent2: #00aaff;
+      --warn:    #ffb400;
+      --danger:  #ff4d6d;
+      --text:    #cdd9e5;
+      --muted:   #4a6070;
+      --border:  rgba(0,229,160,.15);
+      --glow:    0 0 18px rgba(0,229,160,.35);
+      --mono:    'Share Tech Mono', monospace;
+      --main:    'Syne', sans-serif;
+    }
+    html { scroll-behavior: smooth; }
+    body { background:var(--bg); color:var(--text); font-family:var(--main); min-height:100vh; overflow-x:hidden; }
+    body::before {
+      content:''; position:fixed; inset:0; z-index:0;
+      background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      background-size:200px; pointer-events:none;
+    }
+    body::after {
+      content:''; position:fixed; inset:0; z-index:0;
+      background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.07) 2px,rgba(0,0,0,.07) 4px);
+      pointer-events:none;
+    }
+    .wrap { position:relative; z-index:1; max-width:980px; margin:0 auto; padding:0 24px; }
+
+    /* NAV */
+    nav { position:sticky; top:0; z-index:100; border-bottom:1px solid var(--border); background:rgba(8,12,16,.92); backdrop-filter:blur(12px); }
+    .nav-inner { display:flex; align-items:center; justify-content:space-between; height:60px; max-width:1200px; margin:0 auto; padding:0 24px; }
+    .logo { font-family:var(--mono); font-size:1.1rem; color:var(--accent); letter-spacing:.08em; text-decoration:none; }
+    .logo span { color:var(--text); }
+    .nav-links { display:flex; gap:32px; list-style:none; }
+    .nav-links a { font-family:var(--mono); font-size:.8rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; text-transform:uppercase; transition:color .2s; }
+    .nav-links a:hover { color:var(--accent); }
+    .back-link { font-family:var(--mono); font-size:.78rem; color:var(--accent); text-decoration:none; display:inline-flex; align-items:center; gap:7px; }
+    .back-link:hover { text-decoration:underline; }
+
+    /* HERO */
+    .doc-hero { padding:70px 0 36px; }
+    .doc-tag { font-family:var(--mono); font-size:.72rem; color:var(--accent); letter-spacing:.2em; text-transform:uppercase; margin-bottom:16px; display:flex; align-items:center; gap:10px; }
+    .doc-tag::before { content:''; width:24px; height:1px; background:var(--accent); }
+    h1 { font-size:clamp(2.2rem,4.5vw,3.4rem); font-weight:800; line-height:1.08; letter-spacing:-.02em; margin-bottom:20px; }
+    h1 em { font-style:normal; color:var(--accent); }
+    .lead { font-size:1.05rem; color:var(--muted); line-height:1.75; max-width:700px; }
+    .lead a.inline { color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    .lead a.inline:hover { border-color:var(--accent); }
+
+    .divider { height:1px; background:linear-gradient(90deg,transparent,var(--border),transparent); margin:8px 0; }
+
+    /* QUICK START CALLOUT */
+    .quickstart {
+      display:flex; gap:20px; align-items:center; flex-wrap:wrap;
+      background:linear-gradient(135deg, rgba(0,229,160,.08), rgba(0,170,255,.05));
+      border:1px solid var(--border); border-radius:10px; padding:24px 26px; margin:36px 0;
+    }
+    .qs-body { flex:1; min-width:240px; }
+    .qs-tag { font-family:var(--mono); font-size:.66rem; color:var(--accent); letter-spacing:.18em; text-transform:uppercase; margin-bottom:8px; }
+    .qs-title { font-size:1.2rem; font-weight:800; margin-bottom:8px; }
+    .qs-desc { font-size:.92rem; color:var(--muted); line-height:1.65; }
+    .btn { display:inline-flex; align-items:center; gap:8px; padding:12px 26px; font-family:var(--mono); font-size:.84rem; letter-spacing:.06em; text-decoration:none; border-radius:4px; transition:all .2s; white-space:nowrap; }
+    .btn-primary { background:var(--accent); color:#030608; box-shadow:var(--glow); }
+    .btn-primary:hover { background:#00ffb2; box-shadow:0 0 28px rgba(0,229,160,.6); }
+
+    /* SECTION */
+    .doc-section { padding:20px 0 60px; }
+    h2 { font-size:1.6rem; font-weight:800; letter-spacing:-.01em; margin-bottom:8px; }
+    h2 em { font-style:normal; color:var(--accent); }
+    .sec-sub { font-size:.95rem; color:var(--muted); line-height:1.7; margin-bottom:28px; max-width:620px; }
+
+    /* DEVICE GRID */
+    .dev-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:18px; }
+    .dev-card {
+      background:var(--bg2); border:1px solid var(--border); border-radius:10px;
+      padding:24px; display:flex; flex-direction:column; gap:12px;
+      transition:border-color .2s, transform .2s; position:relative; overflow:hidden;
+      text-decoration:none;
+    }
+    .dev-card::before {
+      content:''; position:absolute; top:0; left:0; right:0; height:2px;
+      background:linear-gradient(90deg,var(--accent),var(--accent2));
+      transform:scaleX(0); transform-origin:left; transition:transform .3s;
+    }
+    .dev-card:hover::before { transform:scaleX(1); }
+    .dev-card:hover { border-color:rgba(0,229,160,.4); transform:translateY(-3px); }
+    .dev-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .dev-name { font-size:1.15rem; font-weight:800; color:var(--text); line-height:1.2; }
+    .dev-chip { font-family:var(--mono); font-size:.7rem; color:var(--accent2); margin-top:4px; }
+    .dev-arrow { font-family:var(--mono); color:var(--accent); font-size:1.1rem; flex-shrink:0; opacity:.5; transition:opacity .2s, transform .2s; }
+    .dev-card:hover .dev-arrow { opacity:1; transform:translateX(3px); }
+    .dev-desc { font-size:.9rem; color:var(--muted); line-height:1.6; flex:1; }
+    .dev-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+    .dev-tag { font-family:var(--mono); font-size:.6rem; letter-spacing:.06em; text-transform:uppercase; padding:3px 8px; border-radius:20px; background:var(--bg3); color:var(--muted); border:1px solid var(--border); }
+    .dev-tag.hot { color:var(--accent); border-color:rgba(0,229,160,.3); }
+
+    /* EQUIPMENT */
+    .eq-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:18px; }
+    .eq-card { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:22px 24px; }
+    .eq-head { display:flex; align-items:center; gap:11px; margin-bottom:12px; }
+    .eq-ico { font-size:1.3rem; }
+    .eq-name { font-size:1.1rem; font-weight:800; color:var(--text); }
+    .eq-desc { font-size:.9rem; color:var(--muted); line-height:1.65; margin-bottom:14px; }
+    .eq-pick { display:flex; align-items:baseline; gap:8px; padding-top:12px; border-top:1px solid rgba(0,229,160,.08); }
+    .eq-pick .lbl { font-family:var(--mono); font-size:.62rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); white-space:nowrap; }
+    .eq-pick a { font-family:var(--mono); font-size:.8rem; color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    .eq-pick a:hover { border-color:var(--accent); }
+    .eq-pick .placeholder { font-family:var(--mono); font-size:.78rem; color:var(--muted); font-style:italic; }
+
+    /* FOOTER */
+    footer { border-top:1px solid var(--border); padding:36px 0; margin-top:40px; }
+    .footer-inner { max-width:1200px; margin:0 auto; padding:0 24px; display:flex; justify-content:space-between; align-items:center; gap:20px; flex-wrap:wrap; }
+    .footer-logo { font-family:var(--mono); color:var(--accent); font-size:.9rem; }
+    .footer-links { display:flex; gap:24px; list-style:none; }
+    .footer-links a { font-family:var(--mono); font-size:.7rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; }
+    .footer-links a:hover { color:var(--accent); }
+    .footer-copy { font-family:var(--mono); font-size:.68rem; color:var(--muted); }
+
+    @media(max-width:700px) {
+      .dev-grid,.eq-grid { grid-template-columns:1fr; }
+      .nav-links { display:none; }
+    }
+
+    /* FAQ */
+    .faq-toc { display:flex; flex-wrap:wrap; gap:10px 22px; margin-top:26px; }
+    .faq-toc a { font-family:var(--mono); font-size:.78rem; color:var(--accent); text-decoration:none; letter-spacing:.06em; min-height:44px; display:inline-flex; align-items:center; }
+    .faq-toc a:hover { text-decoration:underline; }
+    .faq-group { margin-top:44px; scroll-margin-top:130px; }
+    .faq-group h2 { font-size:1.35rem; font-weight:700; margin-bottom:14px; }
+    .faq-group h2 em { font-style:normal; color:var(--accent); }
+    .faq-item { border:1px solid var(--border); border-radius:6px; background:var(--bg2); margin-bottom:10px; scroll-margin-top:130px; }
+    .faq-item summary { cursor:pointer; list-style:none; padding:14px 46px 14px 18px; min-height:48px; position:relative; font-weight:700; font-size:1rem; line-height:1.45; }
+    .faq-item summary::-webkit-details-marker { display:none; }
+    .faq-item summary::after { content:'+'; position:absolute; right:18px; top:12px; font-family:var(--mono); color:var(--accent); font-size:1.2rem; }
+    .faq-item[open] summary::after { content:'−'; }
+    .faq-item summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; border-radius:6px; }
+    .faq-item summary:hover { color:var(--accent); }
+    .faq-a { padding:0 18px 16px; color:var(--text); line-height:1.7; font-size:.96rem; }
+    .faq-a p + p, .faq-a p + ul, .faq-a ul + p { margin-top:10px; }
+    .faq-a ul { padding-left:20px; }
+    .faq-a li { margin:4px 0; }
+    .faq-a a { color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    .faq-a a:hover { border-color:var(--accent); }
+    .faq-a code { font-family:var(--mono); font-size:.9em; color:var(--accent2); }
+    .faq-more { margin-top:44px; font-family:var(--mono); font-size:.8rem; color:var(--muted); line-height:1.7; border-left:2px solid var(--border); padding-left:14px; }
+    .faq-more a { color:var(--accent); }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/velkommen" class="logo">mesh<span>view</span>.dk</a>
+    <ul class="nav-links">
+      <li><a href="https://meshview.dk/#/live" target="_blank" rel="noopener">Live</a></li>
+      <li><a href="/velkommen#noder">Noder</a></li>
+      <li><a href="/velkommen#guide">Kom i gang</a></li>
+      <li><a href="/guider">Guider</a></li>
+      <li><a href="https://tools.meshview.dk">Værktøjer</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section class="doc-hero">
+  <div class="wrap">
+    <a href="/velkommen#" class="back-link">← Tilbage til forsiden</a>
+    <div class="doc-tag" style="margin-top:18px">// ofte stillede spørgsmål</div>
+    <h1>Spørgsmål og <em>svar</em></h1>
+    <p class="lead">
+      Korte svar på det, vi oftest bliver spurgt om. Vil du se det vist, så prøv
+      <a class="inline" href="/guider">videoguiderne</a>.
+    </p>
+    <div class="faq-toc">
+      <a href="#kom-i-gang">Kom i gang</a>
+      <a href="#kortet">Kortet og data</a>
+      <a href="#privatliv">Privatliv</a>
+    </div>
+  </div>
+</section>
+
+<section class="doc-section">
+  <div class="wrap">
+
+    <div class="faq-group" id="kom-i-gang">
+      <h2>Kom <em>i gang</em></h2>
+      <details class="faq-item" id="hvad-er-meshcore">
+        <summary>Hvad er MeshCore og MeshView?</summary>
+        <div class="faq-a">
+          <p>MeshCore er et off-grid mesh-netværk over LoRa-radio. Små, billige radioer sender beskeder videre for hinanden, uden internet og uden mobilnet. Repeatere på tage og master giver rækkevidde på mange kilometer.</p>
+          <p>MeshView er et kort og et værktøj over det danske MeshCore-netværk. Det viser noderne, pakkerne og ruterne, som observere rundt om i landet hører dem.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="koster-det">
+        <summary>Koster det noget, og skal jeg have licens?</summary>
+        <div class="faq-a">
+          <p>Netværket og MeshView er gratis og drives af frivillige. Du betaler kun for din egen hardware, typisk et par hundrede kroner for en lille node.</p>
+          <p>MeshCore bruger et licensfrit radiobånd ved 868 MHz, så du skal ikke have licens. Brug de danske <a href="/radio">radio-indstillinger</a>, så du holder dig inden for reglerne og kan tale med resten af netværket.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="hvilken-hardware">
+        <summary>Hvilken hardware skal jeg købe?</summary>
+        <div class="faq-a">
+          <p>Det afhænger af, hvad noden skal bruges til. På <a href="/hardware">hardware-siden</a> er enhederne delt op efter brug, med links til producenterne. Køb altid 868 MHz-varianten.</p>
+          <p>Til at komme i gang er en lille companion-node, som du parrer med MeshCore-appen på telefonen, det nemmeste.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="roller">
+        <summary>Hvad er forskellen på companion, repeater og room server?</summary>
+        <div class="faq-a">
+          <ul>
+            <li><strong>Companion:</strong> din personlige node. Du parrer den med telefonen og skriver beskeder i MeshCore-appen.</li>
+            <li><strong>Repeater:</strong> står fast, gerne højt, og sender andres pakker videre. Det er repeaterne, der giver netværket rækkevidde.</li>
+            <li><strong>Room server:</strong> et fælles chatrum, der gemmer beskeder, så man kan læse dem senere.</li>
+          </ul>
+          <p>En observer er en repeater eller room server, der også sender det, den hører, til MeshView. Se <a href="#observer">hvordan du bliver observer</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="kan-ikke-se-node">
+        <summary>Hvorfor kan jeg ikke se min node på kortet?</summary>
+        <div class="faq-a">
+          <p>De mest almindelige grunde:</p>
+          <ul>
+            <li><strong>Ingen position.</strong> Noden skal have en position i sine adverts, enten fra GPS eller sat i appen eller CLI'en.</li>
+            <li><strong>Ingen observer hører den.</strong> MeshView ser kun det, som en observer har hørt, direkte eller via repeatere. Står du langt fra andre, kan du selv <a href="/observer">blive observer</a>.</li>
+            <li><strong>Den har ikke sendt et advert endnu.</strong> Repeatere sender adverts med lange mellemrum. Send et advert manuelt fra appen, så ses noden med det samme.</li>
+            <li><strong>Den står uden for Danmark.</strong> Kortet viser kun noder i og omkring Danmark.</li>
+            <li><strong>Navnet starter med 🚫.</strong> Så er noden bevidst skjult (se <a href="#skjul-node">skjul din node</a>).</li>
+          </ul>
+        </div>
+      </details>
+      <details class="faq-item" id="observer">
+        <summary>Hvad er en observer, og hvordan bliver jeg en?</summary>
+        <div class="faq-a">
+          <p>En observer er en node, der lytter med og sender det, den hører, til MeshView over internettet. Uden observere er der intet at vise, så hver ny observer gør kortet bedre, især hvor der er få i forvejen.</p>
+          <p>Det kræver en repeater eller room server med WiFi og firmware, der kan sende til MQTT. Guiden <a href="/observer">Bliv observer</a> tager dig igennem det trin for trin.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="faq-group" id="kortet">
+      <h2>Kortet og <em>data</em></h2>
+      <details class="faq-item" id="hash-storrelse">
+        <summary>Hvad betyder 1-, 2- og 3-byte hash?</summary>
+        <div class="faq-a">
+          <p>Når en pakke sendes videre, skriver hver repeater et kort id i pakkens rute: de første 1, 2 eller 3 bytes af sin offentlige nøgle. Det kaldes path hash mode.</p>
+          <p>Med 1 byte er der kun 256 mulige id'er, så mange repeatere deler samme id, og MeshView kan ikke altid vide, hvilken repeater en pakke gik igennem. Derfor anbefaler vi 2-byte på både repeatere og companions. Se <a href="/radio">radio-indstillingerne</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="graa-noder">
+        <summary>Hvorfor er nogle noder grå eller blege på kortet?</summary>
+        <div class="faq-a">
+          <p>En node bliver bleg, når den ikke er hørt i et stykke tid. Grænsen afhænger af rollen: repeatere skal høres oftere end companions, der ofte er slukket.</p>
+          <p>Hvis den stadig er aktiv, kommer den tilbage, så snart en observer hører den igen.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="set-hoert">
+        <summary>Hvad er forskellen på "set" og "hørt"?</summary>
+        <div class="faq-a">
+          <ul>
+            <li><strong>Set</strong> (last seen) er sidste gang, noden sendte et advert, altså sit navn og sin position.</li>
+            <li><strong>Hørt</strong> (last heard) er sidste gang, noden blev hørt overhovedet, også når den bare sendte en besked eller videresendte en pakke.</li>
+          </ul>
+          <p>En repeater kan derfor være hørt for få minutter siden, selvom dens sidste advert er mange timer gammelt.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="skraafoto-virker-ikke">
+        <summary>Hvorfor virker skråfoto, luftfoto eller terrænprofil ikke?</summary>
+        <div class="faq-a">
+          <p>Skråfoto, luftfoto, Skærmkort og højdedata kommer fra Klimadatastyrelsens Dataforsyningen. Når deres tjenester er nede eller under vedligehold, kan MeshView ikke vise dem. Prøv igen senere; resten af MeshView virker som normalt.</p>
+          <p>Se også videoguiderne til <a href="/guider">skråfoto og terrænprofil</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="antennehoejde">
+        <summary>Hvordan angiver jeg min antennehøjde?</summary>
+        <div class="faq-a">
+          <p>Ejeren af en repeater kan angive antennens højde over jorden. Det bruges i terrænprofilen og rækkeviddeberegningen, så resultaterne passer bedre til virkeligheden.</p>
+          <p>Du får en kode, som du midlertidigt sætter i nodens navn og sender et advert med. Så ved MeshView, at det er dig, der ejer noden. Hele fremgangsmåden står i <a href="https://github.com/dborup/CoreScope/blob/master/docs/user-guide/antenna-height-claims.md" target="_blank" rel="noopener">vejledningen om antennehøjde</a>.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="faq-group" id="privatliv">
+      <h2><em>Privatliv</em></h2>
+      <details class="faq-item" id="hvilke-data">
+        <summary>Hvilke data gemmer MeshView, og hvor længe?</summary>
+        <div class="faq-a">
+          <p>MeshView gemmer det, observerne hører i luften: pakker med deres rute og signalstyrke, og nodernes adverts med navn, rolle, offentlig nøgle og position. Det er data, som alle med en MeshCore-radio i nærheden kan modtage.</p>
+          <ul>
+            <li>Pakker gemmes i 30 dage.</li>
+            <li>En node, der ikke er hørt i 7 dage, flyttes til listen over inaktive noder.</li>
+            <li>En observer, der ikke har sendt data i 7 dage, fjernes.</li>
+          </ul>
+        </div>
+      </details>
+      <details class="faq-item" id="beskeder">
+        <summary>Kan andre læse mine beskeder?</summary>
+        <div class="faq-a">
+          <p>Nej, ikke dine private beskeder. Direkte beskeder mellem to noder er krypteret, og MeshView kan ikke læse dem.</p>
+          <p>Beskeder på <strong>offentlige kanaler</strong> kan alle læse, også i MeshView: Public-kanalen, Meshview.dk-kanalen og hashtag-kanaler (kanaler med <code>#</code> i navnet, hvor nøglen kommer af navnet). En privat kanal med din egen nøgle kan MeshView ikke læse.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="skjul-node">
+        <summary>Hvordan skjuler eller fjerner jeg min node?</summary>
+        <div class="faq-a">
+          <p>Omdøb noden, så navnet starter med <code>🚫</code>, og send et advert. Så vises den ikke længere på MeshViews kort og lister. Noden virker stadig i netværket som normalt; den er kun skjult her.</p>
+          <p>Vil du have den fjernet på en anden måde, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>.</p>
+        </div>
+      </details>
+    </div>
+
+    <p class="faq-more">
+      Fandt du ikke svaret? Skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>,
+      eller læs den fulde <a href="https://github.com/dborup/CoreScope/blob/master/docs/user-guide/" target="_blank" rel="noopener">brugervejledning</a>.
+    </p>
+
+  </div>
+</section>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-logo">meshview.dk</div>
+    <ul class="footer-links">
+      <li><a href="https://meshcore.io" target="_blank" rel="noopener">MeshCore</a></li>
+      <li><a href="/guider">Guider</a></li>
+      <li><a href="/faq">FAQ</a></li>
+      <li><a href="/observer">Bliv observer</a></li>
+      <li><a href="mailto:kontakt@meshview.dk">Kontakt</a></li>
+    </ul>
+    <div class="footer-copy">© 2026 MeshView.dk — Frivilligt drevet</div>
+  </div>
+</footer>
+
+<script>
+  // Open the answer a link points to (#skjul-node etc.).
+  (function () {
+    function openHash() {
+      var id = decodeURIComponent(location.hash.slice(1));
+      if (!id) return;
+      var el = document.getElementById(id);
+      if (el && el.tagName === 'DETAILS') el.open = true;
+    }
+    window.addEventListener('hashchange', openHash);
+    openHash();
+  })();
+</script>
+</body>
+</html>
