@@ -1,5 +1,6 @@
 // /guider: click-to-play YouTube cards. Nothing is requested from YouTube before a click;
 // a card without a valid id is disabled; every info page links to /guider exactly once.
+// /guider-ids rewrites the published ids: card 1 a test id, card 2 malformed, card 3 empty.
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -8,10 +9,9 @@ const { chromium } = require('playwright');
 const pages = { '/velkommen': 'index.html', '/observer': 'observer.html', '/hardware': 'hardware.html', '/radio': 'radio.html', '/guider': 'guider.html' };
 const VALID = 'dQw4w9WgXcQ';
 const types = { '.css': 'text/css', '.js': 'text/javascript', '.ttf': 'font/ttf', '.jpg': 'image/jpeg' };
-// /guider-ids serves guider.html with ids filled in: card 1 valid, card 2 malformed, card 3 empty.
 function withIds(html) {
   let n = 0;
-  return html.replace(/data-youtube=""/g, () => {
+  return html.replace(/data-youtube="[^"]*"/g, () => {
     n++;
     return n === 1 ? `data-youtube="${VALID}"` : n === 2 ? 'data-youtube="abc&quot;onerror"' : 'data-youtube=""';
   });
@@ -51,22 +51,28 @@ const timeout = setTimeout(() => { console.error('TIMEOUT'); process.exit(1); },
     assert.equal(await page.locator('.nav-links a[href="/guider"]').count(), 1, `${p}: one Guider link in the nav`);
   }
 
-  // Published page: no ids yet, so every card is disabled and says so; no external request.
+  // Published page: every card has a valid id, plays on tap, and nothing loads before that.
   await page.goto(origin + '/guider');
   const cards = page.locator('.guide-card');
   assert.equal(await cards.count(), 3);
+  const titles = [];
   for (let i = 0; i < 3; i++) {
-    const b = cards.nth(i).locator('.guide-play');
-    assert.equal(await b.isDisabled(), true, `card ${i} disabled without an id`);
-    assert.equal(await cards.nth(i).locator('.guide-badge.soon').textContent(), 'Video på vej');
-    assert.match(await b.getAttribute('aria-label'), /video på vej$/);
-    for (const a of await cards.nth(i).locator('.guide-links a').all()) assert((await a.boundingBox()).height >= 44, 'link target >= 44 px');
+    const card = cards.nth(i);
+    assert.match(await card.getAttribute('data-youtube'), /^[A-Za-z0-9_-]{11}$/, `card ${i} has a valid id`);
+    const b = card.locator('.guide-play');
+    assert.equal(await b.isDisabled(), false, `card ${i} playable`);
+    assert.equal(await card.locator('.guide-badge.soon').count(), 0);
+    titles.push(await b.getAttribute('data-title'));
+    for (const a of await card.locator('.guide-links a').all()) assert((await a.boundingBox()).height >= 44, 'link target >= 44 px');
   }
-  assert.deepEqual(external, [], 'no external request on /guider');
+  assert.deepEqual(titles, ['Danske kort og lag', 'Terrænprofil mellem to noder', 'Skråfoto af din node']);
+  assert.deepEqual(external, [], 'no external request on /guider before play');
 
   // With ids: nothing from YouTube until the tap; the tap swaps in the nocookie iframe.
   await page.goto(origin + '/guider-ids');
   assert.deepEqual(external, [], 'no external request before play');
+  assert.equal(await cards.nth(1).locator('.guide-badge.soon').textContent(), 'Video på vej');
+  assert.match(await cards.nth(2).locator('.guide-play').getAttribute('aria-label'), /video på vej$/);
   const first = cards.nth(0).locator('.guide-play');
   assert.equal(await first.isDisabled(), false);
   assert.equal(await first.getAttribute('aria-label'), 'Afspil video: Danske kort og lag');
@@ -84,7 +90,7 @@ const timeout = setTimeout(() => { console.error('TIMEOUT'); process.exit(1); },
   assert(external.some(u => u.startsWith('https://www.youtube-nocookie.com/embed/' + VALID)), 'player requested after the tap');
   assert(!external.some(u => /youtube\.com|ytimg|googlevideo/.test(new URL(u).hostname) && !u.startsWith('https://www.youtube-nocookie.com/')), 'only the nocookie host');
   assert.deepEqual(errors, []);
-  console.log('PASS: /guider click-to-play, disabled cards without ids, one nav link per page, no external request before play');
+  console.log('PASS: /guider published ids, click-to-play, disabled cards without ids, one nav link per page, no external request before play');
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(async () => {
   if (browser) await browser.close();
   await new Promise(resolve => server.close(resolve));
