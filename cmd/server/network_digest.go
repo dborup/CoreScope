@@ -74,8 +74,9 @@ func matchesOrigin(foreign bool, origin string) bool {
 // since the given cutoff, optionally narrowed to "domestic" or "foreign"
 // nodes only (origin == "all" for no filtering).
 //
-// Reuses computeNewNodes/computeNodeChanges (with their existing
-// blacklist filtering and, for new nodes, resurrection exclusion) rather
+// Reuses computeNewNodes/fetchNodeChanges (with their existing
+// blacklist filtering -- for node changes the full identityHidden rule,
+// #1015 -- and, for new nodes, resurrection exclusion) rather
 // than re-querying from scratch. Counts are exact up to
 // newNodesSQLFetchCap/nodeChangesSQLFetchCap (500) rows fetched from
 // each -- a deliberate tradeoff favoring reuse over a second set of
@@ -142,7 +143,7 @@ func (s *Server) computeNetworkDigest(since time.Time, origin string) (*NetworkD
 		digest.AreaBreakdown = areas
 	}
 
-	changes, err := s.computeNodeChanges(nodeChangesSQLFetchCap)
+	changes, changesScanned, oldestChangeScanned, err := s.fetchNodeChanges(nodeChangesSQLFetchCap)
 	if err != nil {
 		return nil, err
 	}
@@ -168,9 +169,10 @@ func (s *Server) computeNetworkDigest(since time.Time, origin string) (*NetworkD
 			digest.Resurrections++
 		}
 	}
-	if len(changes) == nodeChangesSQLFetchCap {
-		oldest := changes[len(changes)-1]
-		if t, perr := time.Parse(time.RFC3339, oldest.DetectedAt); perr == nil && !t.Before(since) {
+	// Based on what SQL returned, before identity filtering (#1015): hidden
+	// rows dropped from the list don't change whether the LIMIT cut rows off.
+	if changesScanned == nodeChangesSQLFetchCap {
+		if t, perr := time.Parse(time.RFC3339, oldestChangeScanned); perr == nil && !t.Before(since) {
 			digest.ChangesCapped = true
 		}
 	}
