@@ -40,6 +40,7 @@
     compare: 'Compare',
     'audio-lab': 'Audio Lab',
     privacy: 'Privacy',
+    account: 'Account',
     'ping-scores': 'Ping Scores',
     'reach-rank': 'Reach Rank',
     'rx-coverage': 'RX Coverage',

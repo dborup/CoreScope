@@ -40,6 +40,8 @@
     "MeshAudio": "readonly",
     "MyMeshActivity": "readonly",
     "MyMeshObservers": "readonly",
+    "MyNodes": "readonly",
+    "Account": "readonly",
     "ObserverAirtime": "readonly",
     "MeshConfigReady": "readonly",
     "NodeAdverts": "readonly",

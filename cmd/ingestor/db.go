@@ -100,6 +100,10 @@ type Store struct {
 	// (#789 M2a); nil: no claims are matched. Set before ingest starts.
 	antennaClaims *antennaClaimRunner
 
+	// accounts proves owner sign-ins at advert ingest (#1018 M1); nil: no
+	// sign-in is matched. Set before ingest starts.
+	accounts *accountRunner
+
 	// pruneMu serialises the channelDays prunes of PruneTransmissions.
 	// packetPruneFloor is the packet cutoff of the last completed one (""
 	// before the first), where the next one starts its walk (#296).

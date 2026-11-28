@@ -196,6 +196,7 @@ function pageEnv(warmMs, latencyMs, opts) {
   const load = (f) => { vm.runInContext(fs.readFileSync(f, 'utf8'), ctx); for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k]; };
   load('public/payload-labels.js');
   load('public/roles.js');
+  load('public/my-nodes.js'); // #1018: loaded right after roles.js, as in index.html
   load('public/my-mesh-observers.js'); // #902: loaded before analytics.js, as in index.html
   load('public/heard-by.js');
   try { load('public/app.js'); } catch (e) { /* DOM-only tail */ }

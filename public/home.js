@@ -6,6 +6,10 @@
   let miniMap = null;
   let searchAbort = null; // AbortController for document-level listeners
   let _themeRefreshHandler = null;
+  let _myNodesUnsub = null;
+  // #1018 decision 14: the grid renders MyNodes.GRID_PAGE cards (one health
+  // request each), and "Show more" adds the next page.
+  let gridShown = MyNodes.GRID_PAGE;
 
   // #1648 M5: home steps + footerLinks may store either a 'ph:<name>' sprite
   // token (new defaults) or a legacy emoji/text string (operator config).
@@ -37,23 +41,12 @@
   function _escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
   const PREF_KEY = 'meshcore-user-level';
-  const MY_NODES_KEY = 'meshcore-my-nodes'; // [{pubkey, name, addedAt}]
-
-  function getMyNodes() {
-    try { return JSON.parse(localStorage.getItem(MY_NODES_KEY)) || []; } catch { return []; }
-  }
-  function saveMyNodes(nodes) { localStorage.setItem(MY_NODES_KEY, JSON.stringify(nodes)); }
-  function addMyNode(pubkey, name) {
-    const nodes = getMyNodes();
-    if (!nodes.find(n => n.pubkey === pubkey)) {
-      nodes.push({ pubkey, name: name || pubkey.slice(0, 12), addedAt: new Date().toISOString() });
-      saveMyNodes(nodes);
-    }
-  }
-  function removeMyNode(pubkey) {
-    saveMyNodes(getMyNodes().filter(n => n.pubkey !== pubkey));
-  }
-  function isMyNode(pubkey) { return getMyNodes().some(n => n.pubkey === pubkey); }
+  // #1018 M1: the list lives in MyNodes (my-nodes.js): the browser's list
+  // signed out, the account's synced list signed in.
+  function getMyNodes() { return MyNodes.list(); }
+  function addMyNode(pubkey, name) { return MyNodes.add(pubkey, name); }
+  function removeMyNode(pubkey) { MyNodes.remove(pubkey); }
+  function isMyNode(pubkey) { return MyNodes.has(pubkey); }
   // My Mesh cards opt into advert intervals on their health request. The
   // health panel reuses that URL for claimed nodes so the client cache
   // answers it; other nodes keep the plain URL and skip the advert scan.
@@ -135,6 +128,7 @@
           <input type="text" id="homeSearch" placeholder="Search by node name or public key…" autocomplete="off" aria-label="Search nodes" role="combobox" aria-expanded="false" aria-owns="homeSuggest" aria-autocomplete="list" aria-activedescendant="">
           <div class="home-suggest" id="homeSuggest" role="listbox"></div>
         </div>
+        <div class="home-account" id="homeAccount"></div>
       </section>
 
       ${hasNodes ? '<div class="my-nodes-grid" id="myNodesGrid"><div class="my-nodes-loading">Loading your nodes…</div></div>' : '<div class="my-nodes-grid" id="myNodesGrid"></div>'}
@@ -189,6 +183,13 @@
     setupSearch(container);
     loadStats();
     if (hasNodes) loadMyNodes();
+    // #1018 M1: the sign-in entry, and a re-render once the account's list
+    // arrives (or changes from another page's add/remove).
+    if (window.Account) Account.mountEntry(document.getElementById('homeAccount'));
+    if (_myNodesUnsub) _myNodesUnsub();
+    _myNodesUnsub = MyNodes.onChange(function () {
+      if (document.getElementById('myNodesGrid')) loadMyNodes();
+    });
 
     // Checklist accordion
     container.querySelectorAll('.checklist-q').forEach(q => {
@@ -246,16 +247,17 @@
               e.stopPropagation();
               const pk = btn.dataset.key;
               const nm = btn.dataset.name;
+              // MyNodes.onChange re-renders the grid (#1018 M1).
               if (isMyNode(pk)) {
                 removeMyNode(pk);
                 btn.classList.remove('claimed');
                 btn.innerHTML = '+ Claim';
+              } else if (addMyNode(pk, nm) === false) {
+                btn.textContent = 'List full';
               } else {
-                addMyNode(pk, nm);
                 btn.classList.add('claimed');
                 btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check"/></svg> Mine';
               }
-              loadMyNodes();
             });
           });
         } catch { suggest.classList.remove('open'); input.setAttribute('aria-expanded', 'false'); }
@@ -293,13 +295,16 @@
     const observersDialog = document.getElementById('homeObserversDialog');
     if (observersDialog?.open) observersDialog.close();
     if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }
+    if (_myNodesUnsub) { _myNodesUnsub(); _myNodesUnsub = null; }
+    gridShown = MyNodes.GRID_PAGE;
   }
 
   // ==================== MY NODES DASHBOARD ====================
   async function loadMyNodes() {
     const grid = document.getElementById('myNodesGrid');
     if (!grid) return;
-    const myNodes = getMyNodes();
+    const page = MyNodes.gridPage(getMyNodes(), gridShown);
+    const myNodes = page.visible;
 
     // Update hero text dynamically
     const h1 = document.querySelector('.home-hero h1');
@@ -459,15 +464,19 @@
     // is a false negative the operator cannot see.
     const observerNotice = (await observerIndexPromise).available ? ''
       : `<div class="my-nodes-observer-notice" role="status"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> ${escapeHtml(MyMeshObservers.UNAVAILABLE_NOTICE)}</div>`;
-    grid.innerHTML = observerNotice + cards.join('');
+    const moreHtml = page.more
+      ? `<div class="my-nodes-more"><button type="button" class="btn btn-secondary my-nodes-more-btn" id="myNodesMore" data-testid="my-nodes-more">Show more (${page.more} more)</button></div>`
+      : '';
+    grid.innerHTML = observerNotice + cards.join('') + moreHtml;
     revealClippedObserverButtons(grid);
+    const moreBtn = document.getElementById('myNodesMore');
+    if (moreBtn) moreBtn.addEventListener('click', () => { gridShown += MyNodes.GRID_PAGE; loadMyNodes(); });
 
     // Wire up remove buttons
     grid.querySelectorAll('.mnc-remove').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        removeMyNode(btn.dataset.key);
-        loadMyNodes();
+        removeMyNode(btn.dataset.key); // MyNodes.onChange re-renders the grid
         // Update title if no nodes left
         const h1 = document.querySelector('.home-hero h1');
         if (h1 && !getMyNodes().length) h1.textContent = 'CoreScope';
@@ -759,9 +768,8 @@
       // Claim button in health detail
       card.querySelector('.health-claim')?.addEventListener('click', (e) => {
         e.stopPropagation();
-        addMyNode(pubkey, node.name);
+        addMyNode(pubkey, node.name); // MyNodes.onChange re-renders the grid
         e.target.remove();
-        loadMyNodes();
         const h1 = document.querySelector('.home-hero h1');
         if (h1) h1.textContent = 'My Mesh';
       });

@@ -25,7 +25,7 @@ const { chromium } = require('playwright');
     });
     await page.goto('http://127.0.0.1:18721/');
     await page.addStyleTag({ path: path.join(__dirname, 'public/style.css') });
-    for (const file of ['payload-labels.js', 'roles.js', 'app.js', 'packet-helpers.js']) {
+    for (const file of ['payload-labels.js', 'roles.js', 'my-nodes.js', 'app.js', 'packet-helpers.js']) {
       await page.addScriptTag({ path: path.join(__dirname, 'public', file) });
     }
     await page.evaluate(() => {

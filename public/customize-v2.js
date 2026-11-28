@@ -1060,8 +1060,8 @@
         if (Array.isArray(favs) && favs.length) parsed.favorites = favs;
       } catch (e) { /* ignore */ }
       try {
-        var myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
-        if (Array.isArray(myNodes) && myNodes.length) parsed.myNodes = myNodes;
+        var myNodes = window.MyNodes.exportLocal();
+        if (myNodes.length) parsed.myNodes = myNodes;
       } catch (e) { /* ignore */ }
       return parsed;
     } catch (e) {
@@ -1304,7 +1304,7 @@
       try { localStorage.setItem('meshcore-favorites', JSON.stringify(delta.favorites)); } catch (e) { /* ignore */ }
     }
     if (Array.isArray(delta.myNodes)) {
-      try { localStorage.setItem('meshcore-my-nodes', JSON.stringify(delta.myNodes)); } catch (e) { /* ignore */ }
+      try { window.MyNodes.importLocal(delta.myNodes); } catch (e) { /* ignore */ }
     }
     // Build theme-only delta (without favorites/myNodes)
     var themeDelta = {};

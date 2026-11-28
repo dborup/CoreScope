@@ -183,9 +183,30 @@ func (l *ipRateLimiter) allow(r *http.Request) (bool, time.Duration) {
 		})
 		return true, 0
 	}
-	key := clientKey(ip)
-	now := l.now()
+	return l.allowKey(clientKey(ip))
+}
 
+// newKeyedRateLimiter is the same budget for a caller-chosen key (an
+// account id, say): perPeriod requests per period, nil when perPeriod ≤ 0.
+// It never looks at the request, so trustedProxies do not apply.
+func newKeyedRateLimiter(perPeriod int, period time.Duration) *ipRateLimiter {
+	if perPeriod <= 0 || period <= 0 {
+		return nil
+	}
+	interval := period / time.Duration(perPeriod)
+	return &ipRateLimiter{
+		interval: interval, burst: interval * time.Duration(perPeriod),
+		logf: log.Printf, now: time.Now, maxClients: ipLimiterMaxClients,
+		clients: make(map[string]time.Time),
+	}
+}
+
+// allowKey charges one request to key; see allow.
+func (l *ipRateLimiter) allowKey(key string) (bool, time.Duration) {
+	if l == nil {
+		return true, 0
+	}
+	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	tat, known := l.clients[key]
@@ -219,7 +240,14 @@ func (l *ipRateLimiter) refund(r *http.Request) {
 	if !distinct {
 		return
 	}
-	key := clientKey(ip)
+	l.refundKey(clientKey(ip))
+}
+
+// refundKey gives back one charge made by allowKey; see refund.
+func (l *ipRateLimiter) refundKey(key string) {
+	if l == nil {
+		return
+	}
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()

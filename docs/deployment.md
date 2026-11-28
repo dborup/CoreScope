@@ -208,10 +208,11 @@ the old path unchanged and starts the same supervisor config files.
      `-journal` files,
    - `client-rx-delete.salt` and `client-rx-delete-audit.jsonl` (the only log
      files the services write; their other logs go to the container output),
+   - `account-session.key`, the owner-account session key (#1018),
    - the queue directories `prune-requests/`, `mbcap-snapshot/`,
      `channel-proposal-requests/`, `region-scope-requests/`,
-     `client-rx-deletes/` and `antenna-claim-requests/` (not their
-     contents).
+     `client-rx-deletes/`, `antenna-claim-requests/` and `account-requests/`
+     (not their contents).
 5. A queued request (`request-*.json`, `cmd-*.json`) in those directories that
    the services did not write — for example from an admin command run as
    root, or left by a root run — is **not** handed to them. It is renamed to

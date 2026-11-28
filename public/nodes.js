@@ -5,7 +5,7 @@
   let nodes = [];
 
   function syncClaimedToFavorites() {
-    const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
+    const myNodes = MyNodes.list();
     const favs = getFavorites();
     let changed = false;
     myNodes.forEach(mn => {
@@ -1802,7 +1802,7 @@
       });
 
       // Ensure claimed nodes are always present even if not in current page
-      const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
+      const myNodes = MyNodes.list();
       const existingKeys = new Set(nodes.map(n => n.public_key));
       const missing = myNodes.filter(mn => !existingKeys.has(mn.pubkey));
       if (missing.length) {
@@ -2005,8 +2005,7 @@
   // renderRows() and the JSON export (#1889) both call it, so the two can
   // never diverge the way a duplicated copy of this logic could.
   function computeDisplayOrder(arr) {
-    const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
-    const myKeys = new Set(myNodes.map(n => n.pubkey));
+    const myKeys = new Set(MyNodes.keys());
     const favs = getFavorites();
     const sorted = sortNodes([...arr]);
     sorted.sort((a, b) => {
@@ -2032,8 +2031,7 @@
     const sorted = computeDisplayOrder(nodes);
     // Still needed here (separately from the pinning logic above) to badge
     // each row as claimed in the rendered markup below.
-    const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
-    const myKeys = new Set(myNodes.map(n => n.pubkey));
+    const myKeys = new Set(MyNodes.keys());
 
     const dupMap = buildDupNameMap(_allNodes);
     // #1616 followup: capture the focused row's data-key BEFORE we replace

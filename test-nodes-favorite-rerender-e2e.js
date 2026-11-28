@@ -106,6 +106,8 @@ async function makePage(browser, baseUrl) {
   // escapeHtml, truncate, ...), real nodes.js (renderRows,
   // computeDisplayOrder), real nodes-export.js (NodesExport).
   await page.addScriptTag({ path: APP_JS });
+  // #1018: index.html loads my-nodes.js before nodes.js.
+  await page.addScriptTag({ path: path.join(__dirname, 'public', 'my-nodes.js') });
   await page.addScriptTag({ path: NODES_JS });
   await page.addScriptTag({ path: NODES_EXPORT_JS });
 

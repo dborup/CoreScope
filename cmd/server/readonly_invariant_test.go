@@ -214,10 +214,10 @@ func nodeTableWritePattern(verb, trailer string) *regexp.Regexp {
 // txTableWritePattern matches DML against the ingestor-owned packet tables
 // (transmissions, observations, observers, dropped_packets) and the tables
 // hung off them, in the shapes nodeTableWritePattern covers, plus the owner
-// antenna-height claims (#789 M2a) and their admin contacts (#898), which
-// only the ingestor writes.
+// antenna-height claims (#789 M2a) and their admin contacts (#898), and the
+// owner-account tables (#1018 M1), which only the ingestor writes.
 func txTableWritePattern(verb string) *regexp.Regexp {
-	const table = "[\"`\\[]?(transmissions|observations|observers|dropped_packets|ping_triggers|route_mask_changes|node_antenna_claims|node_claim_admin_contacts)[\"`\\]]?"
+	const table = "[\"`\\[]?(transmissions|observations|observers|dropped_packets|ping_triggers|route_mask_changes|node_antenna_claims|node_claim_admin_contacts|accounts|account_proofs|account_my_nodes)[\"`\\]]?"
 	return regexp.MustCompile(`(?i)` + verb + `\s+` + table + `\b`)
 }
 
@@ -310,6 +310,13 @@ func TestServerHasNoPacketTableWritesIsSensitive(t *testing.T) {
 		`DELETE FROM node_antenna_claims WHERE status = 'expired'`,
 		`DELETE FROM node_claim_admin_contacts WHERE request_id = ?`,
 		`INSERT INTO node_claim_admin_contacts (request_id, contact) VALUES (?, ?)`,
+		`INSERT INTO accounts (account_id, identity_pubkey) VALUES (?, ?)`,
+		`UPDATE accounts SET session_gen = session_gen + 1`,
+		`DELETE FROM accounts WHERE account_id = ?`,
+		`UPDATE account_proofs SET status = 'proven'`,
+		`INSERT INTO account_proofs (request_id) VALUES (?)`,
+		`INSERT OR IGNORE INTO account_my_nodes (account_id, pubkey) VALUES (?, ?)`,
+		`DELETE FROM account_my_nodes WHERE account_id = ?`,
 	} {
 		if !matches(stmt) {
 			t.Errorf("the guard does not match %q", stmt)
@@ -322,6 +329,9 @@ func TestServerHasNoPacketTableWritesIsSensitive(t *testing.T) {
 		`INSERT INTO observer_neighbors (a) VALUES (1)`,
 		`SELECT pubkey FROM node_antenna_claims WHERE status = 'approved'`,
 		`LEFT JOIN node_claim_admin_contacts ac ON ac.request_id = c.request_id`,
+		`SELECT session_gen FROM accounts WHERE account_id = ?`,
+		`FROM account_my_nodes m LEFT JOIN nodes n ON n.public_key = m.pubkey`,
+		`FROM account_proofs p LEFT JOIN accounts a ON a.account_id = p.account_id`,
 		`tx_inserted`,
 	} {
 		if matches(stmt) {

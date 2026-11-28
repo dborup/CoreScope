@@ -236,6 +236,36 @@ With `detailsEnabled`, a claim can carry station details next to the height, und
 
 An approved height ranks below a per-node height in `radio.antennaHeightsM` and above the surface estimate and the role heights in `radio.antennaHeightsM`. In full, a profile takes the first of: the request (a typed height or a link), the operator's height for the node, the owner's approved height, the surface estimate (only where it is above the role height), the operator's height for the role, the built-in role default. A height a viewer types or opens from a link still wins for that viewer, and each viewer can turn **Prefer owner heights** off in the customizer (see [Customization](customization.md#terrain-profile-display-tab)).
 
+## Owner accounts
+
+`accounts` lets an owner sign in with their companion radio and keep **My Mesh** on every device (#1018 M1). There is no password and no e-mail: the owner gets a 6-character code on `#/account`, puts it in the companion's name and sends a **flood** advert; a new advert with a valid signature from that companion proves the sign-in. Only a companion (an `ADV_TYPE_CHAT` advert) can sign in; a repeater, room or sensor cannot. A blacklisted key is refused like an unknown node; a node hidden only by a `hiddenNamePrefixes` prefix may sign in. Owners follow [Your owner account](owner-account.md). The server and the ingestor read the same block; changing it requires a restart of both.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Opens sign-in. Only takes effect with a strong `apiKey` (16+ characters, not a placeholder). Read by its exact spelling. With it on, the ingestor creates the session key file at its start. |
+| `sessionDays` | `30` | How long a session lasts. It is renewed on use once it is a day old. Never more than `sessionMaxDays`; a larger value is clamped to it. |
+| `sessionMaxDays` | `90` | The cap: no session lasts longer than this after the sign-in, renewed or not. It can be lowered but never raised: a value above 90 is clamped to 90 (owner decision 3, a 90-day hard cap). |
+| `loginCodeMinutes` | `15` | A sign-in code's lifetime. At most 60. |
+| `maxMyNodes` | `200` | Nodes on one account's list. At most 1000. |
+| `loginsPerHour` | `120` | Global sliding window on new sign-ins. This is the limit that holds in the shipped Docker setup, where per-client limits cannot tell clients apart. |
+| `loginsPerMinutePerIP` | `2` | Per-client limit on new sign-ins. Only enforced when `webSocket.trustedProxies` names your reverse proxy. |
+| `writesPerHour` | `600` | Global sliding window on account changes (the list and the display name). Sign out everywhere and delete account are never counted, so an owner can always end a stolen session. |
+| `writesPerHourPerAccount` | `120` | The same window for one account, so one session cannot spend the global window for everyone. Sign out everywhere and delete account are not counted here either. |
+| `maxPendingLogins` | `512` | Unproven sign-ins over all companions. A sign-in over the limit is refused; it never evicts another. |
+| `maxPendingPerKey` | `8` | Unproven sign-ins per companion. |
+| `maxQueuedRequests` | `256` | Requests waiting for the ingestor in `account-requests/` next to the database. |
+| `inactiveMonths` | `24` | Accounts without a sign-in for this long are deleted with their list (owner decision 9). At most 120. |
+
+A value outside its range falls back to its default, except `sessionDays` and `sessionMaxDays`, which are clamped to the 90-day cap.
+
+**The session.** The cookie is `__Host-mv_session`: `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`. Browsers drop a `Secure` cookie on plain `http://` (except `localhost`), so serve the site over HTTPS. Every change (`POST`, `DELETE`) must come from the site itself: a missing or foreign `Origin` is refused with 403. Behind a proxy that rewrites `Host`, pass `X-Forwarded-Host`.
+
+**The key file.** The ingestor creates `account-session.key` (32 random bytes, mode 0600) next to the database. The server only reads it and refuses one that other users can read. It is never logged or served, and `GET /api/backup` does not include it (the backup is the database alone). Replacing it and restarting both processes signs every account out. Until it exists, `GET /api/account/config` reports `available: false` and sign-in answers 503.
+
+**What is stored.** `accounts` (a random account id, the companion's public key, an optional display name, the session generation, the first and last sign-in times), `account_proofs` (one row per sign-in code, deleted a day after it ran out) and `account_my_nodes` (the list). No IP address or user agent. The companion key is never served publicly; the account itself sees its first 8 characters.
+
+**Customizer.** None of these are visitor preferences; they stay operator settings in `config.json` (rule 8: a later milestone may expose display-only values).
+
 ## Map defaults
 
 ```json

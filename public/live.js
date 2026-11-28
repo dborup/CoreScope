@@ -3788,7 +3788,7 @@
   function getFavoritePubkeys() {
     let favs = [];
     try { favs = favs.concat(JSON.parse(localStorage.getItem('meshcore-favorites') || '[]')); } catch {}
-    try { favs = favs.concat(JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]').map(n => n.pubkey)); } catch {}
+    try { favs = favs.concat(MyNodes.keys()); } catch {}
     return favs.filter(Boolean);
   }
 

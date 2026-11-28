@@ -3609,8 +3609,7 @@
     const hashOnly = !!filters.hash;
 
     if (!hashOnly && filters.myNodes) {
-      const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
-      const myKeys = myNodes.map(n => n.pubkey).filter(Boolean);
+      const myKeys = MyNodes.keys();
       const favs = getFavorites();
       const allKeys = [...new Set([...myKeys, ...favs])];
       if (allKeys.length > 0) {

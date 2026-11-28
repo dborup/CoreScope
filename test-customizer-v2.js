@@ -67,6 +67,8 @@ function loadCustomizer() {
   const code = fs.readFileSync('public/customize-v2.js', 'utf8');
   vm.createContext(ctx);
   vm.runInContext(labelsCode, ctx, { filename: 'payload-labels.js' });
+  // #1018: index.html loads my-nodes.js before the customizer.
+  vm.runInContext(fs.readFileSync('public/my-nodes.js', 'utf8'), ctx, { filename: 'my-nodes.js' });
   vm.runInContext(code, ctx, { filename: 'customize-v2.js' });
   return { ctx, api: ctx.window._customizerV2, ls: ctx.localStorage };
 }
@@ -553,7 +555,8 @@ test('readOverrides includes myNodes from localStorage', () => {
   api.init({});
   ls.setItem('meshcore-my-nodes', JSON.stringify([{pubkey: 'abc123', name: 'Node1', addedAt: 1000}]));
   const data = api.readOverrides();
-  assert.deepStrictEqual(data.myNodes, [{pubkey: 'abc123', name: 'Node1', addedAt: 1000}], 'myNodes should be included in export');
+  // #1018: the list now comes through MyNodes, built in the sandbox's realm.
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(data.myNodes)), [{pubkey: 'abc123', name: 'Node1', addedAt: 1000}], 'myNodes should be included in export');
 });
 
 test('writeOverrides restores favorites to localStorage', () => {
