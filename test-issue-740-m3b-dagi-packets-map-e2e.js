@@ -107,9 +107,26 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     const h = Math.max(0, Math.min(p.bottom, m.bottom) - Math.max(p.top, m.top));
     return { w: w / m.width, h: h / m.height };
   });
+  // #740 M3b follow-up (review F1): what is on top of the fitted outline.
+  // A 9x9 grid over the outline's box on the visible map; each point must
+  // hit the map, never the Map Controls panel or its toggle.
+  const outlineHidden = (page) => page.evaluate(() => {
+    const p = document.querySelector('path.dagi-outline').getBoundingClientRect();
+    const m = document.getElementById('leaflet-map').getBoundingClientRect();
+    const l = Math.max(p.left, m.left), r = Math.min(p.right, m.right);
+    const t = Math.max(p.top, m.top), b = Math.min(p.bottom, m.bottom);
+    const out = [];
+    for (let i = 1; i <= 9; i++) for (let j = 1; j <= 9; j++) {
+      const x = l + (r - l) * i / 10, y = t + (b - t) * j / 10;
+      const e = document.elementFromPoint(x, y);
+      if (!e || !e.closest('#leaflet-map') || e.closest('#mapControls, .map-controls-toggle')) out.push(Math.round(x) + ',' + Math.round(y));
+    }
+    return out;
+  });
   // A bottom sheet inside the viewport that nothing covers: the element at
   // its corners and centre is the sheet itself.
-  async function sheetOnTop(page, sel) {
+  async function sheetOnTop(page, sel, vp) {
+    vp = vp || { width: 375, height: 560 };
     const r = await page.evaluate((s) => {
       const p = document.querySelector(s + ' .dagi-panel');
       const b = p.getBoundingClientRect();
@@ -117,9 +134,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       return { box: [b.left, b.top, b.right, b.bottom], pos: getComputedStyle(p).position, sw: document.documentElement.scrollWidth,
         covered: pts.filter(([x, y]) => { const e = document.elementFromPoint(x, y); return !e || !p.contains(e); }).map((x) => x.map(Math.round).join(',')) };
     }, sel);
-    assert(r.pos === 'fixed' && r.box[0] === 0 && r.box[2] === 375 && Math.round(r.box[3]) === 560 && r.box[1] > 0, 'not a bottom sheet: ' + JSON.stringify(r));
+    assert(r.pos === 'fixed' && r.box[0] === 0 && r.box[2] === vp.width && Math.round(r.box[3]) === vp.height && r.box[1] > 0, 'not a bottom sheet: ' + JSON.stringify(r));
     assert(!r.covered.length, 'the sheet is covered at ' + r.covered.join(' '));
-    assert(r.sw <= 375, 'sideways scroll: ' + r.sw);
+    assert(r.sw <= vp.width, 'sideways scroll: ' + r.sw);
   }
   // Tap the visible row of a search hit (the hit is marked for the tap).
   async function tapHit(page, sel, text) {
@@ -185,8 +202,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       await ctx.close();
     });
 
-    await step(`Map, 375x560 ${theme}, cold start, real taps: pick Aarhus (outline, fit), zoom, then clear it`, async () => {
-      const { ctx, page, reqs } = await cold({ width: 375, height: 560 }, true, theme);
+    for (const vp of [{ width: 375, height: 560 }, { width: 360, height: 640 }]) {
+    await step(`Map, ${vp.width}x${vp.height} ${theme}, cold start, real taps: pick Aarhus (outline, fit, not under the controls), zoom, then clear it`, async () => {
+      const { ctx, page, reqs } = await cold(vp, true, theme);
       await page.goto(BASE + '/#/map', { waitUntil: 'domcontentloaded' });
       await mapLoaded(page);
       await page.waitForSelector('#mapDagiFilter .dagi-trigger', { state: 'attached' });
@@ -194,8 +212,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       assert((await outlines(page)) === 0, 'an outline with nothing selected');
       await tapWhenSettled(page, '#mapDagiFilter .dagi-trigger');
       await page.waitForSelector('#mapDagiFilter .dagi-panel', { state: 'visible' });
-      await sheetOnTop(page, '#mapDagiFilter');
-      await shot(page, `map-phone-${theme}-1-sheet`);
+      await sheetOnTop(page, '#mapDagiFilter', vp);
+      await shot(page, `map-phone-${vp.width}-${theme}-1-sheet`);
       await searchOnPhone(page, '#mapDagiFilter', 'aar');
       const t0 = Date.now();
       await tapHit(page, '#mapDagiFilter', 'Aarhus');
@@ -209,12 +227,16 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       assert(cover.w > 0.3 || cover.h > 0.3, 'the outline is not in view: ' + JSON.stringify(cover));
       assert(reqs.polygons.length === 1 && reqs.polygons[0] === 'layer=kommune&code=0751', 'polygon requests: ' + reqs.polygons.join(' '));
       assert(/Klimadatastyrelsen, DAGI/.test(await credit(page)), 'no DAGI credit: ' + await credit(page));
-      console.log(`    (${theme}: tap → outline drawn in ${drawnMs} ms)`);
-      await shot(page, `map-phone-${theme}-2-outline`);
+      console.log(`    (${vp.width}x${vp.height} ${theme}: tap → outline drawn in ${drawnMs} ms)`);
+      // The pick closed the controls panel: the fitted outline is in sight,
+      // and the gear says so.
+      assert(!(await page.locator('#mapControls').isVisible()), 'the Map Controls panel stayed open over the outline');
+      assert(await page.getAttribute('#mapControlsToggle', 'aria-expanded') === 'false', 'the gear still says expanded');
+      const under = await outlineHidden(page);
+      assert(!under.length, under.length + ' of 81 points over the outline are covered: ' + under.slice(0, 5).join(' '));
+      await shot(page, `map-phone-${vp.width}-${theme}-2-outline`);
 
-      // A zoom asks for nothing; the outline stays one. The open controls
-      // panel covers the zoom buttons on a phone: close it first.
-      if (await page.locator('#mapControls').isVisible()) await tapWhenSettled(page, '#mapControlsToggle', { minHeight: 36 });
+      // A zoom asks for nothing; the outline stays one.
       await tapWhenSettled(page, '.leaflet-control-zoom-in', { minHeight: 30 });
       await page.waitForTimeout(600);
       assert(reqs.polygons.length === 1, 'a zoom fetched the polygon again: ' + reqs.polygons.join(' '));
@@ -225,9 +247,12 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       await page.waitForFunction(() => document.querySelectorAll('path.dagi-outline').length === 0);
       assert(!/DAGI/.test(await credit(page)), 'the credit stayed after ✕: ' + await credit(page));
       assert(!/kommune=/.test(await page.evaluate(() => location.hash)), 'param left after ✕');
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= 375), 'sideways scroll');
+      assert(await page.evaluate((w) => document.documentElement.scrollWidth <= w, vp.width), 'sideways scroll');
+      // A clear is no pick: the panel stays open.
+      assert(await page.locator('#mapControls').isVisible(), 'a clear closed the controls panel');
       await ctx.close();
     });
+    }
   }
 
   for (const theme of ['light', 'dark']) {

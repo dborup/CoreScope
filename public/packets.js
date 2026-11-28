@@ -5002,6 +5002,7 @@
       _packetHashes: function() { return packets.map(p => p.hash); },
       _areaMembersReady: function() { return !areaMembers || areaMembers.ready(); },
       _dagiMembersReady: function() { return !dagiMembers || dagiMembers.ready(); },
+      _passesMemberFilters: passesMemberFilters,
       _setFilter: function(k, v) { filters[k] = v; },
       _setFullNames: function(on, saved) { showFullNames = !!on; savedFullNames = saved === undefined ? !!on : !!saved; },
       _setObservers: function(list) { observers = list; observerMap = new Map(list.map(o => [o.id, o])); },

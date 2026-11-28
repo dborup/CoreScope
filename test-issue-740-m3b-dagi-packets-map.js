@@ -174,6 +174,7 @@ function loadOutline(opts) {
     layers: new Set(),
     addLayer(l) { this.layers.add(l); log.push('add'); },
     removeLayer(l) { this.layers.delete(l); log.push('remove'); },
+    hasLayer(l) { return this.layers.has(l); },
     fitBounds(b, o) { log.push(['fit', plain(b), plain(o)]); },
   };
   const L = {
@@ -201,7 +202,7 @@ function loadOutline(opts) {
     L, map, fetchJson, decode: ctx.window.DagiFilter.decodeRings,
     color: () => color, escape: (s) => '[esc]' + s,
   });
-  return { outline, map, log, fetches, holds };
+  return { outline, map, log, fetches, holds, DagiOutline: ctx.window.DagiOutline };
 }
 const polygons = (log) => log.filter((e) => Array.isArray(e) && e[0] === 'polygon');
 const fits = (log) => log.filter((e) => Array.isArray(e) && e[0] === 'fit');
@@ -380,11 +381,66 @@ test('map.js: the control in the map controls, the node fetch after ready(), the
   const qs = req.indexOf('DagiFilter.queryString()');
   const fetch = req.indexOf('await fetchAllNodes(');
   assert.ok(ready > 0 && qs > ready && fetch > qs, `ready ${ready}, queryString ${qs}, fetch ${fetch}`);
-  assert.ok(/DagiFilter\.onChange\(function \(\) \{[^}]*refreshDagiOutline\(true\)/.test(src), 'a pick does not fit');
-  assert.ok(/refreshDagiOutline\(false\)/.test(src), 'a cold link must draw without a fit');
+  assert.ok(/DagiFilter\.onChange\(function \(\) \{[^}]*refreshBoundary\(true\)/.test(src), 'a pick does not fit');
+  assert.ok(/refreshBoundary\(false\)/.test(src), 'a cold link must draw without a fit');
   const destroy = slice(src, '  function destroy() {', 'registerPage(\'map\'');
   assert.ok(/dagiOutline\.clear\(\)/.test(destroy) && /DagiFilter\.release\(/.test(destroy) && /DagiFilter\.offChange\(/.test(destroy), 'destroy() keeps the outline or the control');
-  assert.ok(!/moveend[^\n]*refreshDagiOutline|zoomend[^\n]*refreshDagiOutline/.test(src), 'a request per pan');
+  assert.ok(!/moveend[^\n]*refreshBoundary|zoomend[^\n]*refreshBoundary/.test(src), 'a request per pan');
+});
+
+/* ---------- #740 M3b follow-up: one selected-boundary layer ---------- */
+
+test('boundary choice: the Area outline if an Area is set, otherwise the DAGI outline, otherwise none', () => {
+  const choose = loadOutline().DagiOutline.chooseBoundary;
+  assert.strictEqual(typeof choose, 'function', 'no DagiOutline.chooseBoundary');
+  assert.strictEqual(choose({ area: true, dagi: 'layer=kommune&code=0751' }), 'area', 'both set: Area wins');
+  assert.strictEqual(choose({ area: true, dagi: '' }), 'area');
+  assert.strictEqual(choose({ area: false, dagi: 'layer=kommune&code=0751' }), 'dagi');
+  assert.strictEqual(choose({ area: false, dagi: '' }), 'none');
+  assert.strictEqual(choose({}), 'none');
+});
+
+test('outline: hidden by the boundary checkbox, an area is still loaded and fitted but not on the map; shown again without a request', async () => {
+  const s = loadOutline();
+  assert.strictEqual(typeof s.outline.setVisible, 'function', 'no setVisible()');
+  s.outline.setVisible(false);
+  await s.outline.show('layer=kommune&code=0751', { fit: true });
+  assert.strictEqual(polygons(s.log).length, 1, 'not drawn');
+  assert.strictEqual(s.map.layers.size, 0, 'a hidden outline is on the map');
+  assert.strictEqual(fits(s.log).length, 1, 'a pick with the outline hidden still fits');
+  s.outline.setVisible(true);
+  assert.strictEqual(s.map.layers.size, 1, 'shown again: not on the map');
+  s.outline.setVisible(true);
+  assert.strictEqual(s.map.layers.size, 1);
+  s.outline.setVisible(false);
+  assert.strictEqual(s.map.layers.size, 0, 'hidden again: still on the map');
+  await s.outline.show('layer=kommune&code=0751', { fit: false });
+  assert.strictEqual(s.map.layers.size, 0, 'the same area again showed a hidden outline');
+  assert.strictEqual(s.fetches.length, 1, 'visibility asked the server');
+  s.outline.clear();
+  s.outline.setVisible(true);
+  assert.strictEqual(s.map.layers.size, 0, 'a cleared outline came back');
+});
+
+test('map.js: one selected-boundary layer: one checkbox and storage key for Area and DAGI, chosen by chooseBoundary', () => {
+  const src = fs.readFileSync('public/map.js', 'utf8');
+  assert.strictEqual((src.match(/id="mcSelectedArea"/g) || []).length, 1, 'one checkbox');
+  assert.strictEqual((src.match(/'meshcore-map-selected-area-outline'/g) || []).length, 1, 'the storage key is written in one place');
+  const sync = slice(src, 'function refreshBoundary(', '\n  }\n');
+  assert.ok(/DagiOutline\.chooseBoundary\(/.test(sync), 'the layer is not chosen by chooseBoundary');
+  assert.ok(/dagiOutline\.setVisible\(/.test(sync), 'the checkbox does not hide the DAGI outline');
+  assert.ok(/dagiOutline\.clear\(\)/.test(sync), 'the DAGI outline stays when the Area wins');
+});
+
+test('map.js: both outlines take the colour from --geo-filter-color through one helper, and the DAGI credit is escaped with safeEsc', () => {
+  const src = fs.readFileSync('public/map.js', 'utf8');
+  const helper = slice(src, 'function boundaryColor()', '\n  }\n');
+  assert.ok(/getPropertyValue\('--geo-filter-color'\)/.test(helper), 'boundaryColor() does not read --geo-filter-color');
+  const create = slice(src, 'DagiOutline.create({', '\n      });');
+  assert.ok(/color: boundaryColor,/.test(create), 'the DAGI outline colour is not boundaryColor');
+  assert.ok(/escape: safeEsc,/.test(create), 'the DAGI credit is not escaped with safeEsc');
+  const area = slice(src, '        if (latlngs) {', "className: 'area-outline'");
+  assert.ok(/boundaryColor\(\)/.test(area), 'the Area outline colour is not boundaryColor()');
 });
 
 /* ---------- run ---------- */
