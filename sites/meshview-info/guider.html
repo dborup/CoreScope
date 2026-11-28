@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Guider — MeshView.dk</title>
+  <meta name="description" content="Korte videoguider til MeshView: kort og lag, terrænprofil, skråfoto og mere." />
+  <link rel="stylesheet" href="/meshview-info-assets/site.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:      #080c10;
+      --bg2:     #0d1520;
+      --bg3:     #111d2c;
+      --accent:  #00e5a0;
+      --accent2: #00aaff;
+      --warn:    #ffb400;
+      --danger:  #ff4d6d;
+      --text:    #cdd9e5;
+      --muted:   #4a6070;
+      --border:  rgba(0,229,160,.15);
+      --glow:    0 0 18px rgba(0,229,160,.35);
+      --mono:    'Share Tech Mono', monospace;
+      --main:    'Syne', sans-serif;
+    }
+    html { scroll-behavior: smooth; }
+    body { background:var(--bg); color:var(--text); font-family:var(--main); min-height:100vh; overflow-x:hidden; }
+    body::before {
+      content:''; position:fixed; inset:0; z-index:0;
+      background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      background-size:200px; pointer-events:none;
+    }
+    body::after {
+      content:''; position:fixed; inset:0; z-index:0;
+      background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.07) 2px,rgba(0,0,0,.07) 4px);
+      pointer-events:none;
+    }
+    .wrap { position:relative; z-index:1; max-width:980px; margin:0 auto; padding:0 24px; }
+
+    /* NAV */
+    nav { position:sticky; top:0; z-index:100; border-bottom:1px solid var(--border); background:rgba(8,12,16,.92); backdrop-filter:blur(12px); }
+    .nav-inner { display:flex; align-items:center; justify-content:space-between; height:60px; max-width:1200px; margin:0 auto; padding:0 24px; }
+    .logo { font-family:var(--mono); font-size:1.1rem; color:var(--accent); letter-spacing:.08em; text-decoration:none; }
+    .logo span { color:var(--text); }
+    .nav-links { display:flex; gap:32px; list-style:none; }
+    .nav-links a { font-family:var(--mono); font-size:.8rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; text-transform:uppercase; transition:color .2s; }
+    .nav-links a:hover { color:var(--accent); }
+    .back-link { font-family:var(--mono); font-size:.78rem; color:var(--accent); text-decoration:none; display:inline-flex; align-items:center; gap:7px; }
+    .back-link:hover { text-decoration:underline; }
+
+    /* HERO */
+    .doc-hero { padding:70px 0 36px; }
+    .doc-tag { font-family:var(--mono); font-size:.72rem; color:var(--accent); letter-spacing:.2em; text-transform:uppercase; margin-bottom:16px; display:flex; align-items:center; gap:10px; }
+    .doc-tag::before { content:''; width:24px; height:1px; background:var(--accent); }
+    h1 { font-size:clamp(2.2rem,4.5vw,3.4rem); font-weight:800; line-height:1.08; letter-spacing:-.02em; margin-bottom:20px; }
+    h1 em { font-style:normal; color:var(--accent); }
+    .lead { font-size:1.05rem; color:var(--muted); line-height:1.75; max-width:700px; }
+    .lead a.inline { color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    .lead a.inline:hover { border-color:var(--accent); }
+
+    .divider { height:1px; background:linear-gradient(90deg,transparent,var(--border),transparent); margin:8px 0; }
+
+    /* QUICK START CALLOUT */
+    .quickstart {
+      display:flex; gap:20px; align-items:center; flex-wrap:wrap;
+      background:linear-gradient(135deg, rgba(0,229,160,.08), rgba(0,170,255,.05));
+      border:1px solid var(--border); border-radius:10px; padding:24px 26px; margin:36px 0;
+    }
+    .qs-body { flex:1; min-width:240px; }
+    .qs-tag { font-family:var(--mono); font-size:.66rem; color:var(--accent); letter-spacing:.18em; text-transform:uppercase; margin-bottom:8px; }
+    .qs-title { font-size:1.2rem; font-weight:800; margin-bottom:8px; }
+    .qs-desc { font-size:.92rem; color:var(--muted); line-height:1.65; }
+    .btn { display:inline-flex; align-items:center; gap:8px; padding:12px 26px; font-family:var(--mono); font-size:.84rem; letter-spacing:.06em; text-decoration:none; border-radius:4px; transition:all .2s; white-space:nowrap; }
+    .btn-primary { background:var(--accent); color:#030608; box-shadow:var(--glow); }
+    .btn-primary:hover { background:#00ffb2; box-shadow:0 0 28px rgba(0,229,160,.6); }
+
+    /* SECTION */
+    .doc-section { padding:20px 0 60px; }
+    h2 { font-size:1.6rem; font-weight:800; letter-spacing:-.01em; margin-bottom:8px; }
+    h2 em { font-style:normal; color:var(--accent); }
+    .sec-sub { font-size:.95rem; color:var(--muted); line-height:1.7; margin-bottom:28px; max-width:620px; }
+
+    /* DEVICE GRID */
+    .dev-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:18px; }
+    .dev-card {
+      background:var(--bg2); border:1px solid var(--border); border-radius:10px;
+      padding:24px; display:flex; flex-direction:column; gap:12px;
+      transition:border-color .2s, transform .2s; position:relative; overflow:hidden;
+      text-decoration:none;
+    }
+    .dev-card::before {
+      content:''; position:absolute; top:0; left:0; right:0; height:2px;
+      background:linear-gradient(90deg,var(--accent),var(--accent2));
+      transform:scaleX(0); transform-origin:left; transition:transform .3s;
+    }
+    .dev-card:hover::before { transform:scaleX(1); }
+    .dev-card:hover { border-color:rgba(0,229,160,.4); transform:translateY(-3px); }
+    .dev-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .dev-name { font-size:1.15rem; font-weight:800; color:var(--text); line-height:1.2; }
+    .dev-chip { font-family:var(--mono); font-size:.7rem; color:var(--accent2); margin-top:4px; }
+    .dev-arrow { font-family:var(--mono); color:var(--accent); font-size:1.1rem; flex-shrink:0; opacity:.5; transition:opacity .2s, transform .2s; }
+    .dev-card:hover .dev-arrow { opacity:1; transform:translateX(3px); }
+    .dev-desc { font-size:.9rem; color:var(--muted); line-height:1.6; flex:1; }
+    .dev-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+    .dev-tag { font-family:var(--mono); font-size:.6rem; letter-spacing:.06em; text-transform:uppercase; padding:3px 8px; border-radius:20px; background:var(--bg3); color:var(--muted); border:1px solid var(--border); }
+    .dev-tag.hot { color:var(--accent); border-color:rgba(0,229,160,.3); }
+
+    /* EQUIPMENT */
+    .eq-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:18px; }
+    .eq-card { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:22px 24px; }
+    .eq-head { display:flex; align-items:center; gap:11px; margin-bottom:12px; }
+    .eq-ico { font-size:1.3rem; }
+    .eq-name { font-size:1.1rem; font-weight:800; color:var(--text); }
+    .eq-desc { font-size:.9rem; color:var(--muted); line-height:1.65; margin-bottom:14px; }
+    .eq-pick { display:flex; align-items:baseline; gap:8px; padding-top:12px; border-top:1px solid rgba(0,229,160,.08); }
+    .eq-pick .lbl { font-family:var(--mono); font-size:.62rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); white-space:nowrap; }
+    .eq-pick a { font-family:var(--mono); font-size:.8rem; color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    .eq-pick a:hover { border-color:var(--accent); }
+    .eq-pick .placeholder { font-family:var(--mono); font-size:.78rem; color:var(--muted); font-style:italic; }
+
+    /* FOOTER */
+    footer { border-top:1px solid var(--border); padding:36px 0; margin-top:40px; }
+    .footer-inner { max-width:1200px; margin:0 auto; padding:0 24px; display:flex; justify-content:space-between; align-items:center; gap:20px; flex-wrap:wrap; }
+    .footer-logo { font-family:var(--mono); color:var(--accent); font-size:.9rem; }
+    .footer-links { display:flex; gap:24px; list-style:none; }
+    .footer-links a { font-family:var(--mono); font-size:.7rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; }
+    .footer-links a:hover { color:var(--accent); }
+    .footer-copy { font-family:var(--mono); font-size:.68rem; color:var(--muted); }
+
+    @media(max-width:700px) {
+      .dev-grid,.eq-grid { grid-template-columns:1fr; }
+      .nav-links { display:none; }
+    }
+
+    /* GUIDES */
+    .guide-group { margin-top:40px; }
+    .guide-group h2 { font-size:1.35rem; font-weight:700; margin-bottom:18px; }
+    .guide-group h2 em { font-style:normal; color:var(--accent); }
+    .guide-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:22px; }
+    .guide-card { background:var(--bg2); border:1px solid var(--border); border-radius:6px; overflow:hidden; display:flex; flex-direction:column; }
+    .guide-media { position:relative; aspect-ratio:16/9; background:var(--bg3); }
+    .guide-play { position:absolute; inset:0; width:100%; height:100%; border:0; padding:0; background:none; cursor:pointer; display:block; }
+    .guide-play img { width:100%; height:100%; object-fit:cover; display:block; opacity:.85; transition:opacity .2s; }
+    .guide-play:hover img, .guide-play:focus-visible img { opacity:1; }
+    .guide-play:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+    .guide-play[disabled] { cursor:default; }
+    .guide-play[disabled] img { opacity:.45; filter:grayscale(.6); }
+    .play-icon { position:absolute; left:50%; top:50%; width:64px; height:64px; margin:-32px 0 0 -32px; border-radius:50%; background:rgba(8,12,16,.78); border:2px solid var(--accent); box-shadow:var(--glow); display:flex; align-items:center; justify-content:center; color:var(--accent); font-size:1.5rem; padding-left:4px; }
+    .guide-play[disabled] .play-icon { display:none; }
+    .guide-badge { position:absolute; right:10px; bottom:10px; font-family:var(--mono); font-size:.72rem; color:var(--text); background:rgba(8,12,16,.82); border:1px solid var(--border); border-radius:3px; padding:3px 7px; letter-spacing:.06em; }
+    .guide-badge.soon { left:10px; right:auto; color:var(--warn); }
+    .guide-media iframe { position:absolute; inset:0; width:100%; height:100%; border:0; }
+    .guide-body { padding:16px 18px 18px; display:flex; flex-direction:column; gap:8px; flex:1; }
+    .guide-body h3 { font-size:1.05rem; font-weight:700; }
+    .guide-body p { color:var(--muted); line-height:1.6; font-size:.95rem; }
+    .guide-links { margin-top:auto; padding-top:6px; display:flex; gap:18px; flex-wrap:wrap; }
+    .guide-links a { font-family:var(--mono); font-size:.76rem; color:var(--accent); text-decoration:none; letter-spacing:.04em; min-height:44px; display:inline-flex; align-items:center; }
+    .guide-links a:hover { text-decoration:underline; }
+    .guide-note { margin-top:44px; font-family:var(--mono); font-size:.78rem; color:var(--muted); line-height:1.7; border-left:2px solid var(--border); padding-left:14px; }
+    .guide-note a { color:var(--accent); }
+    @media(max-width:700px) {
+      .guide-grid { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/velkommen" class="logo">mesh<span>view</span>.dk</a>
+    <ul class="nav-links">
+      <li><a href="https://meshview.dk/#/live" target="_blank" rel="noopener">Live</a></li>
+      <li><a href="/velkommen#noder">Noder</a></li>
+      <li><a href="/velkommen#guide">Kom i gang</a></li>
+      <li><a href="/guider" aria-current="page">Guider</a></li>
+      <li><a href="https://tools.meshview.dk">Værktøjer</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section class="doc-hero">
+  <div class="wrap">
+    <a href="/velkommen#" class="back-link">← Tilbage til forsiden</a>
+    <div class="doc-tag" style="margin-top:18px">// videoguider</div>
+    <h1>Lær <em>MeshView</em> at kende</h1>
+    <p class="lead">
+      Korte videoer, der viser én funktion ad gangen. Hver guide varer et til to minutter
+      og har danske undertekster. Vil du læse i stedet, linker hver video til den skrevne
+      <a class="inline" href="https://github.com/dborup/CoreScope/blob/master/docs/user-guide/" target="_blank" rel="noopener">brugervejledning</a>.
+    </p>
+  </div>
+</section>
+
+<section class="doc-section">
+  <div class="wrap">
+
+    <div class="guide-group">
+      <h2>Kort og <em>terræn</em></h2>
+      <div class="guide-grid">
+      <article class="guide-card" data-youtube="">
+        <div class="guide-media">
+          <button type="button" class="guide-play" data-title="Danske kort og lag">
+            <img src="/meshview-info-assets/guider/kort-og-lag.jpg" alt="" width="640" height="360" loading="lazy" />
+            <span class="play-icon" aria-hidden="true">▶</span>
+            <span class="guide-badge">1:48</span>
+          </button>
+        </div>
+        <div class="guide-body">
+          <h3>Danske kort og lag</h3>
+          <p>Luftfoto, Skærmkort og Natur- og Friluftskort, farve efter højde, skyggekort og højdekurver – og hvor du finder dem.</p>
+          <div class="guide-links">
+            <a href="https://meshview.dk/#/map" target="_blank" rel="noopener">Åbn kortet →</a>
+            <a href="https://github.com/dborup/CoreScope/blob/master/docs/user-guide/map.md" target="_blank" rel="noopener">Læs om kortet</a>
+          </div>
+        </div>
+      </article>
+      <article class="guide-card" data-youtube="">
+        <div class="guide-media">
+          <button type="button" class="guide-play" data-title="Terrænprofil mellem to noder">
+            <img src="/meshview-info-assets/guider/terraenprofil.jpg" alt="" width="640" height="360" loading="lazy" />
+            <span class="play-icon" aria-hidden="true">▶</span>
+            <span class="guide-badge">1:09</span>
+          </button>
+        </div>
+        <div class="guide-body">
+          <h3>Terrænprofil mellem to noder</h3>
+          <p>Se terræn, bygninger og træer mellem to noder, og om Fresnel-zonen er fri.</p>
+          <div class="guide-links">
+            <a href="https://meshview.dk/#/map" target="_blank" rel="noopener">Prøv det på kortet →</a>
+            <a href="https://github.com/dborup/CoreScope/blob/master/docs/user-guide/map.md" target="_blank" rel="noopener">Læs om terrænprofil</a>
+          </div>
+        </div>
+      </article>
+      </div>
+    </div>
+
+    <div class="guide-group">
+      <h2>Din <em>node</em></h2>
+      <div class="guide-grid">
+      <article class="guide-card" data-youtube="">
+        <div class="guide-media">
+          <button type="button" class="guide-play" data-title="Skråfoto af din node">
+            <img src="/meshview-info-assets/guider/skraafoto.jpg" alt="" width="640" height="360" loading="lazy" />
+            <span class="play-icon" aria-hidden="true">▶</span>
+            <span class="guide-badge">0:56</span>
+          </button>
+        </div>
+        <div class="guide-body">
+          <h3>Skråfoto af din node</h3>
+          <p>Se stedet fra luften fra fire retninger og lige ovenfra, og skift mellem årgange.</p>
+          <div class="guide-links">
+            <a href="https://meshview.dk/#/nodes" target="_blank" rel="noopener">Find din node →</a>
+            <a href="https://github.com/dborup/CoreScope/blob/master/docs/user-guide/nodes.md" target="_blank" rel="noopener">Læs om nodesiden</a>
+          </div>
+        </div>
+      </article>
+      </div>
+    </div>
+
+    <p class="guide-note">
+      Flere guider er på vej.<br />
+      Videoerne ligger på YouTube. De hentes først, når du trykker afspil, og afspilles via
+      youtube-nocookie.com.
+    </p>
+
+  </div>
+</section>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-logo">meshview.dk</div>
+    <ul class="footer-links">
+      <li><a href="https://meshcore.io" target="_blank" rel="noopener">MeshCore</a></li>
+      <li><a href="/guider">Guider</a></li>
+      <li><a href="/observer">Bliv observer</a></li>
+      <li><a href="mailto:kontakt@meshview.dk">Kontakt</a></li>
+    </ul>
+    <div class="footer-copy">© 2026 MeshView.dk — Frivilligt drevet</div>
+  </div>
+</footer>
+
+<script src="/meshview-info-assets/guider.js"></script>
+</body>
+</html>
