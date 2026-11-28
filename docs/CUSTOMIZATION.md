@@ -242,6 +242,7 @@ A TV or wall screen runs Live in kiosk mode from a link such as `#/live?kiosk=1&
 - **The preset never turns kiosk on.** Only a link with `kiosk=1` does; normal Live is unchanged.
 - **Keys are case-sensitive** (as everywhere in `config.json`): `EverySeconds` is ignored with a warning in the log.
 - **A value outside its bounds**, or `null`, logs one warning at startup and takes its default. A tour longer than 12 keeps the first 12. `"kiosk": null` is no preset, with a warning.
+- **Building a link:** Live → settings (the gear) → **TV mode** opens a dialog that builds the kiosk link: a tour of the configured `areas` in the order you tick them, the seconds per area, the theme and Moments on or off, filled in from this preset. It starts the link in that tab, copies it for the screen's browser, or shows it as a QR code. The link spells out every choice (an empty `tour=` too), so a screen keeps what was picked when the preset changes later.
 - **`scale` and `safeInsetVmin` per screen:** a viewer can set both in Customize → Display → **Live kiosk** in the screen's own browser (see Display above). That browser's value wins over this preset; there is no link parameter for them.
 
 ## Full Example

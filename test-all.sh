@@ -129,6 +129,7 @@ run test-883-kiosk-moments.js
 run test-883-m3-kiosk.js
 run test-968-kiosk-preset.js
 run test-968-customizer-kiosk.js
+run test-998-live-tv-mode.js
 run test-958-movable-moments.js
 run test-969-operator-display-defaults.js
 run test-live-follow.js

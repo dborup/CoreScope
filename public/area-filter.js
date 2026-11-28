@@ -27,20 +27,34 @@
 
   _selected = loadFromStorage();
 
-  async function fetchAreas() {
-    if (_loaded) return _areas;
-    try {
-      var data = await fetch('/api/config/areas').then(function (r) { return r.json(); });
-      _areas = Array.isArray(data) ? data : [];
-      _loaded = true;
-      if (_selected && !_areas.some(function (a) { return a.key === _selected; })) {
-        _selected = null;
-        saveToStorage();
-      }
-    } catch (e) {
-      _areas = [];
+  // #998: callers that ask while the request is out (Live's TV mode dialog
+  // next to init()) share it, so the config is fetched once per page load.
+  var _pending = null;
+  function fetchAreas() {
+    if (_loaded) return Promise.resolve(_areas);
+    if (!_pending) {
+      _pending = (async function () {
+        try {
+          var data = await fetch('/api/config/areas').then(function (r) { return r.json(); });
+          _areas = Array.isArray(data) ? data : [];
+          _loaded = true;
+          if (_selected && !_areas.some(function (a) { return a.key === _selected; })) {
+            _selected = null;
+            saveToStorage();
+          }
+        } catch (e) {
+          _areas = [];
+        }
+        _pending = null;
+        return _areas;
+      })();
     }
-    return _areas;
+    return _pending;
+  }
+
+  /** #998: the configured areas ([{key, label}, …], a copy), loaded once. */
+  async function list() {
+    return (await fetchAreas()).slice();
   }
 
   function getSelected() { return _selected; }
@@ -147,6 +161,7 @@
     init: initFilter,
     render: render,
     release: release,
+    list: list,
     getSelected: getSelected,
     getSelectedLabel: getSelectedLabel,
     getAreaParam: getAreaParam,

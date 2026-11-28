@@ -2492,3 +2492,82 @@ select.live-heard-select {
   .live-scope-legend--menu:not([hidden]) { display: block; }
 }
 .live-scope-legend--menu .legend-list { font-size: 12px; }
+
+/* #998 — Live's TV mode: the button in the controls (the gear menu) and the
+ * dialog that builds the kiosk link (live-tv-mode.js). Theme tokens only;
+ * every target is at least 44 px; at 375x560 the panel scrolls inside. */
+.live-tv-toggles { display: flex; }
+.live-tv-btn { min-height: 44px; min-width: 44px; font: inherit; font-size: 13px; }
+.live-tv-overlay {
+  position: fixed; inset: 0; z-index: var(--z-modal);
+  display: flex; align-items: center; justify-content: center;
+  padding: 8px; box-sizing: border-box;
+  background: var(--shadow);
+}
+.live-tv-panel {
+  box-sizing: border-box; width: min(460px, 100%);
+  max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 16px 16px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--card-bg); color: var(--text);
+  box-shadow: 0 16px 48px var(--shadow);
+}
+.live-tv-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.live-tv-title { margin: 0; font-size: 18px; }
+.live-tv-close {
+  min-height: 44px; min-width: 44px; flex-shrink: 0;
+  border: 1px solid var(--border); border-radius: 8px; background: none; color: var(--text);
+  font-size: 22px; line-height: 1; cursor: pointer;
+}
+.live-tv-intro,
+.live-tv-hint { margin: 4px 0 8px; font-size: 13px; color: var(--text-muted); }
+.live-tv-tour { min-width: 0; margin: 8px 0; padding: 0; border: 0; }
+.live-tv-legend { padding: 0; font-weight: 600; }
+.live-tv-areas {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 2px 8px;
+  margin: 0; padding: 0; list-style: none;
+}
+.live-tv-area { display: flex; min-height: 44px; }
+.live-tv-area-row {
+  flex: 1; display: flex; align-items: center; gap: 8px; min-height: 44px;
+  padding: 0 6px; border-radius: 6px; cursor: pointer;
+}
+.live-tv-area-row:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.live-tv-area-input,
+.live-tv-check input { flex-shrink: 0; width: 20px; height: 20px; margin: 0; }
+.live-tv-area-label { flex: 1; overflow-wrap: anywhere; }
+.live-tv-order { min-width: 1.5em; text-align: center; font-weight: 700; color: var(--accent); }
+.live-tv-field { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
+.live-tv-field label,
+.live-tv-link-label { font-size: 13px; font-weight: 600; }
+.live-tv-every,
+.live-tv-theme {
+  box-sizing: border-box; width: 100%; min-height: 44px; min-width: 44px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--input-bg); color: var(--text);
+  font: inherit; font-size: 16px; /* 16 px: no zoom on focus in iOS Safari */
+}
+.live-tv-check { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
+.live-tv-url {
+  display: block; padding: 6px 8px; border: 1px dashed var(--border); border-radius: 6px;
+  font-family: var(--mono); font-size: 12px; word-break: break-all;
+  -webkit-user-select: all; user-select: all;
+}
+.live-tv-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.live-tv-action {
+  flex: 1 1 auto; min-height: 44px; min-width: 44px; padding: 0 14px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text);
+  font: inherit; font-size: 14px; cursor: pointer;
+}
+.live-tv-action.live-tv-start {
+  border-color: var(--accent-strong); background: var(--accent-strong); color: var(--text-on-accent); font-weight: 600;
+}
+.live-tv-btn:focus-visible,
+.live-tv-close:focus-visible,
+.live-tv-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.live-tv-qr { margin-top: 12px; text-align: center; }
+.live-tv-qr[hidden] { display: none; }
+/* The code stays dark on light in both themes: what a camera reads best. */
+.live-tv-qr-svg { display: inline-block; width: min(240px, 70vw); height: auto; border-radius: 4px; background: var(--palette-gray-50); }
+.live-tv-qr-svg path { fill: var(--palette-gray-900); }
+.live-tv-status { min-height: 1.2em; margin: 8px 0 0; font-size: 13px; color: var(--text-muted); }
