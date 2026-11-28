@@ -4410,6 +4410,8 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 .dagi-credit-link { color: var(--link-color); }
 .dagi-notice { margin: 0; padding: 4px 16px; font-size: 12px; color: var(--text-muted); }
 .dagi-notice[hidden] { display: none; }
+/* #740 M3c: on Analytics the notice lines up with the filters above it. */
+.analytics-header .dagi-notice { padding: 0 0 8px; }
 @media (max-width: 600px) {
   .dagi-backdrop:not([hidden]) {
     display: block; position: fixed; inset: 0; z-index: var(--z-modal-backdrop); background: var(--shadow);

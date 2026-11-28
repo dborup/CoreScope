@@ -216,6 +216,7 @@
           <div class="analytics-filters">
             <div id="analyticsRegionFilter" class="region-filter-container"></div>
             <div id="analyticsAreaFilter" style="display:none"></div>
+            <div id="analyticsDagiFilter" class="dagi-filter-container" style="display:none"></div>
             <select id="analyticsTimeWindow" class="time-window-select" data-testid="analytics-time-window" aria-label="Time window">
               <option value="">All data</option>
               <option value="1h">Last 1 hour</option>
@@ -224,6 +225,7 @@
               <option value="30d">Last 30 days</option>
             </select>
           </div>
+          <div id="analyticsDagiNotice" class="dagi-notice" role="status" hidden></div>
           <div class="analytics-tabs" id="analyticsTabs" role="tablist" aria-label="Analytics tabs">
             <button class="tab-btn active" data-tab="overview">Overview</button>
             <button class="tab-btn" data-tab="rf">RF / Signal</button>
@@ -256,12 +258,9 @@
         </div>
       </div>`;
 
-    // Tabs where the area filter is meaningful (transmitter GPS attribution)
-    const AREA_FILTER_TABS = new Set(['overview', 'rf', 'topology', 'hashsizes', 'collisions', 'nodes', 'my-repeaters', 'repeater-metrics', 'clock-health', 'advert-intervals']);
-
     function setAreaFilterVisibility(tab) {
       const el = document.getElementById('analyticsAreaFilter');
-      if (el) el.style.display = AREA_FILTER_TABS.has(tab) ? '' : 'none';
+      if (el) el.style.display = AREA_FILTER_TABS.has(tab) && tab !== 'prefix-tool' ? '' : 'none';
     }
 
     // Tab handling
@@ -292,6 +291,7 @@
       btn.classList.add('active');
       _currentTab = btn.dataset.tab;
       setAreaFilterVisibility(_currentTab);
+      _updateDagiNotice();
       // #1085 — Roles tab owns its own 60s auto-refresh; stop it on switch.
       if (_currentTab !== 'roles') _stopRolesRefresh();
       if (_currentTab !== 'scopes') { _stopScopesRefresh(); _stopScopeAudit(); }
@@ -331,6 +331,19 @@
     setAreaFilterVisibility(_currentTab);
     _regionChangeHandler = RegionFilter.onChange(reloadForFilters);
     _areaChangeHandler = AreaFilter.onChange(reloadForFilters);
+    // #740 M3c: the DAGI control sits beside Region and Area on every tab,
+    // so a selection can always be seen and cleared; the notice says where
+    // it does not apply. A pick or a clear reloads like the other filters.
+    if (window.DagiFilter) {
+      // Until ready() settles, no tab may fetch or render: a theme-refresh
+      // (app.js fires one ~300 ms after /api/config/theme), a tab click or a
+      // Region/Area/window change would otherwise send its requests without
+      // the linked selection, and on a tab without a generation guard that
+      // unfiltered answer could land last. Set before any handler below.
+      _dagiPending = true;
+      DagiFilter.init(document.getElementById('analyticsDagiFilter'));
+      _dagiChangeHandler = DagiFilter.onChange(function () { _updateDagiNotice(); reloadForFilters(); });
+    }
 
     // Time-window picker (#842) — refresh analytics on change.
     const tw = document.getElementById('analyticsTimeWindow');
@@ -382,6 +395,17 @@
     };
     window.addEventListener('theme-refresh', _themeRefreshHandler);
 
+    // #740 M3c: a linked or saved DAGI code is sent only once
+    // /api/config/dagi has checked it, so the first requests wait for that
+    // (at once with no selection). A page left meanwhile renders nothing.
+    if (window.DagiFilter) {
+      const mount = ++_mountGen;
+      await DagiFilter.ready();
+      if (mount !== _mountGen) return;
+      _dagiPending = false;
+    }
+    _updateDagiNotice();
+
     // Independent tabs fetch their own data; the bulk load must not defer
     // their first render or start them a second time when its answers land.
     if (!LOAD_TABS.has(_currentTab)) renderTab(_currentTab);
@@ -396,7 +420,47 @@
   var _themeRefreshHandler = null;
   var _regionChangeHandler = null;
   var _areaChangeHandler = null;
+  var _dagiChangeHandler = null;
+  var _mountGen = 0;      // init() and destroy() bump it (#740 M3c)
+  // True while init() waits for DagiFilter.ready(): renderTab() and
+  // loadAnalytics() are no-ops then, and init() renders the open tab itself
+  // once the selection is checked (#740 M3c review F1).
+  var _dagiPending = false;
+  var _dagiNoticeGen = 0;
   let _currentTab = 'overview';
+
+  // The tabs whose requests the server filters by node membership: Area
+  // and the DAGI selection (#740 M3c) apply to them, and only to them.
+  // Channels takes neither, by design (see loadAnalytics). The Prefix Tool
+  // has always sent the Area too, but keeps the Area control hidden as
+  // before (pre-existing; the DAGI notice tells the truth there).
+  var AREA_FILTER_TABS = new Set(['overview', 'rf', 'topology', 'hashsizes', 'collisions', 'nodes', 'my-repeaters', 'repeater-metrics', 'clock-health', 'advert-intervals', 'prefix-tool']);
+
+  // "&kommune=0751" once /api/config/dagi has checked the code, else ''.
+  function _dagiQs() { return window.DagiFilter ? DagiFilter.queryString() : ''; }
+  // The node-scope part of a request: Area plus the DAGI selection, which
+  // the server ANDs (nodeScopeKey, cmd/server/dagi_api.go). Every call site
+  // that took the Area filter takes this.
+  function _nodeScopeQs() { return AreaFilter.areaQueryString() + _dagiQs(); }
+  // "Kommune: Aarhus" for a sent selection, '' for none.
+  function _dagiScopeLabel() { return _dagiQs() ? DagiFilter.triggerLabel() : ''; }
+
+  // #740 M3c: under the filters, one status line for the selection: on a
+  // tab that honours it, how many nodes no Danish area can include (the
+  // whole-list count, one shared request); on one that does not, that it
+  // does not apply. Hidden without a sent selection.
+  function _updateDagiNotice() {
+    const n = document.getElementById('analyticsDagiNotice');
+    if (!n) return;
+    const gen = ++_dagiNoticeGen;
+    const show = (text) => { if (n.textContent !== text) n.textContent = text; n.hidden = !text; };
+    if (!_dagiQs()) { show(''); return; }
+    if (!AREA_FILTER_TABS.has(_currentTab)) { show(DagiFilter.notAppliedNotice()); return; }
+    show('');
+    DagiFilter.hiddenCount().then(function (count) {
+      if (gen === _dagiNoticeGen && _dagiQs()) show(DagiFilter.hiddenNotice(count));
+    });
+  }
 
   // Append a query fragment to a path (#179, #193). The filter fragments
   // ("&region=…", "&area=…", "&window=…") start with '&'; '?…' and a bare
@@ -535,13 +599,14 @@
   }
 
   async function loadAnalytics(startedAt) {
+    if (_dagiPending) return;
     _cancelLoadRetry();
     const gen = _loadGen;
     if (startedAt === undefined) { startedAt = Date.now(); _loadStatusHtml = LOADING_HTML; }
     try {
       _analyticsData = {};
       const rqs = RegionFilter.regionQueryString(); // "&region=..." or ""
-      const aqs = AreaFilter.areaQueryString();     // "&area=..." or ""
+      const aqs = _nodeScopeQs();                   // "&area=...&kommune=..." or ""
       // Time window picker (#842) — append &window=… when set.
       // NOTE: only the three window-aware endpoints (rf/topology/channels)
       // receive ?window=…; hash-sizes and hash-collisions are about node
@@ -602,6 +667,7 @@
   async function renderTab(tab) {
     const el = document.getElementById('analyticsContent');
     const d = _analyticsData;
+    if (_dagiPending) { el.innerHTML = LOADING_HTML; return; }
     if (LOAD_TABS.has(tab) && !d.rfData) { el.innerHTML = _loadStatusHtml; return; }
     switch (tab) {
       case 'overview': renderOverview(el, d); break;
@@ -2627,7 +2693,7 @@
     const myGen = ++_nodesTabGen;
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading node analytics…</div>';
     try {
-      const rq = RegionFilter.regionQueryString() + AreaFilter.areaQueryString();
+      const rq = RegionFilter.regionQueryString() + _nodeScopeQs();
       // #902: ONE bulk /observers request (cached by CLIENT_TTL.observers)
       // lets Network Status credit a node that is a reporting observer. A
       // failed request just means no observer credit, never a failed tab.
@@ -2844,7 +2910,7 @@
     if (!haveFavs().length) { el.innerHTML = _mrEmptyState(); return; }
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading your repeaters…</div>';
     try {
-      const rq = RegionFilter.regionQueryString() + AreaFilter.areaQueryString();
+      const rq = RegionFilter.regionQueryString() + _nodeScopeQs();
       // When a region/area filter is active the node fetch is scoped, so a
       // starred repeater outside that scope won't come back. Surface that count
       // instead of silently dropping it from the watch-list (#1761 MAJOR).
@@ -3317,16 +3383,21 @@
     return html;
   }
 
+  // Bumped per render; a superseded render drops its answer (#740 M3c F1).
+  let _repeaterMetricsGen = 0;
   async function renderRepeaterMetricsTab(el) {
+    const myGen = ++_repeaterMetricsGen;
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading repeater metrics…</div>';
     try {
-      const rq = RegionFilter.regionQueryString() + AreaFilter.areaQueryString();
+      const rq = RegionFilter.regionQueryString() + _nodeScopeQs();
       // The observer list only marks rows in Busiest Repeaters; without it
       // every repeater is listed as a non-observer.
       const [resp, obsResp] = await Promise.all([
         fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList }),
         api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null),
       ]);
+      // A newer render (filter change, tab switch) owns the panel now.
+      if (myGen !== _repeaterMetricsGen || _currentTab !== 'repeater-metrics') return;
       const nodes = resp.nodes || resp;
       const favs = new Set(typeof getFavorites === 'function' ? getFavorites() : []);
       const points = _toScatterPoints(nodes, favs);
@@ -3569,7 +3640,7 @@
     }
   }
 
-function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; } if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; } _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); _dagiPending = false; if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; } if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; } _mountGen++; if (_dagiChangeHandler) { DagiFilter.offChange(_dagiChangeHandler); _dagiChangeHandler = null; } if (window.DagiFilter) DagiFilter.release(document.getElementById('analyticsDagiFilter')); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {
@@ -4132,10 +4203,12 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
   }
 
   // --- Prefix Tool ---
+  let _prefixToolGen = 0; // as _repeaterMetricsGen
   async function renderPrefixTool(el) {
+    const myGen = ++_prefixToolGen;
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading prefix data…</div>';
 
-    const rq = RegionFilter.regionQueryString() + AreaFilter.areaQueryString();
+    const rq = RegionFilter.regionQueryString() + _nodeScopeQs();
     const regionLabel = rq ? (new URLSearchParams(rq.slice(1)).get('region') || '') : '';
 
     let nodesResp, hashSizesResp;
@@ -4148,9 +4221,12 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
         api(withQuery('/analytics/hash-sizes', rq), { ttl: CLIENT_TTL.analyticsRF }).catch(() => null),
       ]);
     } catch (e) {
+      if (myGen !== _prefixToolGen || _currentTab !== 'prefix-tool') return;
       el.innerHTML = `<div class="text-muted" role="alert" style="padding:40px">Failed to load: ${esc(e.message)}</div>`;
       return;
     }
+    // A newer render (filter change, tab switch) owns the panel now.
+    if (myGen !== _prefixToolGen || _currentTab !== 'prefix-tool') return;
 
     // Deduplicate by public_key, require at least 6 hex chars to build all 3 tiers
     const nodeMap = new Map();
@@ -5274,7 +5350,7 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
   async function renderClockHealthTab(el) {
     el.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading clock health data…</div>';
     try {
-      const aqs = AreaFilter.areaQueryString();
+      const aqs = _nodeScopeQs();
       var data = await (await fetch('/api/nodes/clock-skew' + (aqs ? '?' + aqs.slice(1) : ''))).json();
       if (!Array.isArray(data) || !data.length) {
         el.innerHTML = '<div class="text-center text-muted" style="padding:40px">No clock skew data available. Nodes need recent adverts for clock analysis.</div>';
@@ -7749,7 +7825,7 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
     _aiLeave();
     el.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading advert intervals…</div>';
     try {
-      const data = await api(withQuery('/analytics/advert-intervals', RegionFilter.regionQueryString() + AreaFilter.areaQueryString()), { ttl: CLIENT_TTL.analyticsRF, bust: bust });
+      const data = await api(withQuery('/analytics/advert-intervals', RegionFilter.regionQueryString() + _nodeScopeQs()), { ttl: CLIENT_TTL.analyticsRF, bust: bust });
       if (myGen !== _advertIntervalsGen || _currentTab !== 'advert-intervals') return;
       el.innerHTML = window.AdvertIntervalAnalytics.render(data);
       _aiChart = data;
@@ -7811,7 +7887,7 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
     return Object.assign({
       bucket: b, status: status,
       chart: { generated_at: _aiChart && _aiChart.scan ? _aiChart.scan.generated_at : '', nodes: hit ? Number(hit.nodes) || 0 : 0 },
-      scope: { region: RegionFilter.getRegionParam(), area: AreaFilter.getSelectedLabel ? AreaFilter.getSelectedLabel() : '' },
+      scope: { region: RegionFilter.getRegionParam(), area: AreaFilter.getSelectedLabel ? AreaFilter.getSelectedLabel() : '', dagi: _dagiScopeLabel() },
     }, extra);
   }
 
@@ -7822,7 +7898,7 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
     panel.hidden = false;
   }
 
-  function _aiFilter() { return RegionFilter.regionQueryString() + AreaFilter.areaQueryString(); }
+  function _aiFilter() { return RegionFilter.regionQueryString() + _nodeScopeQs(); }
 
   // prev: the state of a panel open before a re-render; its loaded list is
   // shown again when it is the same bucket under the same filter.
