@@ -695,7 +695,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		DebugAffinity:       s.cfg.DebugAffinity,
 		MapDarkTileProvider: s.cfg.MapDarkTileProvider,
 		Tiles:               s.cfg.Tiles,
-		Customizer:          CustomizerClientConfig{DisabledTabs: disabledTabs},
+		Customizer:          CustomizerClientConfig{DisabledTabs: disabledTabs, OneByteHopsDefault: s.cfg.OneByteHopsDefault()},
 		ClientRxCoverage:    s.cfg.ClientRxCoverageEnabled(),
 		Moments:             s.cfg.momentsClientConfig(),
 		Kiosk:               s.cfg.kioskClientConfig(),

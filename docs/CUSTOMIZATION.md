@@ -182,7 +182,7 @@ User themes take priority over admin themes. Users can reset their personal them
 
 ### Operator display defaults (`config.json`)
 
-Two Display settings take a default for every browser from `config.json`, served on `/api/config/client`:
+Three Display settings take a default for every browser from `config.json`, served on `/api/config/client`:
 
 - **Timestamps:** the `timestamps` block.
 
@@ -198,6 +198,15 @@ Two Display settings take a default for every browser from `config.json`, served
 
   `defaultMode` is `ago` or `absolute`, `timezone` is `local` or `utc`, and `formatPreset` is `iso`, `iso-seconds` or `locale`. An invalid value logs a warning and takes the built-in (`ago`, `local`, `iso`). `allowCustomFormat: true` offers the **Custom Format** field in the Display tab; `customFormat` is then its default, with the tokens `YYYY`, `MM`, `DD`, `HH`, `mm`, `ss`, `SSS` and `Z`.
 - **Live Moments:** `moments.display`, while `moments.enabled` is on. See [moments.md](moments.md#display-defaults-for-your-viewers).
+- **Short (1-byte) path-hash hops** (Path Display, #912): `customizer.oneByteHopsDefault`.
+
+  ```json
+  "customizer": {
+    "oneByteHopsDefault": "hide"
+  }
+  ```
+
+  `show` draws 1-byte hops without markings, `mark` (the built-in) marks the uncertain ones on the map route and the Live map, and `hide` leaves 1-byte hops out of the route view, the Live map and feed, and the node path panel. Nothing stored changes. Any other value logs one warning and takes `mark`. The customizer labels the operator's mode "(server default)". A viewer's pick is always stored in their browser, so it keeps winning when the operator later changes the default. While a pick is stored, **↺ Use server default** under the setting removes it (Reset All removes it too), and the open page follows the default at once; a viewer who never picked follows the current default. Before #912, choosing Mark stored nothing, so a viewer who explicitly picked Mark then cannot be told apart from one who never picked: they now follow your default.
 
 A viewer's own value in the customizer wins over the operator's, and the operator's wins over the built-in. For Moments on/off, a `?moments=` link and the viewer's Live checkbox win over both. Keys are case-sensitive: a different spelling (`AllowCustomFormat`) is ignored with a warning in the server log.
 

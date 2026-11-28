@@ -409,6 +409,7 @@ run test-drag-manager.js
 run test-fluid-scaffolding.js
 run test-hop-resolver-affinity.js
 run test-issue-912-max-hop-dist.js
+run test-issue-912-m2-1byte-operator-default.js
 run test-issue-598-hop-path-inference.js
 run test-issue-598-hop-path-detail.js
 run test-issue-1470-card-bg-contrast.js

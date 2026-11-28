@@ -1721,8 +1721,11 @@ type PrivacyClientConfig struct {
 // /api/config/client surfaces to the frontend. Issue #1508. The field is
 // always present (DisabledTabs defaults to an empty slice) so the frontend
 // can blindly call `.disabledTabs.includes(...)` without an undefined guard.
+// OneByteHopsDefault (#912 M2) is always the effective mode: show, mark or
+// hide, mark when the operator set none.
 type CustomizerClientConfig struct {
-	DisabledTabs []string `json:"disabledTabs"`
+	DisabledTabs       []string `json:"disabledTabs"`
+	OneByteHopsDefault string   `json:"oneByteHopsDefault"`
 }
 
 // ─── IATA Coords ───────────────────────────────────────────────────────────────

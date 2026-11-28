@@ -966,9 +966,15 @@
     // #1508 — expose operator-side customizer knobs to customize-v2.js.
     // Default to an empty disabledTabs list so the .indexOf() guard in
     // _renderTabs is a no-op when the field is absent.
+    // #912 M2 — oneByteHopsDefault is the operator's 1-byte hop mode for
+    // visitors who never picked one; hop-filter.js validates it.
     window.MC_CUSTOMIZER_CFG = (cfg.customizer && typeof cfg.customizer === 'object')
-      ? { disabledTabs: Array.isArray(cfg.customizer.disabledTabs) ? cfg.customizer.disabledTabs : [] }
+      ? {
+          disabledTabs: Array.isArray(cfg.customizer.disabledTabs) ? cfg.customizer.disabledTabs : [],
+          oneByteHopsDefault: cfg.customizer.oneByteHopsDefault
+        }
       : { disabledTabs: [] };
+    if (typeof window.MC_set1ByteHopsDefault === 'function') window.MC_set1ByteHopsDefault(window.MC_CUSTOMIZER_CFG.oneByteHopsDefault);
     // #1574 — operator-configurable cap on /live map node count.
     if (cfg.liveMapMaxNodes != null) window.LIVE_MAP_MAX_NODES = cfg.liveMapMaxNodes;
     // Configured geo_filter box/polygon (#730), for classifying domestic

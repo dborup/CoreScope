@@ -11,8 +11,8 @@
  *
  *   1. 1440x900, the mode switched through the customizer's own select and no
  *      reload between modes (mc-hide-1byte-hops-changed):
- *      - no stored mode (cold start): Live uses Show, so B is drawn unmarked
- *        (owner decision on #912, 2026-11-27, until M2);
+ *      - no stored mode (cold start): Live uses the operator default served
+ *        on /api/config/client (#912 M2; mark on a server without the key);
  *      - Show: a vertex sits on B and no segment is marked (control); a pure
  *        1-byte path is drawn;
  *      - Hide: no polyline vertex sits on B, and A→C is drawn dashed and
@@ -24,7 +24,11 @@
  *      - Mark: B stays, A→B and B→C carry the dashed class, and a route
  *        with only multi-byte hops carries none; the choice is stored;
  *   2. a 375x560 touch phone from a cold start: More → Customize → Display by
- *      real taps, Hide picked, Live by a real tap; no vertex on B.
+ *      real taps, Hide picked, Live by a real tap; no vertex on B;
+ *   3. #912 M2, a fresh profile with /api/config/client answering
+ *      oneByteHopsDefault "hide": Hide on Live (no vertex on B), nothing
+ *      stored; with no default in the client config (an older server), Live
+ *      draws as before #912: Show (owner decision on #912, 2026-11-27).
  *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-912-live-1byte-hops-e2e.js
  */
@@ -40,10 +44,22 @@ async function step(name, fn) {
 }
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
-async function open(browser, { phone = false } = {}) {
+// With `hopsDefault`, /api/config/client is answered with that
+// customizer.oneByteHopsDefault; null removes the key.
+async function open(browser, { phone = false, hopsDefault } = {}) {
   const ctx = await browser.newContext(phone
     ? { viewport: { width: 375, height: 560 }, isMobile: true, hasTouch: true }
     : { viewport: { width: 1440, height: 900 } });
+  if (hopsDefault !== undefined) {
+    await ctx.route('**/api/config/client*', async (route) => {
+      const res = await route.fetch();
+      const cfg = await res.json();
+      cfg.customizer = cfg.customizer || {};
+      if (hopsDefault === null) delete cfg.customizer.oneByteHopsDefault;
+      else cfg.customizer.oneByteHopsDefault = hopsDefault;
+      await route.fulfill({ response: res, json: cfg });
+    });
+  }
   await ctx.addInitScript(() => {
     try {
       if (sessionStorage.getItem('__e2e912_seeded')) return; // a cold start, once per tab
@@ -194,15 +210,16 @@ async function pickMode(page, mode, phone) {
       const pureOneByte = [{ node: B, bytes: 1 }];
       let id = 0;
 
-      await step('no stored mode (cold start): Live uses Show, the 1-byte hop is drawn unmarked', async () => {
+      await step('no stored mode (cold start): Live uses the served operator default', async () => {
+        const served = (await (await h.page.request.get(BASE + '/api/config/client')).json()).customizer.oneByteHopsDefault;
         const st = await h.page.evaluate(() => ({ stored: localStorage.getItem('meshcore-1byte-hops-mode'),
-          global: window.MC_get1ByteHopsMode() }));
+          global: window.MC_get1ByteHopsMode(), live: window._liveOneByteHopsMode() }));
         assert(st.stored === null, 'precondition: no stored mode, got ' + st.stored);
-        assert(st.global === 'mark', 'other pages keep hop-filter.js\'s default (mark), got ' + st.global);
+        assert(['show', 'mark', 'hide'].includes(served), 'the server sends an effective default, got ' + served);
+        assert(st.live === served && st.global === served, 'Live and other pages follow ' + served + ': ' + JSON.stringify(st));
         const polys = await send(h.page, ++id, A, route);
-        assert(hasVertex(polys, B), 'Live must draw a vertex on B: ' + JSON.stringify(polys));
-        assert(segment(polys, A, B) && segment(polys, B, C), 'A→B and B→C must be drawn');
-        assert(!polys.some(uncertain), 'no stored mode marks nothing on Live: ' + JSON.stringify(polys.filter(uncertain)));
+        assert(hasVertex(polys, B) === (served !== 'hide'), served + ': a vertex on B ' + JSON.stringify(polys));
+        assert(uncertain(segment(polys, A, B)) === (served === 'mark'), served + ': A→B marked ' + JSON.stringify(polys));
       });
 
       await step('Show (control): the 1-byte hop is drawn, nothing is marked', async () => {
@@ -249,7 +266,7 @@ async function pickMode(page, mode, phone) {
         assert(cd && !uncertain(cd), 'C→D is certain: ' + JSON.stringify(cd));
         assert(ab.opacity < cd.opacity, 'a marked segment is lighter: ' + ab.opacity + ' vs ' + cd.opacity);
         const stored = await h.page.evaluate(() => localStorage.getItem('meshcore-1byte-hops-mode'));
-        assert(stored === 'mark', 'an explicit Mark must be stored, or Live falls back to Show: ' + stored);
+        assert(stored === 'mark', 'an explicit Mark must be stored, or Live follows the default: ' + stored);
       });
 
       await step('no page errors', async () => {
@@ -271,6 +288,38 @@ async function pickMode(page, mode, phone) {
       assert(uncertain(segment(polys, A, C)), 'A→C must be dashed: ' + JSON.stringify(polys));
       const sw = await h.page.evaluate(() => document.documentElement.scrollWidth);
       assert(sw <= 375, 'no sideways scroll at 375px: ' + sw);
+      assert(h.errors.length === 0, h.errors.join(' | '));
+      await h.ctx.close();
+    });
+
+    // #912 M2: red with M1's `stored || 'show'` fallback, which drew B.
+    await step('M2: oneByteHopsDefault "hide" and a fresh profile: Hide on Live, nothing stored', async () => {
+      const h = await open(browser, { hopsDefault: 'hide' });
+      await h.page.goto(BASE + '/#/live', { waitUntil: 'load' });
+      await readyLive(h.page);
+      await h.page.waitForFunction(() => window.MC_get1ByteHopsDefault() === 'hide', null, { timeout: 10000 });
+      const [A, B, C] = await pickNodes(h.page);
+      const st = await h.page.evaluate(() => ({ stored: localStorage.getItem('meshcore-1byte-hops-mode'),
+        live: window._liveOneByteHopsMode() }));
+      assert(st.stored === null && st.live === 'hide', JSON.stringify(st));
+      const polys = await send(h.page, 98, A, [{ node: B, bytes: 1 }, { node: C, bytes: 2 }]);
+      assert(polys.length > 0 && !hasVertex(polys, B), 'a vertex sits on the hidden hop B: ' + JSON.stringify(polys));
+      assert(uncertain(segment(polys, A, C)), 'A→C must be dashed: ' + JSON.stringify(polys));
+      assert(h.errors.length === 0, h.errors.join(' | '));
+      await h.ctx.close();
+    });
+
+    await step('M2: no default in the client config and a fresh profile: Show on Live', async () => {
+      const h = await open(browser, { hopsDefault: null });
+      await h.page.goto(BASE + '/#/live', { waitUntil: 'load' });
+      await readyLive(h.page);
+      await h.page.waitForFunction(() => window.MC_CUSTOMIZER_CFG && window.MC_CUSTOMIZER_CFG.oneByteHopsDefault === undefined,
+        null, { timeout: 10000 });
+      const [A, B, C] = await pickNodes(h.page);
+      const st = await h.page.evaluate(() => ({ live: window._liveOneByteHopsMode(), global: window.MC_get1ByteHopsMode() }));
+      assert(st.live === 'show' && st.global === 'mark', JSON.stringify(st));
+      const polys = await send(h.page, 97, A, [{ node: B, bytes: 1 }, { node: C, bytes: 2 }]);
+      assert(hasVertex(polys, B) && !polys.some(uncertain), 'Show draws B unmarked: ' + JSON.stringify(polys));
       assert(h.errors.length === 0, h.errors.join(' | '));
       await h.ctx.close();
     });

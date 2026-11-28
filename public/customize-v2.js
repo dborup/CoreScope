@@ -3079,25 +3079,59 @@
 
   // ── #1633 / #674 1-byte path hops: Show / Mark / Hide ──
   // Reads and writes through hop-filter.js (MC_get1ByteHopsMode /
-  // MC_set1ByteHopsMode), which owns the storage key, the default (mark) and
-  // the migration of the #1633 boolean key. Every change fires
+  // MC_set1ByteHopsMode), which owns the storage key, the default (the
+  // operator's customizer.oneByteHopsDefault, else mark, #912 M2) and the
+  // migration of the #1633 boolean key. Every change fires
   // `mc-hide-1byte-hops-changed`; map.js (which redraws the route view) and
   // packets.js subscribe and re-render in place (PR #1689 r1 adv #4, #673).
   // Analytics rebuilds on its next tab activation.
+  // "Use server default" (MC_clear1ByteHopsMode) is offered while the visitor
+  // has a stored choice, so they can follow the operator again (PR #1001
+  // review F1); _syncHide1ByteHopsField keeps an open panel in step.
+  var HOP_MODE_LABELS = { show: 'Show', mark: 'Mark uncertain hops', hide: 'Hide' };
+  function _hopModeState() {
+    return {
+      mode: typeof window.MC_get1ByteHopsMode === 'function' ? window.MC_get1ByteHopsMode() : 'mark',
+      dflt: typeof window.MC_get1ByteHopsDefault === 'function' ? window.MC_get1ByteHopsDefault() : 'mark',
+      choice: typeof window.MC_getStored1ByteHopsMode === 'function' ? window.MC_getStored1ByteHopsMode() : null
+    };
+  }
+  function _hopModeLabel(value, dflt) {
+    return HOP_MODE_LABELS[value] + (dflt === value ? ' (server default)' : '');
+  }
   function _renderHide1ByteHopsToggle() {
-    var mode = typeof window.MC_get1ByteHopsMode === 'function' ? window.MC_get1ByteHopsMode() : 'mark';
-    var opt = function (value, label) {
-      return '<option value="' + value + '"' + (mode === value ? ' selected' : '') + '>' + label + '</option>';
+    var st = _hopModeState();
+    var opt = function (value) {
+      return '<option value="' + value + '"' + (st.mode === value ? ' selected' : '') + '>' + _hopModeLabel(value, st.dflt) + '</option>';
     };
     return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Path Display</p>' +
-      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">1-byte path-hash prefixes (firmware default) collide often: several nodes share each one, so a 1-byte hop on a route is a best guess. Mark flags the uncertain hops on the map route; Hide leaves 1-byte hops out everywhere without changing what\'s stored. Until you pick a mode here, the Live map shows every hop unmarked.</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">1-byte path-hash prefixes (firmware default) collide often: several nodes share each one, so a 1-byte hop on a route is a best guess. Mark flags the uncertain hops on the map route; Hide leaves 1-byte hops out everywhere without changing what\'s stored.</p>' +
       '<div class="cust-field">' +
         '<label for="cv2-hide-1byte-hops" style="display:block;margin-bottom:4px">Short (1-byte) path-hash hops</label>' +
         '<select id="cv2-hide-1byte-hops" data-cv2-hide-1byte-hops style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
-          opt('show', 'Show') + opt('mark', 'Mark uncertain hops (default)') + opt('hide', 'Hide') +
+          opt('show') + opt('mark') + opt('hide') +
         '</select>' +
+        '<button type="button" id="cv2-hide-1byte-hops-reset" class="cust-dl-btn" data-cv2-hide-1byte-hops-reset style="margin-top:6px;padding:6px 12px;border-radius:6px;font-size:13px;cursor:pointer"' + (st.choice ? '' : ' hidden') + '>↺ Use server default</button>' +
       '</div>';
   }
+
+  // Updates the open select in place, not by re-rendering it: a pick fires
+  // the change event while the select has the focus.
+  function _syncHide1ByteHopsField() {
+    var sel = document.getElementById('cv2-hide-1byte-hops');
+    if (!sel) return;
+    var st = _hopModeState();
+    for (var i = 0; i < sel.options.length; i++) {
+      sel.options[i].textContent = _hopModeLabel(sel.options[i].value, st.dflt);
+    }
+    sel.value = st.mode;
+    var reset = document.getElementById('cv2-hide-1byte-hops-reset');
+    if (reset) reset.hidden = !st.choice;
+  }
+  try {
+    window.addEventListener('mc-hide-1byte-hops-changed', _syncHide1ByteHopsField);
+    window.addEventListener('mc-1byte-hops-default-changed', _syncHide1ByteHopsField);
+  } catch (_e) { /* no window events (tests) */ }
 
   // ── #1454 Show-encrypted-channels toggle ──
   // Writes localStorage["channels-show-encrypted"]. Default OFF: key is
@@ -4013,6 +4047,14 @@
         if (typeof window.MC_set1ByteHopsMode === 'function') window.MC_set1ByteHopsMode(sel.value);
       });
     });
+    container.querySelectorAll('[data-cv2-hide-1byte-hops-reset]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        if (typeof window.MC_clear1ByteHopsMode === 'function') window.MC_clear1ByteHopsMode();
+        // The button hides itself; keep the focus on the setting.
+        var sel = document.getElementById('cv2-hide-1byte-hops');
+        if (sel) sel.focus();
+      });
+    });
 
     // Preset buttons
     container.querySelectorAll('.cust-preset-btn').forEach(function (btn) {
@@ -4631,7 +4673,13 @@
       } catch (_e) { /* ignore */ }
     });
 
-    // 6. Encrypted-channel toggle — removing the LS key (step 1) fixes
+    // 6. 1-byte path hops — step 1 removed the choice; tell the open page,
+    //    which now follows the operator default (PR #1001 review F2).
+    try {
+      if (typeof window !== 'undefined' && typeof window.MC_clear1ByteHopsMode === 'function') window.MC_clear1ByteHopsMode();
+    } catch (_e) { /* ignore */ }
+
+    // 7. Encrypted-channel toggle — removing the LS key (step 1) fixes
     //    persistence, but channels.js subscribes to
     //    mc-channels-show-encrypted-changed for live re-render. Fire it
     //    explicitly with on:false so the channels list reverts to "hide

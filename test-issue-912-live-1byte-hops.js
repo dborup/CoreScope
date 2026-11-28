@@ -6,11 +6,11 @@
  * Live map animation follows it too, against the real public/live.js,
  * public/hop-filter.js and public/hop-resolver.js in a vm sandbox:
  *
- *   1. the mode is read per packet from the visitor's stored choice
- *      (MC_getStored1ByteHopsMode), so a change (MC_set1ByteHopsMode fires
- *      mc-hide-1byte-hops-changed) reaches the next packet at once; with no
- *      stored choice, or without hop-filter.js, Live uses Show (owner
- *      decision on #912, 2026-11-27, until M2);
+ *   1. the mode is read per packet: the visitor's stored choice, else the
+ *      operator default (#912 M2, customizer.oneByteHopsDefault), else Show
+ *      when no default has arrived or hop-filter.js is missing (owner
+ *      decision on #912, 2026-11-27); a change (MC_set1ByteHopsMode fires
+ *      mc-hide-1byte-hops-changed) reaches the next packet at once;
  *   2. Show: every hop reaches the animation, no segment is marked;
  *   3. Hide: 1-byte hops are left out, the server's resolved_path stays
  *      paired with the hop it belongs to, and when hops were dropped every
@@ -48,7 +48,9 @@ function makeStorage(seed) {
 // A browser-like sandbox with just enough DOM for live.js to load. Leaflet,
 // the app shell and the WS channel are stubs; hop filtering and resolution
 // are the real files.
-function loadLive({ withHopFilter = true, storage = {} } = {}) {
+// operatorDefault is handed over as roles.js does once /api/config/client
+// arrives (MC_set1ByteHopsDefault); omitted, no client config has arrived.
+function loadLive({ withHopFilter = true, storage = {}, operatorDefault } = {}) {
   const el = () => ({
     style: {}, dataset: {}, textContent: '', innerHTML: '',
     classList: { add() {}, remove() {}, contains() { return false; } },
@@ -106,6 +108,7 @@ function loadLive({ withHopFilter = true, storage = {} } = {}) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', f), 'utf8'), ctx, { filename: f });
     for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
   }
+  if (operatorDefault !== undefined) ctx.window.MC_set1ByteHopsDefault(operatorDefault);
   return ctx;
 }
 
@@ -136,13 +139,48 @@ console.log('\n=== #912 M1: the mode Live reads ===');
   const ctx = setup();
   const mode = ctx.window._liveOneByteHopsMode;
 
-  test('no stored mode: the Live map uses Show; other pages keep hop-filter.js\'s default', () => {
-    // Owner decision on #912 (2026-11-27): Live defaults to Show until M2.
+  test('no stored mode and no operator default yet: the Live map uses Show; other pages keep hop-filter.js\'s default', () => {
+    // Owner decision on #912 (2026-11-27): without an operator default, Live
+    // draws as before #912.
     assert.strictEqual(typeof mode, 'function', '_liveOneByteHopsMode must be exposed');
     assert.strictEqual(ctx.localStorage.getItem('meshcore-1byte-hops-mode'), null, 'precondition: no choice');
     assert.strictEqual(mode(), 'show');
     assert.strictEqual(ctx.window.MC_get1ByteHopsMode(), 'mark', 'hop-filter.js DEFAULT_MODE is unchanged');
     assert.strictEqual(ctx.window.MC_getStored1ByteHopsMode(), null);
+  });
+
+  // #912 M2: once M2 lands the operator default decides the starting mode
+  // (owner decision, 2026-11-27). Red with M1's `stored || 'show'` fallback.
+  test('oneByteHopsDefault "hide" and a fresh profile: Hide on Live', () => {
+    const fresh = loadLive({ operatorDefault: 'hide' });
+    assert.strictEqual(fresh.localStorage.getItem('meshcore-1byte-hops-mode'), null, 'precondition: no choice');
+    assert.strictEqual(fresh.window._liveOneByteHopsMode(), 'hide');
+  });
+
+  for (const dflt of ['show', 'mark']) {
+    test('no stored mode: the operator default "' + dflt + '" applies on Live', () => {
+      assert.strictEqual(loadLive({ operatorDefault: dflt }).window._liveOneByteHopsMode(), dflt);
+    });
+  }
+
+  test('a stored choice beats the operator default on Live, Mark too', () => {
+    const fresh = loadLive({ storage: { 'meshcore-1byte-hops-mode': 'mark' }, operatorDefault: 'hide' });
+    assert.strictEqual(fresh.window._liveOneByteHopsMode(), 'mark');
+  });
+
+  test('a default that arrives late reaches the next packet; Use server default returns to it', () => {
+    const fresh = loadLive();
+    assert.strictEqual(fresh.window._liveOneByteHopsMode(), 'show', 'before the client config');
+    fresh.window.MC_set1ByteHopsDefault('hide');
+    assert.strictEqual(fresh.window._liveOneByteHopsMode(), 'hide', 'after the client config');
+    fresh.window.MC_set1ByteHopsMode('show');
+    assert.strictEqual(fresh.window._liveOneByteHopsMode(), 'show', 'a pick');
+    fresh.window.MC_clear1ByteHopsMode();
+    assert.strictEqual(fresh.window._liveOneByteHopsMode(), 'hide', 'back to the operator default');
+  });
+
+  test('an invalid operator default counts as none: Show on Live', () => {
+    assert.strictEqual(loadLive({ operatorDefault: 'constructor' }).window._liveOneByteHopsMode(), 'show');
   });
 
   test('no stored mode: a 1-byte route is drawn unmarked on Live', () => {
@@ -164,9 +202,11 @@ console.log('\n=== #912 M1: the mode Live reads ===');
     assert.strictEqual(fresh.window._liveOneByteHopsMode(), 'hide');
   });
 
-  test('a junk stored mode counts as no choice: Show on Live', () => {
-    const fresh = loadLive({ storage: { 'meshcore-1byte-hops-mode': 'constructor' } });
-    assert.strictEqual(fresh.window._liveOneByteHopsMode(), 'show');
+  test('a junk stored mode counts as no choice: the operator default on Live, else Show', () => {
+    const withDefault = loadLive({ storage: { 'meshcore-1byte-hops-mode': 'constructor' }, operatorDefault: 'hide' });
+    assert.strictEqual(withDefault.window._liveOneByteHopsMode(), 'hide');
+    const without = loadLive({ storage: { 'meshcore-1byte-hops-mode': 'constructor' } });
+    assert.strictEqual(without.window._liveOneByteHopsMode(), 'show');
   });
 
   test('a mode change reaches the next packet at once (MC_set1ByteHopsMode)', () => {
