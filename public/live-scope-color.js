@@ -14,8 +14,9 @@
  * one. With all 12 slots held by active scopes, the next one shares the
  * "other" colour. The registry is an LRU capped at CAP entries.
  *
- * Hardcoded for now (window, rows, cap); exposing them and the palette in the
- * customizer is M2 (AGENTS.md rule 8).
+ * The legend window (minutes, rows) is a per-browser customizer setting
+ * (#882 M2: SETTINGS below, section liveScope); the cap stays fixed, it
+ * bounds memory. The palette is the --scope-* theme keys.
  */
 'use strict';
 
@@ -25,6 +26,26 @@
   var WINDOW_MS = 15 * 60000;
   var LEGEND_ROWS = 12;
   var OTHER = -1;
+  // #882 M2 — the legend window, by the customizer's liveScope section.
+  // The defaults are the M0 plan; rows cannot exceed the palette slots.
+  var SETTINGS_DEFAULTS = { windowMinutes: 15, legendRows: LEGEND_ROWS };
+  var SETTINGS_LIMITS = { windowMinutes: [1, 60], legendRows: [1, SLOTS] };
+  var SETTINGS_KEYS = Object.keys(SETTINGS_DEFAULTS);
+  function settingValid(key, val) {
+    var lim = SETTINGS_LIMITS[key];
+    return !!lim && typeof val === 'number' && Math.floor(val) === val && val >= lim[0] && val <= lim[1];
+  }
+  // A section object → { windowMinutes, legendRows }, each key valid or its default.
+  function resolveSettings(sec) {
+    var out = {};
+    for (var i = 0; i < SETTINGS_KEYS.length; i++) {
+      var k = SETTINGS_KEYS[i];
+      out[k] = sec && typeof sec === 'object' && settingValid(k, sec[k]) ? sec[k] : SETTINGS_DEFAULTS[k];
+    }
+    return out;
+  }
+  var SETTINGS = { KEYS: SETTINGS_KEYS, DEFAULTS: SETTINGS_DEFAULTS, LIMITS: SETTINGS_LIMITS, valid: settingValid, resolve: resolveSettings };
+
   var PALETTE_VARS = [];
   for (var i = 1; i <= SLOTS; i++) PALETTE_VARS.push('--scope-' + i);
   PALETTE_VARS.push('--scope-none', '--scope-unknown', '--scope-other');
@@ -53,12 +74,17 @@
 
   // Session registry: Map<name, { slot, lastTs }> in LRU order (oldest first),
   // plus slotOwner[slot] = name. Every operation is O(1) or O(SLOTS); legend()
-  // is O(CAP log CAP), called at most once a second.
-  function createRegistry() {
+  // is O(CAP log CAP), called at most once a second. settings: the legend
+  // window ({ windowMinutes, legendRows }, see SETTINGS); configure() swaps
+  // it at run time.
+  function createRegistry(settings) {
     var entries = new Map();
     var slotOwner = new Array(SLOTS);
+    var cfg, windowMs;
+    function configure(s) { cfg = resolveSettings(s); windowMs = cfg.windowMinutes * 60000; }
+    configure(settings);
 
-    function active(e, now) { return !!e && now - e.lastTs <= WINDOW_MS; }
+    function active(e, now) { return !!e && now - e.lastTs <= windowMs; }
 
     function slotFreeFor(slot, name, now) {
       var owner = slotOwner[slot];
@@ -104,15 +130,16 @@
       var act = [];
       entries.forEach(function (e, name) { if (active(e, now)) act.push({ name: name, slot: e.slot, lastTs: e.lastTs }); });
       act.sort(function (a, b) { return b.lastTs - a.lastTs; });
-      var rows = act.slice(0, LEGEND_ROWS).map(function (x) { return { name: x.name, slot: x.slot }; });
+      var rows = act.slice(0, cfg.legendRows).map(function (x) { return { name: x.name, slot: x.slot }; });
       rows.sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
       var more = act.length - rows.length;
       var sig = rows.map(function (r) { return r.name + '\u0000' + r.slot; }).join('\u0001') + '\u0002' + more;
-      return { rows: rows, more: more, sig: sig };
+      return { rows: rows, more: more, sig: sig, windowMinutes: cfg.windowMinutes };
     }
 
     return {
-      touch: touch, slotOf: slotOf, legend: legend,
+      touch: touch, slotOf: slotOf, legend: legend, configure: configure,
+      settings: function () { return { windowMinutes: cfg.windowMinutes, legendRows: cfg.legendRows }; },
       size: function () { return entries.size; },
       has: function (n) { return entries.has(n); },
     };
@@ -152,7 +179,7 @@
 
   window.LiveScopeColor = {
     SLOTS: SLOTS, CAP: CAP, WINDOW_MS: WINDOW_MS, LEGEND_ROWS: LEGEND_ROWS, OTHER: OTHER,
-    PALETTE_VARS: PALETTE_VARS,
+    PALETTE_VARS: PALETTE_VARS, SETTINGS: SETTINGS,
     STORAGE_KEY: 'meshcore-color-packets-by-scope',
     SCOPED_STORAGE_KEY: 'live-scoped-only',
     COLOR_PARAM: 'color', SCOPED_PARAM: 'scoped',

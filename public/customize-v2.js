@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk', 'follow'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk', 'follow'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk', 'follow', 'liveScope'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk', 'follow', 'liveScope'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -79,6 +79,12 @@
     // the unreliable-clock flag.
     followRing: '--follow-ring', followRelay: '--follow-relay',
     followObserver: '--follow-observer', followFlag: '--follow-flag',
+    // #882 M2 — the Live "Color by scope" palette: 12 slots, then no scope,
+    // unknown scope and the overflow colour (public/live-scope-color.js).
+    scope1: '--scope-1', scope2: '--scope-2', scope3: '--scope-3', scope4: '--scope-4',
+    scope5: '--scope-5', scope6: '--scope-6', scope7: '--scope-7', scope8: '--scope-8',
+    scope9: '--scope-9', scope10: '--scope-10', scope11: '--scope-11', scope12: '--scope-12',
+    scopeNone: '--scope-none', scopeUnknown: '--scope-unknown', scopeOther: '--scope-other',
     font: '--font', mono: '--mono'
   };
 
@@ -114,6 +120,20 @@
     });
   }
 
+  // #882 M2 — the scope palette. A value that differs from the stylesheet
+  // default for the mode is set on <html>, so it wins over style.css and a
+  // colourblind preset (--mc-scope-*). One equal to the default (every theme
+  // preset's own) or none is removed, so the stylesheet chain decides and a
+  // cleared pick goes back without a reload.
+  function _applyScopeCSS(root, themeSection, dark) {
+    var defs = SCOPE_PRESET_COLORS[dark ? 'themeDark' : 'theme'];
+    SCOPE_COLOR_KEYS.forEach(function (k, i) {
+      var v = themeSection && themeSection[k];
+      if (v && String(v).toLowerCase() !== defs[i]) root.setProperty(THEME_CSS_MAP[k], v);
+      else root.removeProperty(THEME_CSS_MAP[k]);
+    });
+  }
+
   // #881 M3 — likewise: the kind accents follow the colourblind preset
   // (cb-presets.js momentAccents), not the theme preset.
   var MOMENTS_COLOR_KEYS = ['momentCardBg', 'momentNewNode', 'momentBackOnline', 'momentRecordLink', 'momentBusiest'];
@@ -122,6 +142,12 @@
   // #880 M3 — likewise: the relay and observer colours follow the
   // colourblind preset (cb-presets.js followAccents), not the theme preset.
   var FOLLOW_COLOR_KEYS = ['followRing', 'followRelay', 'followObserver', 'followFlag'];
+  // #882 M2 — the Live scope palette. Unlike the groups above these ARE in
+  // THEME_COLOR_KEYS: every theme preset carries a light and a dark value
+  // (SCOPE_PRESET_COLORS, below PRESETS). A colourblind preset's palette
+  // comes through style.css (--mc-scope-*), see _applyScopeCSS.
+  var SCOPE_COLOR_KEYS = ['scope1', 'scope2', 'scope3', 'scope4', 'scope5', 'scope6', 'scope7', 'scope8',
+    'scope9', 'scope10', 'scope11', 'scope12', 'scopeNone', 'scopeUnknown', 'scopeOther'];
 
   var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {
     return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1 && MASTS_COLOR_KEYS.indexOf(k) === -1 &&
@@ -375,6 +401,25 @@
     }
   };
 
+  // #882 M2 — the Live scope palette of every theme preset, light and dark.
+  // One palette for all of them: it is the stylesheet's (style.css --scope-*,
+  // Okabe-Ito based), so picking a theme preset leaves the scope colours as
+  // they were, and _applyScopeCSS keeps a value equal to it off <html>, where
+  // it would hide a colourblind preset's palette. The order is
+  // SCOPE_COLOR_KEYS; test-882-m2-scope-customizer.js pins it to style.css.
+  var SCOPE_PRESET_COLORS = {
+    theme: ['#0072b2', '#009e73', '#b35c00', '#7e3fa0', '#a8780b', '#00838f', '#b0306f', '#4b5eaa',
+      '#5e8b2f', '#8b4513', '#c026d3', '#6d6d00', '#a1a1aa', '#57534e', '#111827'],
+    themeDark: ['#3d8bfd', '#3fd7a5', '#f0a03c', '#c49be0', '#e6c34a', '#4dd0e1', '#f06292', '#8c9eff',
+      '#a5d66b', '#d7a07a', '#e879f9', '#dce775', '#6b7280', '#c4b5a5', '#f8fafc']
+  };
+  Object.keys(PRESETS).forEach(function (id) {
+    ['theme', 'themeDark'].forEach(function (sec) {
+      if (!PRESETS[id][sec]) PRESETS[id][sec] = {};
+      SCOPE_COLOR_KEYS.forEach(function (k, i) { PRESETS[id][sec][k] = SCOPE_PRESET_COLORS[sec][i]; });
+    });
+  });
+
   // ── Labels, hints, emojis (carried from v1) ──
 
   var THEME_LABELS = {
@@ -397,6 +442,9 @@
     momentRecordLink: 'Record Link', momentBusiest: 'Busiest Repeater',
     kioskTileBg: 'Tile Fill', kioskNumber: 'Numbers',
     followRing: 'Rings and Card', followRelay: 'Relays', followObserver: 'Observers', followFlag: 'Clock Flag',
+    scope1: 'Scope 1', scope2: 'Scope 2', scope3: 'Scope 3', scope4: 'Scope 4', scope5: 'Scope 5', scope6: 'Scope 6',
+    scope7: 'Scope 7', scope8: 'Scope 8', scope9: 'Scope 9', scope10: 'Scope 10', scope11: 'Scope 11', scope12: 'Scope 12',
+    scopeNone: 'No Scope', scopeUnknown: 'Unknown Scope', scopeOther: 'Other Scopes',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -441,6 +489,16 @@
     followRelay: 'Live, Follow a packet: a relay that retransmitted the packet',
     followObserver: 'Live, Follow a packet: an observer that heard the packet',
     followFlag: 'Live, Follow a packet: the flag on an observer with an unreliable clock',
+    scope1: 'Live, Color by scope: one of 12 colours a scope name is given (lines, feed stripe, legend)',
+    scope2: 'Live, Color by scope: palette slot 2', scope3: 'Live, Color by scope: palette slot 3',
+    scope4: 'Live, Color by scope: palette slot 4', scope5: 'Live, Color by scope: palette slot 5',
+    scope6: 'Live, Color by scope: palette slot 6', scope7: 'Live, Color by scope: palette slot 7',
+    scope8: 'Live, Color by scope: palette slot 8', scope9: 'Live, Color by scope: palette slot 9',
+    scope10: 'Live, Color by scope: palette slot 10', scope11: 'Live, Color by scope: palette slot 11',
+    scope12: 'Live, Color by scope: palette slot 12',
+    scopeNone: 'Live, Color by scope: packets without a scope (plain flood and direct)',
+    scopeUnknown: 'Live, Color by scope: scoped packets whose region is not known (T?)',
+    scopeOther: 'Live, Color by scope: scopes beyond the 12 slots while all are in use',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
@@ -743,6 +801,41 @@
     var def = key === 'settleSeconds' ? _serverSettleSeconds() : R.DEFAULTS[key];
     if (val === def) clearOverride('follow', key);
     else setOverride('follow', key, val);
+    return true;
+  }
+
+  // ── #882 M2 — Live "Color by scope": the legend window ──
+  // liveScope.windowMinutes and liveScope.legendRows, per browser. The keys,
+  // defaults and bounds are the rule in public/live-scope-color.js
+  // (LiveScopeColor.SETTINGS), which the Live page reads back on
+  // theme-changed. That file loads after this one, hence the lazy lookup;
+  // without it no value is accepted.
+  function _liveScopeRule() {
+    var R = window.LiveScopeColor && window.LiveScopeColor.SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function isValidLiveScopeSetting(key, val) {
+    var R = _liveScopeRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective legend window (this section over the defaults), or null
+   *  without the rule. */
+  function liveScopeSettings(effectiveConfig) {
+    var R = _liveScopeRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.liveScope;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
+  /** Stores a viewer's legend window value. The default is a cleared
+   *  override (no stale dot or badge); a bad value is refused (false). */
+  function setLiveScopeSetting(key, val) {
+    var R = _liveScopeRule();
+    if (!R || !isValidLiveScopeSetting(key, val)) return false;
+    if (val === R.DEFAULTS[key]) clearOverride('liveScope', key);
+    else setOverride('liveScope', key, val);
     return true;
   }
 
@@ -1130,6 +1223,16 @@
           else console.warn('[customizer-v2] Invalid Follow setting rejected:', 'follow.' + fk2, fIn[fk2]);
         }
         if (Object.keys(fOut).length) clean[key] = fOut;
+      } else if (key === 'liveScope' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #882 M2 — the scope legend window, by the module's rule.
+        var lsIn = delta[key], lsOut = {}, lsRule = _liveScopeRule(), lsKeys = lsRule ? lsRule.KEYS : [];
+        for (var lsi = 0; lsi < lsKeys.length; lsi++) {
+          var lsk = lsKeys[lsi];
+          if (!_own(lsIn, lsk) || lsIn[lsk] == null) continue;
+          if (isValidLiveScopeSetting(lsk, lsIn[lsk])) lsOut[lsk] = lsIn[lsk];
+          else console.warn('[customizer-v2] Invalid Live scope setting rejected:', 'liveScope.' + lsk, lsIn[lsk]);
+        }
+        if (Object.keys(lsOut).length) clean[key] = lsOut;
       } else if (key === 'kiosk' && typeof delta[key] === 'object' && delta[key] !== null) {
         // #968 M2 — the kiosk scale and inset, by the kiosk's rule; the
         // operator-only keys (tour, tiles, …) are never the viewer's.
@@ -1281,9 +1384,11 @@
     // Apply theme color/font CSS variables
     for (var key in THEME_CSS_MAP) {
       if (HEAT_COLOR_KEYS.indexOf(key) !== -1) continue; // _applyHeatCSS
+      if (SCOPE_COLOR_KEYS.indexOf(key) !== -1) continue; // _applyScopeCSS
       if (themeSection[key]) root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
     }
     _applyHeatCSS(root, effectiveConfig, userOverrides, dark);
+    _applyScopeCSS(root, themeSection, dark);
 
     // Logo brand colors mirror --accent / --accent-hover ONLY when an
     // operator has actually overridden them via the customizer. We check
@@ -1799,6 +1904,20 @@
           }
         }
       }
+      // #882 M2 — liveScope: two bounded whole numbers.
+      if (key === 'liveScope' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var lsrule = _liveScopeRule();
+        for (var lssk in obj[key]) {
+          if (!_own(obj[key], lssk)) continue;
+          if (lsrule && lsrule.KEYS.indexOf(lssk) === -1) {
+            console.warn('[customizer-v2] Unknown liveScope key in import:', lssk);
+          } else if (!isValidLiveScopeSetting(lssk, obj[key][lssk])) {
+            var lslim = lsrule && lsrule.LIMITS[lssk];
+            errors.push('Invalid Live scope setting: liveScope.' + lssk + ' = "' + obj[key][lssk] + '" \u2014 must be ' +
+              (lslim ? 'a whole number ' + lslim[0] + '-' + lslim[1] : 'unavailable without the Live page'));
+          }
+        }
+      }
       // #968 M2 — kiosk: a scale step and a bounded inset.
       if (key === 'kiosk' && typeof obj[key] === 'object' && obj[key] !== null) {
         var krule = _kioskRule();
@@ -2060,7 +2179,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + _countOverrides('reach') + _countOverrides('moments') + _countOverrides('kiosk') + _countOverrides('follow') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + _countOverrides('reach') + _countOverrides('moments') + _countOverrides('kiosk') + _countOverrides('follow') + _countOverrides('liveScope') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -2302,6 +2421,13 @@
       var fck = FOLLOW_COLOR_KEYS[fci];
       followRows += _renderColorRow(fck, section, current[fck] || _cssVarValue(fck), serverCurrent[fck]);
     }
+    // #882 M2 — no server default here either: show what the page draws
+    // with (a colourblind preset's palette included).
+    var scopeRows = '';
+    for (var sci = 0; sci < SCOPE_COLOR_KEYS.length; sci++) {
+      var sck = SCOPE_COLOR_KEYS[sci];
+      scopeRows += _renderColorRow(sck, section, current[sck] || _cssVarValue(sck), serverCurrent[sck]);
+    }
 
     return '<div class="cust-panel' + (_activeTab === 'theme' ? ' active' : '') + '" data-panel="theme">' +
       _renderPresets() +
@@ -2315,6 +2441,7 @@
       '<details class="cust-moments-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live moments cards (' + MOMENTS_COLOR_KEYS.length + ' options)</summary>' + momentsRows + '</details>' +
       '<details class="cust-kiosk-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live kiosk tiles (' + KIOSK_COLOR_KEYS.length + ' options)</summary>' + kioskRows + '</details>' +
       '<details class="cust-follow-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live follow a packet (' + FOLLOW_COLOR_KEYS.length + ' options)</summary>' + followRows + '</details>' +
+      '<details class="cust-scope-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live scope colours (' + SCOPE_COLOR_KEYS.length + ' options)</summary>' + scopeRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
   }
@@ -2583,6 +2710,7 @@
       _renderMomentsSettings() +
       _renderFollowSettings() +
       _renderKioskSettings() +
+      '<div data-cv2-live-scope-mount></div>' +
     '</div>';
   }
 
@@ -3027,6 +3155,81 @@
         '<input type="number" id="cv2-kiosk-safeInsetVmin" min="' + lim[0] + '" max="' + lim[1] + '" step="0.5" ' +
           'inputmode="decimal" data-cv2-kiosk="safeInsetVmin" value="' + escAttr(String(k.safeInsetVmin)) + '">' +
       '</div>';
+  }
+
+  // ── #882 M2 Live scope legend ──
+  // The window of the SCOPES legend on the Live page ("Color by scope").
+  // Built with createElement/textContent and mounted by _renderPanel into
+  // the Display panel's [data-cv2-live-scope-mount], before _bindEvents wires
+  // the inputs and the override dots. doc: the document (a fake in tests).
+  function _buildLiveScopeSettings(doc) {
+    var R = _liveScopeRule();
+    if (!R) return null;
+    var cur = liveScopeSettings(_getEffective());
+    var el = function (tag, cls, text) {
+      var n = doc.createElement(tag);
+      if (cls) n.className = cls;
+      if (text) n.textContent = text;
+      return n;
+    };
+    var dot = function (key) {
+      if (!_isOverridden('liveScope', key)) return null;
+      var d = el('span', 'cv2-override-dot');
+      d.setAttribute('data-reset-s', 'liveScope');
+      d.setAttribute('data-reset-k', key);
+      d.setAttribute('title', 'Reset to default');
+      if (typeof doc.createElementNS === 'function') {
+        var NS = 'http://www.w3.org/2000/svg';
+        var svg = doc.createElementNS(NS, 'svg');
+        svg.setAttribute('class', 'ph-icon');
+        svg.setAttribute('aria-hidden', 'true');
+        var use = doc.createElementNS(NS, 'use');
+        use.setAttribute('href', '/icons/phosphor-sprite.svg#ph-circle-fill');
+        svg.appendChild(use);
+        d.appendChild(svg);
+      }
+      return d;
+    };
+    var row = function (key, label, hint) {
+      var id = 'cv2-live-scope-' + key, lim = R.LIMITS[key];
+      var r = el('div', 'cust-terrain-row');
+      var left = el('div');
+      var lab = el('label', null, label);
+      lab.setAttribute('for', id);
+      var d = dot(key);
+      if (d) lab.appendChild(d);
+      left.appendChild(lab);
+      left.appendChild(el('div', 'cust-hint', hint));
+      var inp = el('input');
+      inp.setAttribute('type', 'number');
+      inp.setAttribute('id', id);
+      inp.setAttribute('min', String(lim[0]));
+      inp.setAttribute('max', String(lim[1]));
+      inp.setAttribute('step', '1');
+      inp.setAttribute('inputmode', 'numeric');
+      inp.setAttribute('data-cv2-live-scope', key);
+      inp.value = String(cur[key]);
+      r.appendChild(left);
+      r.appendChild(inp);
+      return r;
+    };
+    var sec = el('div');
+    sec.setAttribute('data-cv2-live-scope-section', '');
+    var title = el('p', 'cust-section-title', 'Live scope legend');
+    title.style.fontSize = '14px';
+    title.style.margin = '16px 0 8px';
+    var intro = el('p', 'cust-hint', 'The SCOPES list on the Live page with \u201cColor by scope\u201d on. ' +
+      'The colours are under Theme \u2192 Live scope colours. These apply to this browser only.');
+    intro.style.fontSize = '12px';
+    intro.style.marginBottom = '8px';
+    sec.appendChild(title);
+    sec.appendChild(intro);
+    var wl = R.LIMITS.windowMinutes, rl = R.LIMITS.legendRows;
+    sec.appendChild(row('windowMinutes', 'Minutes a scope stays listed',
+      'A scope leaves the list, and frees its colour, this long after its last packet (' + wl[0] + '\u2013' + wl[1] + ', default ' + R.DEFAULTS.windowMinutes + ')'));
+    sec.appendChild(row('legendRows', 'Scopes listed at most',
+      'The most recent ones; the rest show as \u201c+N more\u201d (' + rl[0] + '\u2013' + rl[1] + ', default ' + R.DEFAULTS.legendRows + ')'));
+    return sec;
   }
 
   // ── #737 Oblique photo viewer defaults ──
@@ -3669,6 +3872,9 @@
         _renderGeoFilter() +
         _renderExport() +
       '</div>';
+    var lsMount = container.querySelector('[data-cv2-live-scope-mount]');
+    var lsEl = lsMount ? _buildLiveScopeSettings(document) : null;
+    if (lsEl) lsMount.appendChild(lsEl);
     _bindEvents(container);
   }
 
@@ -3954,6 +4160,19 @@
           return;
         }
         setOverride('reach', key, v);
+      });
+    });
+
+    // #882 M2 — Live scope legend window. A value back at its default is a
+    // cleared override; a bad one is put back. The Live page re-reads it on
+    // theme-changed (every pipeline run).
+    container.querySelectorAll('[data-cv2-live-scope]').forEach(function (inp) {
+      var key = inp.dataset.cv2LiveScope;
+      inp.addEventListener('change', function () {
+        var R = _liveScopeRule();
+        if (!R) return;
+        var v = /^[0-9]{1,3}$/.test(inp.value) ? Number(inp.value) : undefined;
+        if (v === undefined || !setLiveScopeSetting(key, v)) inp.value = String(liveScopeSettings(_getEffective())[key]);
       });
     });
 
@@ -4595,6 +4814,12 @@
         });
         for (var ri = 0; ri < 5; ri++) rs.removeProperty('--mc-rt-ramp-' + ri);
         ['new-node', 'back-online', 'record-link', 'busiest'].forEach(function (k) { rs.removeProperty('--mc-moment-' + k); });
+        // #882 M2 — the colourblind preset's scope palette, both modes.
+        ['light', 'dark'].forEach(function (mode) {
+          SCOPE_COLOR_KEYS.forEach(function (k) {
+            rs.removeProperty(THEME_CSS_MAP[k].replace('--scope-', '--mc-scope-' + mode + '-'));
+          });
+        });
         ['light', 'dark'].forEach(function (mode) {
           for (var hn = 1; hn <= 5; hn++) rs.removeProperty('--mc-heat-' + mode + '-' + hn);
         });
@@ -4757,6 +4982,15 @@
     // v0.2.9 review nit (#825 N1) — exposed for tests; see
     // test-issue-734-customizer-overlays.js (Display badge and order).
     renderTabs: _renderTabs,
-    renderDisplay: _renderDisplay
+    renderDisplay: _renderDisplay,
+    // #882 M2 — exposed for tests; see test-882-m2-scope-customizer.js.
+    PRESETS: PRESETS,
+    THEME_COLOR_KEYS: THEME_COLOR_KEYS,
+    SCOPE_COLOR_KEYS: SCOPE_COLOR_KEYS,
+    renderTheme: _renderTheme,
+    isValidLiveScopeSetting: isValidLiveScopeSetting,
+    liveScopeSettings: liveScopeSettings,
+    setLiveScopeSetting: setLiveScopeSetting,
+    buildLiveScopeSettings: _buildLiveScopeSettings
   };
 })();

@@ -230,7 +230,7 @@ test('perf: 30 000 classify+touch calls over 50 names < 50 ms, registry bounded'
   assert.ok(r.size() <= S.CAP);
 });
 
-test('style.css defines all 15 --scope-* variables in light and both dark blocks, dark blocks in sync', () => {
+test('style.css defines all 15 --scope-* variables in light and both dark blocks (behind the colourblind hook of the mode), dark blocks in sync', () => {
   const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
   function block(startRe) {
     const m = startRe.exec(css);
@@ -244,7 +244,13 @@ test('style.css defines all 15 --scope-* variables in light and both dark blocks
     const out = {};
     const re = /(--scope-[a-z0-9]+)\s*:\s*([^;]+);/g;
     let m;
-    while ((m = re.exec(text))) out[m[1]] = m[2].trim();
+    // #882 M2: each value reads a colourblind preset hook first,
+    // var(--mc-scope-<mode>-<n>, #default); the default is what counts here.
+    while ((m = re.exec(text))) {
+      const v = m[2].trim();
+      const hook = /^var\(--mc-scope-(light|dark)-([a-z0-9]+),\s*(#[0-9a-f]{6})\)$/.exec(v);
+      out[m[1]] = hook && '--scope-' + hook[2] === m[1] ? hook[1] + ':' + hook[3] : v;
+    }
     return out;
   }
   // The light block is the :root that holds --trace-ghost-color (no nesting).
@@ -253,8 +259,8 @@ test('style.css defines all 15 --scope-* variables in light and both dark blocks
   const media = vars(block(/@media \(prefers-color-scheme: dark\)\s*\{\s*:root:not\(\[data-theme="light"\]\)/));
   const manual = vars(block(/\n\[data-theme="dark"\]\s*\{\s*\n\s*color-scheme: dark;/));
   for (const v of S.PALETTE_VARS) {
-    assert.ok(/^#[0-9a-f]{6}$/.test(light[v] || ''), 'light ' + v + ' = ' + light[v]);
-    assert.ok(/^#[0-9a-f]{6}$/.test(media[v] || ''), 'media dark ' + v + ' = ' + media[v]);
+    assert.ok(/^light:#[0-9a-f]{6}$/.test(light[v] || ''), 'light ' + v + ' = ' + light[v]);
+    assert.ok(/^dark:#[0-9a-f]{6}$/.test(media[v] || ''), 'media dark ' + v + ' = ' + media[v]);
     assert.strictEqual(manual[v], media[v], 'dark blocks differ on ' + v);
   }
   const distinct = (o) => new Set(S.PALETTE_VARS.map((v) => o[v])).size;
