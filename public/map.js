@@ -41,6 +41,13 @@
   const mapTimers = new Set(); // pending mapTimeout() ids, cleared by destroy()
   let areaNodesHandler = null;   // AreaFilter listeners, removed by destroy()
   let areaOutlineHandler = null;
+  let dagiChangeHandler = null;  // #740 M3b: DagiFilter listener and the
+  let dagiOutline = null;        // selected area's outline, both of this mount
+  // #740 M3b follow-up: one "selected boundary" on the map (plan §4.6): the
+  // Area outline while an Area with an outline is selected (or still loading
+  // it), otherwise the DAGI outline. One checkbox and storage key for both.
+  let areaBoundaryPending = false;
+  const BOUNDARY_KEY = 'meshcore-map-selected-area-outline';
   let mapThemeObs = null;        // theme observer and tile-provider listener
   let tileProviderHandler = null; // of this mount, removed by destroy()
   let creditObs = null;          // #839 credit-height observer, removed by destroy()
@@ -261,6 +268,7 @@
             <label id="mcSelectedAreaLabel" for="mcSelectedArea" style="display:none"><input type="checkbox" id="mcSelectedArea"> Selected area outline</label>
           </fieldset>
           <div id="mapAreaFilter"></div>
+          <div id="mapDagiFilter" class="dagi-filter-container" style="display:none"></div>
           <fieldset class="mc-section">
             <legend class="mc-label">Status</legend>
             <div class="filter-group" id="mcStatusFilter">
@@ -526,16 +534,8 @@
     const toggleBtn = document.getElementById('mapControlsToggle');
     const controlsPanel = document.getElementById('mapControls');
     // Default collapsed on mobile
-    if (window.innerWidth <= 640) {
-      controlsCollapsed = true;
-      controlsPanel.classList.add('collapsed');
-      toggleBtn.setAttribute('aria-expanded', 'false');
-    }
-    toggleBtn.addEventListener('click', () => {
-      controlsCollapsed = !controlsCollapsed;
-      controlsPanel.classList.toggle('collapsed', controlsCollapsed);
-      toggleBtn.setAttribute('aria-expanded', String(!controlsCollapsed));
-    });
+    if (isPhoneControls()) setControlsCollapsed(true);
+    toggleBtn.addEventListener('click', () => setControlsCollapsed(!controlsCollapsed));
 
     // #839: the panel reaches down to the bottom-right map credit, which ran
     // under it. Publish the credit's height as --map-credit-height so the
@@ -700,6 +700,36 @@
     AreaFilter.init(document.getElementById('mapAreaFilter'));
     areaNodesHandler = AreaFilter.onChange(function () { loadNodes(); });
 
+    // #740 M3b: the Danish areas filter and its selected area's outline. A
+    // pick reloads the nodes and fits the map to the area; a cold link (or a
+    // return to the page) draws it where the map already looks, as the link
+    // may carry its own view (#740 owner decision 7).
+    if (window.DagiFilter && window.DagiOutline) {
+      DagiFilter.init(document.getElementById('mapDagiFilter'), { beside: document.getElementById('mapControls') });
+      dagiOutline = DagiOutline.create({
+        L, map,
+        fetchJson: function (q) {
+          return fetch('/api/config/dagi/polygons?' + q)
+            .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); });
+        },
+        decode: DagiFilter.decodeRings,
+        color: boundaryColor,
+        escape: safeEsc,
+      });
+      dagiChangeHandler = DagiFilter.onChange(function () {
+        loadNodes(); refreshBoundary(true);
+        // On a phone the open controls panel covers the whole map, so the
+        // fitted area could not be seen (#740 M3b review F1): a pick (not a
+        // clear) closes the panel, as the picker's sheet already has.
+        if (DagiFilter.polygonQuery() && isPhoneControls()) {
+          const inPanel = document.getElementById('mapControls').contains(document.activeElement);
+          setControlsCollapsed(true);
+          if (inPanel) document.getElementById('mapControlsToggle').focus();
+        }
+      });
+      DagiFilter.ready().then(function () { if (alive()) refreshBoundary(false); });
+    }
+
     // Status filter buttons
     document.querySelectorAll('#mcStatusFilter .btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -774,9 +804,9 @@
     // dropdown (AreaFilter, shared with Nodes/Live/Analytics), not
     // necessarily the homeArea-linked geo_filter. Falls back to a plain
     // box when the area has no polygon. Only one area can be selected at
-    // a time (AreaFilter is single-select), so at most one outline shows.
+    // a time (AreaFilter is single-select); refreshBoundary() then draws
+    // either it or the DAGI outline, never both.
     (function () {
-      var areaColor = getComputedStyle(document.documentElement).getPropertyValue('--geo-filter-color').trim() || '#3b82f6';
       var areaPolygonsCache = null;
       async function fetchAreaPolygons() {
         if (areaPolygonsCache) return areaPolygonsCache;
@@ -803,38 +833,33 @@
       async function refresh() {
         if (!alive() || !map) return;
         var gen = ++refreshGen;
-        var label = document.getElementById('mcSelectedAreaLabel');
-        var checkbox = document.getElementById('mcSelectedArea');
         if (selectedAreaLayer) { map.removeLayer(selectedAreaLayer); selectedAreaLayer = null; }
         var key = AreaFilter.getSelected();
-        if (!key) {
-          if (label) label.style.display = 'none';
-          return;
-        }
+        // While the Area's outline loads, it keeps the layer: no DAGI
+        // outline (or its request) in between.
+        areaBoundaryPending = !!key;
+        refreshBoundary(false);
+        if (!key) return;
         var areas = await fetchAreaPolygons();
         // #123: only the newest refresh of the current mount draws.
         if (!alive() || !map || gen !== refreshGen) return;
+        areaBoundaryPending = false;
         var entry = areas.find(function (a) { return a.key === key; });
         var latlngs = entry && latLngsFor(entry);
-        if (!latlngs) {
-          if (label) label.style.display = 'none';
-          return;
+        if (latlngs) {
+          var areaColor = boundaryColor() || '#3b82f6';
+          selectedAreaLayer = L.polygon(latlngs, {
+            color: areaColor, weight: 2, opacity: 0.8, dashArray: '2 4',
+            fillColor: areaColor, fillOpacity: 0.06, className: 'area-outline'
+          });
         }
-        selectedAreaLayer = L.polygon(latlngs, {
-          color: areaColor, weight: 2, opacity: 0.8, dashArray: '2 4',
-          fillColor: areaColor, fillOpacity: 0.06
-        });
-        if (label) label.style.display = '';
-        var saved = localStorage.getItem('meshcore-map-selected-area-outline') !== 'false';
-        if (checkbox) checkbox.checked = saved;
-        if (saved) selectedAreaLayer.addTo(map);
+        refreshBoundary(false);
       }
       var checkbox = document.getElementById('mcSelectedArea');
       if (checkbox) {
         checkbox.addEventListener('change', function (e) {
-          localStorage.setItem('meshcore-map-selected-area-outline', e.target.checked);
-          if (!selectedAreaLayer) return;
-          if (e.target.checked) { selectedAreaLayer.addTo(map); } else { map.removeLayer(selectedAreaLayer); }
+          localStorage.setItem(BOUNDARY_KEY, e.target.checked);
+          refreshBoundary(false);
         });
       }
       areaOutlineHandler = AreaFilter.onChange(refresh);
@@ -1907,6 +1932,51 @@
     return p;
   }
 
+  // The boundary colour, from the theme ('' leaves Leaflet's default).
+  function boundaryColor() {
+    return getComputedStyle(document.documentElement).getPropertyValue('--geo-filter-color').trim();
+  }
+
+  // On a phone (the width the panel starts collapsed at) the controls panel
+  // covers the map.
+  function isPhoneControls() { return window.innerWidth <= 640; }
+
+  function setControlsCollapsed(v) {
+    const panel = document.getElementById('mapControls');
+    const toggle = document.getElementById('mapControlsToggle');
+    controlsCollapsed = !!v;
+    if (panel) panel.classList.toggle('collapsed', controlsCollapsed);
+    if (toggle) toggle.setAttribute('aria-expanded', String(!controlsCollapsed));
+  }
+
+  // The one selected boundary (#740 plan §4.6): the Area outline if an Area
+  // is set, otherwise the DAGI one (polygonQuery() is '' for none or an
+  // unchecked code), shown or hidden by the one checkbox. fit: only on a
+  // user's DAGI pick, and only when the DAGI outline is the one drawn.
+  function refreshBoundary(fit) {
+    if (!map) return;
+    const dagiQ = dagiOutline && window.DagiFilter ? DagiFilter.polygonQuery() : '';
+    const sel = { area: !!selectedAreaLayer || areaBoundaryPending, dagi: dagiQ };
+    const which = window.DagiOutline ? DagiOutline.chooseBoundary(sel) : (sel.area ? 'area' : 'none');
+    const on = localStorage.getItem(BOUNDARY_KEY) !== 'false';
+    const label = document.getElementById('mcSelectedAreaLabel');
+    const checkbox = document.getElementById('mcSelectedArea');
+    const drawable = which === 'dagi' || (which === 'area' && !!selectedAreaLayer);
+    if (label) label.style.display = drawable ? '' : 'none';
+    if (checkbox) checkbox.checked = on;
+    if (selectedAreaLayer) {
+      if (which === 'area' && on) selectedAreaLayer.addTo(map);
+      else map.removeLayer(selectedAreaLayer);
+    }
+    if (!dagiOutline) return;
+    if (which === 'dagi') {
+      dagiOutline.setVisible(on);
+      dagiOutline.show(dagiQ, { fit: fit });
+    } else {
+      dagiOutline.clear();
+    }
+  }
+
   async function loadNodesRequest(req, alive) {
     const current = () => alive() && req === nodesLoadGeneration && !!map;
     const stale = () => (alive() ? nodesLoadPromise : undefined);
@@ -1919,10 +1989,16 @@
       REGION_NAMES = regions;
 
       const aqs = AreaFilter.areaQueryString();
+      // #740 M3b: a DAGI code is sent only once /api/config/dagi has checked it.
+      if (window.DagiFilter) {
+        await DagiFilter.ready();
+        if (!current()) return stale();
+      }
+      const dqs = window.DagiFilter ? DagiFilter.queryString() : '';
       // Paginate past the server's per-request node cap (listLimits.nodesMax)
       // so actively-relaying repeaters that last advertised hours ago still
       // appear instead of being truncated by the top-N window. See fetchAllNodes.
-      const data = await fetchAllNodes(`&lastHeard=${filters.lastHeard}${aqs}`, { ttl: CLIENT_TTL.nodeList });
+      const data = await fetchAllNodes(`&lastHeard=${filters.lastHeard}${aqs}${dqs}`, { ttl: CLIENT_TTL.nodeList });
       if (!current()) return stale();
 
       // Load observers for jump buttons + map markers
@@ -3704,6 +3780,12 @@
     if (areaNodesHandler) AreaFilter.offChange(areaNodesHandler);
     if (areaOutlineHandler) AreaFilter.offChange(areaOutlineHandler);
     areaNodesHandler = areaOutlineHandler = null;
+    if (dagiChangeHandler) DagiFilter.offChange(dagiChangeHandler);
+    dagiChangeHandler = null;
+    if (window.DagiFilter) DagiFilter.release(document.getElementById('mapDagiFilter'));
+    if (dagiOutline) dagiOutline.clear();
+    dagiOutline = null;
+    areaBoundaryPending = false;
     // #123: one theme observer and tile-provider listener per mount; before
     // this every mount added both for good, and each kept setting URLs on
     // its removed map's tile layer.

@@ -504,10 +504,13 @@
   --scope-unknown: var(--mc-scope-light-unknown, #57534e);
   --scope-other: var(--mc-scope-light-other, #111827);
   /* #880 — Live "Follow a packet". Built on theme tokens, so both dark
-   * blocks follow without their own copies. Customizer mapping: #880 M3. */
+   * blocks follow without their own copies. #880 M3: the customizer's
+   * Theme tab sets any of them (light and dark); a colourblind preset sets
+   * the relay / observer pair (--mc-follow-*, cb-presets.js followAccents),
+   * since yellow next to green is the pair a red-green deficiency loses. */
   --follow-ring: var(--accent);
-  --follow-relay: var(--status-yellow);
-  --follow-observer: var(--status-green);
+  --follow-relay: var(--mc-follow-relay, var(--status-yellow));
+  --follow-observer: var(--mc-follow-observer, var(--status-green));
   --follow-flag: var(--warning);
 
   /* #620: minimum viewport margin of the region/area dropdown menus. Read by
@@ -4319,6 +4322,128 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   width: 14px; height: 14px; margin: 0; flex-shrink: 0;
 }
 .region-dropdown-item:hover { background: var(--row-hover, #f5f5f5); }
+
+/* ─── #740 M3a — Danish areas (DAGI) filter (public/dagi-filter.js) ───
+   A popover under its trigger on desktop; at 600 px and below the same
+   panel is a bottom sheet over a dimmed page (the JS does not branch on
+   width, apart from not placing the sheet as a popover). Colours are the
+   existing tokens only. Every element that sets `display` gets a [hidden]
+   rule, since the class would otherwise beat the attribute. */
+.dagi-filter-container { margin: 0; padding: 0; display: inline-flex; align-items: center; }
+.dagi-filter-wrap { position: relative; display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+.dagi-trigger { gap: 0; min-width: 0; max-width: min(340px, calc(100vw - 2 * var(--region-menu-gutter) - 56px)); }
+.dagi-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dagi-trigger-caret { flex-shrink: 0; white-space: pre; }
+.dagi-filter-wrap.dagi-active .dagi-trigger { border-color: var(--accent-strong); }
+.dagi-clear {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 34px; height: 34px; box-sizing: border-box; padding: 0; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--input-bg); color: var(--text-muted);
+  font-size: 13px; font-family: var(--font); cursor: pointer;
+}
+.dagi-clear:hover { border-color: var(--accent); color: var(--text); }
+.dagi-clear:focus-visible, .dagi-close:focus-visible, .dagi-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dagi-clear[hidden] { display: none; }
+.dagi-backdrop, .dagi-backdrop[hidden] { display: none; }
+.dagi-panel {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: var(--z-dropdown);
+  width: min(360px, calc(100vw - 2 * var(--region-menu-gutter))); max-height: min(70vh, 480px);
+  display: flex; flex-direction: column; box-sizing: border-box;
+  background: var(--card-bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 16px var(--shadow); font-family: var(--font);
+}
+.dagi-panel[hidden] { display: none; }
+/* #740 M3b: opened beside a scrolling panel (the Map's controls), which would
+   clip it; dagi-filter.js sets left and top. */
+.dagi-panel.dagi-panel-beside { position: fixed; }
+/* In the Map's narrow controls panel the trigger shrinks (its label ends in
+   an ellipsis), so the clear button stays inside the panel. */
+.map-controls .dagi-filter-container { display: flex; margin-bottom: 10px; }
+/* On Packets the picker sits in the filter bar, whose inputs are 120 px
+   (100% when expanded on a phone); the search box keeps the panel's width. */
+.filter-bar .dagi-panel input.dagi-search { width: auto; }
+.dagi-panel:focus { outline: none; }
+.dagi-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 6px 2px 12px; }
+.dagi-title { font-size: 13px; font-weight: 600; }
+.dagi-close {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 32px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); font-size: 14px; cursor: pointer;
+}
+.dagi-close:hover { background: var(--row-hover); color: var(--text); }
+.dagi-search {
+  margin: 4px 10px 8px; padding: 7px 10px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--input-bg); color: var(--text); font-family: var(--font); font-size: 13px;
+}
+.dagi-search:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.dagi-tabs { display: flex; gap: 4px; padding: 0 10px 8px; }
+.dagi-tabs[hidden] { display: none; }
+.dagi-tab {
+  flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  padding: 5px 6px; border: 1px solid var(--border); border-radius: 14px; background: transparent;
+  color: var(--text-muted); font-family: var(--font); font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap;
+}
+.dagi-tab:hover { border-color: var(--accent); color: var(--text); }
+.dagi-tab-count { font-variant-numeric: tabular-nums; font-size: 11px; }
+/* The --accent-strong / --text-on-accent pair, as .region-pill-active (#1668). */
+.dagi-tab.dagi-tab-active { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--text-on-accent); }
+.dagi-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--border); padding: 4px 0; }
+.dagi-section[hidden], .dagi-section-head[hidden], .dagi-subhead[hidden], .dagi-more[hidden], .dagi-empty[hidden] { display: none; }
+.dagi-section-head {
+  padding: 8px 12px 2px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted);
+}
+.dagi-subhead { padding: 8px 12px 2px; font-size: 11px; font-weight: 600; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.dagi-option {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px; width: 100%; box-sizing: border-box;
+  padding: 6px 12px; border: 0; background: transparent; color: var(--text); text-align: left;
+  font-family: var(--font); font-size: 13px; cursor: pointer;
+}
+.dagi-option[hidden] { display: none; }
+.dagi-option:hover { background: var(--row-hover); }
+.dagi-option:focus-visible { background: var(--row-hover); outline: 2px solid var(--accent); outline-offset: -2px; }
+.dagi-option[aria-selected="true"] { background: var(--selected-bg); font-weight: 600; }
+.dagi-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dagi-option[aria-selected="true"] .dagi-option-label::after { content: " \2713"; }
+.dagi-option-meta { flex-shrink: 0; font-size: 11px; font-weight: 400; color: var(--text-muted); }
+.dagi-option-meta[hidden] { display: none; }
+.dagi-more, .dagi-empty { padding: 6px 12px; font-size: 12px; font-style: italic; color: var(--text-muted); }
+.dagi-credit { padding: 6px 12px 8px; border-top: 1px solid var(--border); font-size: 11px; line-height: 1.4; color: var(--text-muted); }
+.dagi-credit-link { color: var(--link-color); }
+.dagi-notice { margin: 0; padding: 4px 16px; font-size: 12px; color: var(--text-muted); }
+.dagi-notice[hidden] { display: none; }
+@media (max-width: 600px) {
+  .dagi-backdrop:not([hidden]) {
+    display: block; position: fixed; inset: 0; z-index: var(--z-modal-backdrop); background: var(--shadow);
+  }
+  .dagi-panel {
+    position: fixed; top: auto; left: 0; right: 0; bottom: 0; z-index: var(--z-modal);
+    width: auto; max-height: 85vh; border-radius: 12px 12px 0 0; border-bottom: 0;
+    /* iOS Safari's vh is the large viewport, under the browser bar. */
+    max-height: 85dvh;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .dagi-head { min-height: 44px; }
+  .dagi-title { font-size: 15px; }
+  .dagi-close { min-width: 44px; min-height: 44px; font-size: 16px; }
+  /* 16 px: iOS zooms the page into a smaller field. */
+  .dagi-search { min-height: 44px; font-size: 16px; }
+  .dagi-tab { min-height: 44px; font-size: 13px; }
+  .dagi-option { align-items: center; min-height: 44px; font-size: 15px; }
+  .dagi-option-meta { font-size: 12px; }
+  .dagi-credit { font-size: 12px; }
+  .dagi-notice { padding: 4px 10px; }
+  /* #740 M3b: the Map's controls panel (z-index 1000) and the map area
+     (z-index 0) are stacking contexts, so a sheet opened from the panel
+     would stay under the bottom nav and the map's own controls. */
+  #map-wrap:has(.map-controls .dagi-open),
+  .map-controls:has(.dagi-open) { z-index: var(--z-modal); }
+  /* The Packets dropdown row gained the DAGI control: it wraps instead of
+     pushing Types and Channels off the screen. */
+  .filter-bar .filter-group.filter-group-dropdowns { flex-wrap: wrap; }
+}
+@media (pointer: coarse) {
+  /* As .region-dropdown-trigger beside it: the 48 px house minimum (#630). */
+  .dagi-clear { width: 48px; height: 48px; }
+}
 
 /* Generic multi-select dropdown (Observer, Type filters) */
 .multi-select-wrap { position: relative; display: inline-flex; align-items: center; }

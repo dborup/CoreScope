@@ -2,7 +2,7 @@
  * and the administrator's queue (Tools → Antenna Height Claims).
  *
  * Server contract (cmd/server/antenna_claims.go, #789 M2a and M3):
- *   GET  /api/antenna-claims/config                → {enabled, detailsEnabled, pollInitialMs, pollBackoff,
+ *   GET  /api/antenna-claims/config                → {enabled, detailsEnabled, autoApproveDetails, pollInitialMs, pollBackoff,
  *        pollMaxMs, pollMaxAttempts, adminDefaultFilter}   (antennaClaims.* in config.json)
  *   GET  /api/nodes/{pubkey}/antenna               → {antennaM, antennaSource, assumed, estimatePending}
  *   GET  /api/nodes/{pubkey}/station (#898)        → {details: {antennaType, gainDbi, power,
@@ -13,7 +13,7 @@
  *        → 202 {requestId, code, expiresAt, nameBudgetBytes, suggestedName}
  *          403 closed · 404 hidden/unknown/no position · 429/503 Retry-After
  *   GET  /api/antenna-claims/requests/{id}         → {status, expiresAt, error}
- *   GET  /api/admin/antenna-claims[?status=]       → {claims, enabled, autoApprove}  (X-API-Key)
+ *   GET  /api/admin/antenna-claims[?status=]       → {claims, enabled, autoApprove, autoApproveDetails}  (X-API-Key)
  *        each claim: heightOp/detailsOp (set|clear, absent when not carried),
  *        details, heightInForce/detailsInForce, contactAdmin (proven/approved only)
  *   POST /api/admin/antenna-claims/{id}/approve|reject|revoke → 202 {requestId}

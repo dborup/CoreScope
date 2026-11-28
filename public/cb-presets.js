@@ -21,6 +21,7 @@
   var STORAGE_KEY = 'meshcore-cb-preset';
   var DATA_ATTR   = 'data-cb-preset';
   var MOMENT_KINDS = ['newNode', 'backOnline', 'recordLink', 'busiest'];
+  var FOLLOW_KINDS = ['relay', 'observer'];
   // newNode -> --mc-moment-new-node
   // #882 M2 — Live scope colours: --mc-scope-{light|dark}-{1..12|none|unknown|other}.
   var SCOPE_SUFFIXES = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', 'none', 'unknown', 'other'];
@@ -59,6 +60,9 @@
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
       momentAccents: { newNode: '#009E73', backOnline: '#2E86C1', recordLink: '#B8578A', busiest: '#D55E00' },
+      // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
+      // on the light and the dark card (test-880-m3-follow-customizer.js).
+      followAccents: { relay: '#D55E00', observer: '#2E86C1' },
       // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
       // one list per base-map mode: the stylesheet palette (Okabe-Ito based), so this preset changes nothing.
       // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
@@ -97,6 +101,9 @@
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
       momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' },
+      // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
+      // on the light and the dark card (test-880-m3-follow-customizer.js).
+      followAccents: { relay: '#FE6100', observer: '#648FFF' },
       // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
       // one list per base-map mode: blue / orange / purple / amber axes, lightness-separated (red-green safe).
       // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
@@ -133,6 +140,9 @@
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
       momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' },
+      // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
+      // on the light and the dark card (test-880-m3-follow-customizer.js).
+      followAccents: { relay: '#FE6100', observer: '#648FFF' },
       // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
       // one list per base-map mode: the deut palette: the same blue / orange / purple / amber axes.
       // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
@@ -177,6 +187,9 @@
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
       momentAccents: { newNode: '#2A8F4C', backOnline: '#C04F7F', recordLink: '#B45AA6', busiest: '#CC6677' },
+      // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
+      // on the light and the dark card (test-880-m3-follow-customizer.js).
+      followAccents: { relay: '#CC6677', observer: '#2A8F4C' },
       // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
       // one list per base-map mode: Tol muted extended: rose / green / wine / teal (blue-yellow safe).
       // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
@@ -234,6 +247,9 @@
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
       momentAccents: { newNode: '#777777', backOnline: '#858585', recordLink: '#6f6f6f', busiest: '#8f8f8f' },
+      // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
+      // on the light and the dark card (test-880-m3-follow-customizer.js).
+      followAccents: { relay: '#8f8f8f', observer: '#6f6f6f' },
       // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
       // one list per base-map mode: a luminance ramp, darkest first on light tiles, lightest first on dark.
       // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
@@ -350,6 +366,13 @@
         if (ma[k]) style.setProperty(_momentVar(k), ma[k]);
         else style.removeProperty(_momentVar(k));
       });
+      // #880 M3 — Live "Follow a packet" relay and observer dots; style.css
+      // reads them through --follow-* so a customizer colour still wins.
+      var fa = p.followAccents || {};
+      FOLLOW_KINDS.forEach(function (k) {
+        if (fa[k]) style.setProperty('--mc-follow-' + k, fa[k]);
+        else style.removeProperty('--mc-follow-' + k);
+      });
       // #882 M2 — Live scope colours per mode; style.css reads them through
       // --scope-* so a customizer colour still wins.
       var sp = p.scopePalette;
@@ -410,6 +433,7 @@
         for (var hj = 1; hj <= 5; hj++) style.removeProperty('--mc-heat-' + mode + '-' + hj);
       });
       MOMENT_KINDS.forEach(function (k) { style.removeProperty(_momentVar(k)); });
+      FOLLOW_KINDS.forEach(function (k) { style.removeProperty('--mc-follow-' + k); });
       ['light', 'dark'].forEach(function (mode) {
         SCOPE_SUFFIXES.forEach(function (sx) { style.removeProperty('--mc-scope-' + mode + '-' + sx); });
       });

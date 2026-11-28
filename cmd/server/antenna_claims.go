@@ -72,10 +72,14 @@ type AntennaClaimRequest struct {
 // AntennaClaimConfigResponse is GET /api/antenna-claims/config: whether
 // owners can claim a height right now (the submit route's own gate), whether
 // they can set station details (#898), and the operator's settings for the
-// owner page and the admin queue (#789 M3).
+// owner page and the admin queue (#789 M3). AutoApproveDetails is whether
+// the ingestor approves a proven, unflagged claim that sets station details
+// without an administrator (#1007): antennaClaims.autoApproveDetails with
+// detailsEnabled.
 type AntennaClaimConfigResponse struct {
-	Enabled        bool `json:"enabled"`
-	DetailsEnabled bool `json:"detailsEnabled"`
+	Enabled            bool `json:"enabled"`
+	DetailsEnabled     bool `json:"detailsEnabled"`
+	AutoApproveDetails bool `json:"autoApproveDetails"`
 	antennaclaim.ClientSettings
 }
 
@@ -163,10 +167,13 @@ type AdminAntennaClaim struct {
 }
 
 // AdminAntennaClaimListResponse is GET /api/admin/antenna-claims.
+// AutoApprove is antennaClaims.autoApproveProven (claims without station
+// details), AutoApproveDetails the #1007 switch for claims with them.
 type AdminAntennaClaimListResponse struct {
-	Claims      []AdminAntennaClaim `json:"claims"`
-	Enabled     bool                `json:"enabled"`
-	AutoApprove bool                `json:"autoApprove"`
+	Claims             []AdminAntennaClaim `json:"claims"`
+	Enabled            bool                `json:"enabled"`
+	AutoApprove        bool                `json:"autoApprove"`
+	AutoApproveDetails bool                `json:"autoApproveDetails"`
 }
 
 // ownerHeight is one approved height and where it was proven.
@@ -186,6 +193,7 @@ type antennaClaimService struct {
 	enabled        bool
 	detailsEnabled bool
 	autoApprove    bool
+	autoDetails    bool // the ingestor's #1007 policy, reported only
 	limits         antennaclaim.Limits
 	client         antennaclaim.ClientSettings
 	queue          *channelregistry.Queue // nil without a database path
@@ -251,6 +259,7 @@ func newAntennaClaimService(cfg *Config, db *sql.DB, queueDir string) *antennaCl
 		limits:      cc.Limits(),
 		client:      cc.Client(),
 		autoApprove: cc.AutoApprove(),
+		autoDetails: cc.AutoApproveDetailsOn(),
 		db:          db,
 		now:         time.Now,
 	}
@@ -408,7 +417,7 @@ func (s *Server) attachOwnerHeights(ctx context.Context, ends *[2]terrainEnd) {
 func (s *Server) handleAntennaClaimConfig(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	c := s.antennaClaims()
-	writeJSON(w, AntennaClaimConfigResponse{Enabled: c.enabled, DetailsEnabled: c.detailsEnabled, ClientSettings: c.client})
+	writeJSON(w, AntennaClaimConfigResponse{Enabled: c.enabled, DetailsEnabled: c.detailsEnabled, AutoApproveDetails: c.autoDetails, ClientSettings: c.client})
 }
 
 // GET /api/nodes/{pubkey}/station (#898): the node's approved station
@@ -749,7 +758,7 @@ func (s *Server) handleAdminAntennaClaims(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "status must be one of "+strings.Join(antennaclaim.Statuses, ", "))
 		return
 	}
-	resp := AdminAntennaClaimListResponse{Claims: []AdminAntennaClaim{}, Enabled: c.enabled, AutoApprove: c.autoApprove}
+	resp := AdminAntennaClaimListResponse{Claims: []AdminAntennaClaim{}, Enabled: c.enabled, AutoApprove: c.autoApprove, AutoApproveDetails: c.autoDetails}
 	if c.db != nil {
 		q, args := adminClaimSelect, []interface{}{}
 		if status != "" {
