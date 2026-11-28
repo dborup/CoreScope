@@ -83,14 +83,17 @@ func matchesOrigin(foreign bool, origin string) bool {
 // cap within the requested window (observed on this deployment's 30d
 // window), the affected counts become a floor rather than an exact
 // total; NewNodesCapped/ChangesCapped flag that case so the frontend can
-// render e.g. "500+" instead of a falsely-precise number. The capped
-// check always runs against the unfiltered fetch, since it's asking
-// "did the SQL LIMIT cut off rows we didn't see" -- a question that
-// doesn't depend on the origin filter applied afterward.
+// render e.g. "500+" instead of a falsely-precise number. The new-nodes
+// capped check runs against what SQL returned (fetchNewNodes' scanned
+// count and oldest scanned first_seen), before identity filtering and the
+// origin filter, since it's asking "did the SQL LIMIT cut off rows we
+// didn't see" -- hidden rows dropped from the list don't change that
+// (#1009). ChangesCapped is still based on computeNodeChanges' filtered
+// list.
 func (s *Server) computeNetworkDigest(since time.Time, origin string) (*NetworkDigest, error) {
 	digest := &NetworkDigest{Since: since.UTC().Format(time.RFC3339)}
 
-	newNodes, err := s.computeNewNodes(newNodesSQLFetchCap)
+	newNodes, scanned, oldestScanned, err := s.fetchNewNodes(newNodesSQLFetchCap)
 	if err != nil {
 		return nil, err
 	}
@@ -120,9 +123,8 @@ func (s *Server) computeNetworkDigest(since time.Time, origin string) (*NetworkD
 			}
 		}
 	}
-	if len(newNodes) == newNodesSQLFetchCap {
-		oldest := newNodes[len(newNodes)-1]
-		if t, perr := time.Parse(time.RFC3339, oldest.FirstSeen); perr == nil && !t.Before(since) {
+	if scanned == newNodesSQLFetchCap {
+		if t, perr := time.Parse(time.RFC3339, oldestScanned); perr == nil && !t.Before(since) {
 			digest.NewNodesCapped = true
 		}
 	}
