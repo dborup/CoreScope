@@ -777,6 +777,10 @@
       clearTimeout(timer);
       timer = setTimeout(place, 100);
     });
+    // #740 M3b follow-up: a `beside` popover is fixed, so it follows its
+    // trigger when the panel it sits beside scrolls (scroll events come at
+    // most once a frame; place() reads three boxes).
+    if (ui.beside) listen(ui.beside, 'scroll', place);
     _ui.offs.push(function () { clearTimeout(timer); });
     // No autofocus in the search box on a touch screen: the keyboard would
     // cover the sheet. The dialog takes focus instead.

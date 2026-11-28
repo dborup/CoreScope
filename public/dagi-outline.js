@@ -21,6 +21,12 @@
  *   clear()             removes the outline; an answer still in flight is
  *                       dropped.
  *   query()             the area drawn or loading, '' for none.
+ *   setVisible(v)       the Map's "Selected area outline" checkbox: a hidden
+ *                       outline is still loaded and fitted, but off the map.
+ *
+ * chooseBoundary({ area, dagi }) — the Map draws one selected boundary at a
+ * time (#740 plan §4.6): 'area' when an Area with an outline is selected
+ * (area: true), otherwise 'dagi' when DAGI has a polygon query, else 'none'.
  *
  * One request per area: decoded areas are kept (at most CACHE_MAX), and
  * nothing is fetched on a pan or a zoom.
@@ -34,6 +40,7 @@
     var layer = null;
     var current = '';
     var generation = 0;
+    var visible = true;
 
     function load(query) {
       if (cache.has(query)) return Promise.resolve(cache.get(query));
@@ -56,7 +63,15 @@
       var c = opts.color();
       if (c) { style.color = c; style.fillColor = c; }
       if (area.credit) style.attribution = opts.escape(area.credit);
-      layer = L.polygon(area.rings, style).addTo(map);
+      layer = L.polygon(area.rings, style);
+      if (visible) layer.addTo(map);
+    }
+
+    function setVisible(v) {
+      visible = !!v;
+      if (!layer) return;
+      if (visible && !map.hasLayer(layer)) layer.addTo(map);
+      else if (!visible && map.hasLayer(layer)) map.removeLayer(layer);
     }
 
     function show(query, o) {
@@ -90,10 +105,17 @@
     return {
       show: show,
       clear: clear,
+      setVisible: setVisible,
       query: function () { return current; },
       cacheSize: function () { return cache.size; },
     };
   }
 
-  window.DagiOutline = { create: create };
+  function chooseBoundary(sel) {
+    if (sel && sel.area) return 'area';
+    if (sel && sel.dagi) return 'dagi';
+    return 'none';
+  }
+
+  window.DagiOutline = { create: create, chooseBoundary: chooseBoundary };
 })();

@@ -64,7 +64,7 @@ async function main() {
     page.setDefaultTimeout(10000);
     const errors = [], packetRequests = [], memberRequests = [], allDagi = [];
     page.on('pageerror', error => errors.push(error.message));
-    let socket, configHold = null, configStatus = 200;
+    let socket, configHold = null, configStatus = 200, nodesHold = null;
     await page.routeWebSocket('**', ws => { socket = ws; });
     await page.route('**/*', async route => {
       const url = new URL(route.request().url());
@@ -92,6 +92,15 @@ async function main() {
         if (!list.length) return route.fulfill({ json: { nodes: null, total: 0, dagi: { unpositionedHidden: 4 } } });
         const nodes = offset ? [] : list.map(pk => ({ public_key: pk, name: 'Node ' + pk.slice(0, 4), role: 'repeater' }));
         return route.fulfill({ json: { nodes, total: nodes.length, dagi: { unpositionedHidden: 4 } } });
+      }
+      // The hop resolver's bulk node catalogue (no DAGI param): held when a
+      // step needs a packet's hop resolution in flight.
+      if (url.pathname === '/api/nodes' && nodesHold) {
+        const hold = nodesHold;
+        nodesHold = null;
+        hold.held();
+        await hold.release;
+        return route.fulfill({ json: { nodes: [], total: 0 } });
       }
       if (url.pathname.startsWith('/api/')) return route.fulfill({ json: {} });
       if (url.pathname === '/icons/phosphor-sprite.svg') return route.fulfill({
@@ -250,6 +259,51 @@ async function main() {
     assert.equal(await page.locator('.dagi-filter-wrap').count(), 1, 'a DAGI control leaked across visits'); checks++;
     assert.equal(await page.locator('.dagi-panel').count(), 0, 'a picker panel leaked across visits'); checks++;
     console.log('PASS: a new visit loads the saved selection\'s member set once');
+
+    // --- #740 M3b follow-up (review F4): the selection changes while a live
+    // packet's hops resolve. The packet passed the old selection's check;
+    // the re-check after the hops must use the new DAGI set, so it never
+    // enters the list (not merely hidden at rendering).
+    let releaseNodes, nodesHeld;
+    const heldNodes = new Promise(r => { nodesHeld = r; });
+    nodesHold = { held: nodesHeld, release: new Promise(r => { releaseNodes = r; }) };
+    const delayed = advert(65, A);           // a member of Aarhus, not of Hjørring
+    delayed.path_json = '["AA"]';            // a hop to resolve: the bulk catalogue is asked for
+    send(delayed);
+    let heldTimer;
+    try {
+      await Promise.race([heldNodes, new Promise((_, reject) => {
+        heldTimer = setTimeout(() => reject(new Error('the hop catalogue request was not held')), 10000);
+      })]);
+    } finally { clearTimeout(heldTimer); }
+    await pick('Hjørring', '0860');
+    releaseNodes();
+    await page.waitForTimeout(300);
+    await flush(advert(66, C));
+    assert(!(await page.evaluate(() => window._packetsTestAPI._packetHashes())).includes(hash(65)),
+      'a packet of the old DAGI selection entered the list after its hops resolved'); checks++;
+    assert((await shown()).includes(hash(66))); checks++;
+    console.log('PASS: a DAGI change while hops resolve drops the old selection\'s packet before it is cached');
+
+    // --- Perf (#740 M3b plan, review F7): the live member-set check for
+    // 1,000 frames with a DAGI set, every frame decoded fresh.
+    const perf = await page.evaluate(() => {
+      const api = window._packetsTestAPI;
+      const mk = (i) => ({ id: 100000 + i, hash: 'p' + i, payload_type: 4,
+        decoded_json: JSON.stringify({ type: 'ADVERT', public_key: (i % 2 ? 'c3' : 'd4').repeat(32), name: 'n' + i }) });
+      const runs = [];
+      for (let r = 0; r < 7; r++) {
+        const frames = Array.from({ length: 1000 }, (_, i) => mk(i));
+        const t0 = performance.now();
+        const kept = frames.filter(api._passesMemberFilters).length;
+        runs.push({ ms: performance.now() - t0, kept });
+      }
+      const ms = runs.map(x => x.ms).sort((a, b) => a - b);
+      return { median: ms[3], max: ms[6], kept: runs[0].kept };
+    });
+    assert.equal(perf.kept, 500, 'the filter kept ' + perf.kept + ' of 1,000 (Hjørring: every other sender)'); checks++;
+    assert(perf.median < 50, 'the member check costs ' + perf.median.toFixed(2) + ' ms per 1,000 frames'); checks++;
+    console.log('PERF: member-set check, 1,000 frames: median ' + perf.median.toFixed(2) + ' ms, max ' + perf.max.toFixed(2) + ' ms (7 runs)');
 
     // --- An unknown code from a link is never sent, and filters nothing.
     await page.evaluate(() => window.fixturePages.packets.destroy());
