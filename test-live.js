@@ -161,6 +161,7 @@ function makeLiveSandbox({ withAppJs = false, withHopFilter = false } = {}) {
   if (withHopFilter) loadInCtx(ctx, 'public/hop-filter.js');
   loadInCtx(ctx, 'public/payload-labels.js');
   loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/my-nodes.js'); // #1018: index.html loads it right after roles.js
   loadInCtx(ctx, 'public/live-heard-filter.js');
   loadInCtx(ctx, 'public/packet-helpers.js');
   if (withAppJs) loadInCtx(ctx, 'public/app.js');
@@ -306,6 +307,7 @@ console.log('\n=== live.js: expandToBufferEntriesAsync ===');
   addLiveGlobals(ctx);
   loadInCtx(ctx, 'public/payload-labels.js');
   loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/my-nodes.js'); // #1018: index.html loads it right after roles.js
   loadInCtx(ctx, 'public/live-heard-filter.js');
   loadInCtx(ctx, 'public/packet-helpers.js');
   try { loadInCtx(ctx, 'public/live.js'); } catch (e) {

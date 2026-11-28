@@ -52,7 +52,7 @@ async function render(page, responses, width, height) {
   await page.goto(ORIGIN + '/');
   await page.addStyleTag({ path: path.join(ROOT, 'style.css') });
   await page.addStyleTag({ path: path.join(ROOT, 'home.css') });
-  for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js', 'my-mesh-activity.js']) await page.addScriptTag({ path: path.join(ROOT, file) });
+  for (const file of ['app.js', 'roles.js', 'my-nodes.js', 'heard-by.js', 'my-mesh-observers.js', 'my-mesh-activity.js']) await page.addScriptTag({ path: path.join(ROOT, file) });
   await page.evaluate((data) => {
     window.removeEventListener('hashchange', navigate);
     window.fixturePages = {};

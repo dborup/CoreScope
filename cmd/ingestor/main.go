@@ -162,6 +162,21 @@ func main() {
 	stopAntennaClaims := antennaClaims.Start(2*time.Second, time.Hour)
 	defer stopAntennaClaims()
 
+	// Owner accounts (#1018 M1): the server queues sign-ins and account
+	// writes; this process stores them, proves sign-ins at advert ingest
+	// and owns the session key file. Runs whether or not sign-in is
+	// enabled, so a delete or sign-out-everywhere still applies.
+	if cfg.Accounts.Requested() {
+		if err := accountLoadOrCreateKey(store.path); err != nil {
+			log.Printf("[accounts] the session key file could not be created: %v", err)
+		}
+	}
+	accounts := newAccountRunner(store, cfg.Accounts)
+	accounts.RunOnce(context.Background())
+	store.accounts = accounts
+	stopAccounts := accounts.Start(2*time.Second, time.Hour)
+	defer stopAccounts()
+
 	// Admin-approved region scopes are a persistent overlay on the inline and
 	// external hashRegions lists. The server only queues decisions; this
 	// process remains the sole database writer.
@@ -1118,6 +1133,9 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 			// #789 M2a: a new advert with a verified signature may prove
 			// an owner antenna-height claim.
 			store.antennaClaims.observeAdvert(&decoded.Payload, pktData.Hash, isNew && err == nil)
+			// #1018 M1: a new, verified companion advert may prove a
+			// sign-in.
+			store.accounts.observeAdvert(&decoded.Payload, pktData.Hash, isNew && err == nil)
 			if isNew {
 				if err := store.IncrementAdvertCount(decoded.Payload.PubKey); err != nil {
 					log.Printf("MQTT [%s] advert count error: %v", tag, err)

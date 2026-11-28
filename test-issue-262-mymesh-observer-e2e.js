@@ -79,7 +79,7 @@ async function render(page, { observersFail = false, holdObservers = false } = {
   // observers.js is loaded for real so the card's status uses the observers
   // page's own classifier (window.observerHealthStatus, #1552/#1563) rather
   // than a threshold invented for the home page.
-  for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js', 'my-mesh-activity.js', 'observers.js']) {
+  for (const file of ['app.js', 'roles.js', 'my-nodes.js', 'heard-by.js', 'my-mesh-observers.js', 'my-mesh-activity.js', 'observers.js']) {
     await page.addScriptTag({ path: path.join(ROOT, file) });
   }
   await page.evaluate((data) => {

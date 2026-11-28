@@ -72,6 +72,10 @@ type Server struct {
 	claims     *antennaClaimService
 	claimsOnce sync.Once
 
+	// Owner accounts (#1018 M1); built lazily (tests may preset).
+	accounts     *accountService
+	accountsOnce sync.Once
+
 	// Guards s.cfg.GeoFilter — read by ingest/handler goroutines, written by PUT handler
 	cfgMu sync.RWMutex
 
@@ -512,6 +516,18 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/nodes/{pubkey}/antenna", s.handleNodeAntenna).Methods("GET")
 	r.HandleFunc("/api/nodes/{pubkey}/station", s.handleNodeStation).Methods("GET")
 	r.HandleFunc("/api/antenna-claims/requests/{requestId}", s.handleAntennaClaimRequest).Methods("GET")
+	// Owner accounts (#1018 M1).
+	r.HandleFunc("/api/account/config", s.handleAccountConfig).Methods("GET")
+	r.HandleFunc("/api/account/login", s.handleAccountLogin).Methods("POST")
+	r.HandleFunc("/api/account/login/{requestId}", s.handleAccountLoginStatus).Methods("GET")
+	r.HandleFunc("/api/account/session", s.handleAccountSession).Methods("POST")
+	r.HandleFunc("/api/account/session", s.handleAccountSignOut).Methods("DELETE")
+	r.HandleFunc("/api/account/requests/{requestId}", s.handleAccountRequestStatus).Methods("GET")
+	r.HandleFunc("/api/account/my-nodes", s.handleAccountMyNodes).Methods("POST")
+	r.HandleFunc("/api/account/profile", s.handleAccountProfile).Methods("POST")
+	r.HandleFunc("/api/account/sign-out-all", s.handleAccountSignOutAll).Methods("POST")
+	r.HandleFunc("/api/account", s.handleAccount).Methods("GET")
+	r.HandleFunc("/api/account", s.handleAccountDelete).Methods("DELETE")
 	r.HandleFunc("/api/known-channels", s.handleKnownChannels).Methods("GET")
 	r.HandleFunc("/api/observers/metrics/summary", s.handleMetricsSummary).Methods("GET")
 	r.HandleFunc("/api/observers/{id}/metrics", s.handleObserverMetrics).Methods("GET")

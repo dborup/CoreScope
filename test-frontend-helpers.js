@@ -4569,6 +4569,7 @@ function makeNodesSandbox(opts) {
   opts = opts || {};
   const ctx = makeSandbox();
   loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/my-nodes.js'); // #1018: index.html loads it right after roles.js
   loadInCtx(ctx, 'public/app.js');
   ctx.registerPage = () => {};
   ctx.RegionFilter = { init: () => {}, onChange: () => () => {}, getRegionParam: () => '', offChange: () => {} };

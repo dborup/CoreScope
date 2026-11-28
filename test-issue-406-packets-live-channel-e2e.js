@@ -69,7 +69,7 @@ async function main() {
     });
     await page.goto(ORIGIN + '/#/packets?channel=%23one');
     await page.addStyleTag({ path: path.join(PUB, 'style.css') });
-    for (const file of ['payload-labels.js', 'roles.js', 'app.js', 'packet-helpers.js', 'hop-resolver.js', 'hop-display.js']) {
+    for (const file of ['payload-labels.js', 'roles.js', 'my-nodes.js', 'app.js', 'packet-helpers.js', 'hop-resolver.js', 'hop-display.js']) {
       await page.addScriptTag({ path: path.join(PUB, file) });
     }
     await page.evaluate(() => {

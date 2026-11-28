@@ -147,6 +147,9 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureAntennaClaimParts(rw, logf); err != nil {
 		return fmt.Errorf("ensure node_antenna_claims parts: %w", err)
 	}
+	if err := EnsureAccounts(rw); err != nil {
+		return fmt.Errorf("ensure accounts: %w", err)
+	}
 	if err := ensureTransmissionsRouteMaskColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure transmissions.route_mask: %w", err)
 	}
@@ -1461,6 +1464,62 @@ func EnsureNodeAntennaClaims(rw *sql.DB) error {
 		return err
 	}
 	return ensureAntennaClaimParts(rw, func(string, ...interface{}) {})
+}
+
+// AccountTables are the owner-account tables (#1018 M1), in creation order.
+// The ingestor is their only writer; the server reads them and treats a
+// missing table as "accounts unavailable". identity_pubkey (the companion)
+// is never served publicly. No IP address or user agent is stored.
+var AccountTables = []string{"accounts", "account_proofs", "account_my_nodes"}
+
+// accountDDL creates the account tables. account_proofs holds one row per
+// sign-in code (kind 'login'; M2 adds 'link'); account_my_nodes is the
+// synced watch list, which proves nothing, as My Mesh never did.
+var accountDDL = []string{
+	`CREATE TABLE IF NOT EXISTS accounts (
+		account_id TEXT PRIMARY KEY CHECK(length(account_id) = 32),
+		identity_pubkey TEXT NOT NULL UNIQUE CHECK(length(identity_pubkey) = 64),
+		display_name TEXT NULL CHECK(display_name IS NULL OR length(display_name) BETWEEN 1 AND 32),
+		session_gen INTEGER NOT NULL DEFAULT 1 CHECK(session_gen >= 1),
+		created_at INTEGER NOT NULL,
+		last_login_at INTEGER NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_accounts_last_login ON accounts(last_login_at)`,
+	`CREATE TABLE IF NOT EXISTS account_proofs (
+		request_id TEXT PRIMARY KEY,
+		kind TEXT NOT NULL CHECK(kind IN ('login','link')),
+		account_id TEXT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+		pubkey TEXT NOT NULL,
+		code TEXT NOT NULL,
+		redeem_hash TEXT NULL CHECK((kind = 'login') = (redeem_hash IS NOT NULL)),
+		status TEXT NOT NULL CHECK(status IN ('pending','proven','expired')),
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		proven_at INTEGER NULL,
+		proof_hash TEXT NULL,
+		CHECK((status = 'proven') = (proven_at IS NOT NULL)),
+		CHECK(kind != 'login' OR status != 'proven' OR account_id IS NOT NULL)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_account_proofs_pubkey_status ON account_proofs(pubkey, status)`,
+	`CREATE INDEX IF NOT EXISTS idx_account_proofs_status_expires ON account_proofs(status, expires_at)`,
+	`CREATE TABLE IF NOT EXISTS account_my_nodes (
+		account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+		pubkey TEXT NOT NULL CHECK(length(pubkey) = 64),
+		name_hint TEXT NULL CHECK(name_hint IS NULL OR length(name_hint) <= 64),
+		added_at INTEGER NOT NULL,
+		PRIMARY KEY (account_id, pubkey)
+	) WITHOUT ROWID`,
+}
+
+// EnsureAccounts creates the account tables exactly as Apply does, also for
+// tests that need them without the rest of the schema.
+func EnsureAccounts(rw *sql.DB) error {
+	for _, q := range accountDDL {
+		if _, err := rw.Exec(q); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AntennaClaimPartsMigration records the #898 combined-claim migration:

@@ -99,6 +99,7 @@ function makeAnalyticsSandbox() {
   ctx.initTabBar = () => {};
   ctx.IATA_COORDS_GEO = {};
   loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/my-nodes.js'); // #1018: loaded right after roles.js, as in index.html
   loadInCtx(ctx, 'public/my-mesh-observers.js'); // #902: loaded before analytics.js, as in index.html
   loadInCtx(ctx, 'public/app.js');
   loadInCtx(ctx, 'public/heard-by.js');

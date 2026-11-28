@@ -120,6 +120,7 @@ function makeNodesEnv() {
   let pageMod = null;
   ctx.registerPage = (name, handlers) => { pageMod = handlers; };
 
+  loadInCtx(ctx, path.join(__dirname, 'public/my-nodes.js')); // #1018: loaded before nodes.js, as in index.html
   loadInCtx(ctx, path.join(__dirname, 'public/nodes.js'));
 
   return { ctx, pageMod: () => pageMod };

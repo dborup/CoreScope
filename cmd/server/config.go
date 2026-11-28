@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/meshcore-analyzer/channelregistry"
+	"github.com/meshcore-analyzer/channelregistry/account"
 	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
 	"github.com/meshcore-analyzer/configkey"
 	"github.com/meshcore-analyzer/dbconfig"
@@ -174,6 +175,12 @@ type Config struct {
 	// internal/channelregistry/antennaclaim). Public claims open only when
 	// enabled AND a strong apiKey is set; the ingestor reads the same block.
 	AntennaClaims *antennaclaim.Config `json:"antennaClaims,omitempty"`
+
+	// Accounts configures owner accounts signed in with a companion (#1018
+	// M1, internal/channelregistry/account). Sign-in opens only when
+	// enabled AND a strong apiKey is set; the ingestor reads the same block
+	// and creates the session key file.
+	Accounts *account.Config `json:"accounts,omitempty"`
 
 	// HashRegions mirrors the ingestor's region-scope config (same
 	// config.json key). The server never derives HMAC keys from it — it
@@ -1217,6 +1224,7 @@ func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
 	c.Share.Nodes.Enabled = keys.On("share", "nodes", "enabled")
 	c.Share.Packets.Enabled = keys.On("share", "packets", "enabled")
 	c.AntennaClaims.ApplyGates(keys.On)
+	c.Accounts.ApplyGates(keys.On)
 	c.ChannelProposals.ApplyGates(keys.On)
 	if c.Privacy != nil {
 		c.Privacy.Enabled = keys.On("privacy", "enabled")

@@ -160,6 +160,9 @@ function loadNodes() {
   // the browser's guard and the cases have to open the panel to exercise it.
   el('nodesRight').classList.add('empty');
   vm.createContext(ctx);
+  // #1018: index.html loads my-nodes.js before nodes.js.
+  vm.runInContext(fs.readFileSync('public/my-nodes.js', 'utf8'), ctx, { filename: 'public/my-nodes.js' });
+  for (const k of Object.keys(ctx.window)) if (!(k in ctx)) ctx[k] = ctx.window[k];
   vm.runInContext(fs.readFileSync('public/nodes.js', 'utf8'), ctx, { filename: 'public/nodes.js' });
   return {
     page: pages.nodes,

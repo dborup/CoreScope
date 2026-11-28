@@ -2639,8 +2639,7 @@
       if (myGen !== _nodesTabGen) return; // superseded by a newer filter/tab change
       const observerIdx = MyMeshObservers.index(observersResp);
       const nodes = nodesResp.nodes || nodesResp;
-      const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
-      const myKeys = new Set(myNodes.map(n => n.pubkey));
+      const myKeys = new Set(MyNodes.keys());
 
       // Map bulk health by pubkey
       const healthMap = {};

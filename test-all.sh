@@ -141,6 +141,7 @@ run test-issue-2052-touch-target-css.js
 run test-channel-proposals.js
 run test-admin-key.js
 run test-antenna-claims.js
+run test-1018-account.js
 run test-packet-detail-channel-xss.js
 run test-channels-name-escaping.js
 

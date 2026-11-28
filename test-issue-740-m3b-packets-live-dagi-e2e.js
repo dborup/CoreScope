@@ -118,7 +118,7 @@ async function main() {
       await page.goto(ORIGIN + '/' + hash);
       await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
       await page.addStyleTag({ path: path.join(PUB, 'style.css') });
-      for (const file of ['payload-labels.js', 'roles.js', 'app.js', 'url-state.js', 'packet-helpers.js', 'hop-resolver.js',
+      for (const file of ['payload-labels.js', 'roles.js', 'my-nodes.js', 'app.js', 'url-state.js', 'packet-helpers.js', 'hop-resolver.js',
         'hop-display.js', 'scope-member-filter.js', 'area-filter.js', 'dagi-filter.js']) {
         await page.addScriptTag({ path: path.join(PUB, file) });
       }

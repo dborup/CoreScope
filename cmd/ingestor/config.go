@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/meshcore-analyzer/channelregistry"
+	"github.com/meshcore-analyzer/channelregistry/account"
 	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
 	"github.com/meshcore-analyzer/configkey"
 	"github.com/meshcore-analyzer/dbconfig"
@@ -142,6 +143,11 @@ type Config struct {
 	// AntennaClaims: limits and the auto-approval switch for owner
 	// antenna-height claims (#789 M2a). The same block is read by the server.
 	AntennaClaims *antennaclaim.Config `json:"antennaClaims,omitempty"`
+
+	// Accounts: owner accounts signed in with a companion (#1018 M1). The
+	// same block is read by the server; this process creates the session
+	// key file when accounts.enabled is set.
+	Accounts *account.Config `json:"accounts,omitempty"`
 
 	// ResolvedPathBackfill tunes the start-up re-resolution of NULL
 	// observations.resolved_path rows (#188, resolved_path_backfill.go).
@@ -508,6 +514,7 @@ func LoadConfig(path string) (*Config, error) {
 		// read the same way as the server reads them (#884, #888).
 		keys := configkey.New(data, log.Printf)
 		cfg.AntennaClaims.ApplyGates(keys.On)
+		cfg.Accounts.ApplyGates(keys.On)
 		cfg.ChannelProposals.ApplyGates(keys.On)
 		if cfg.ClientRxCoverage != nil {
 			cfg.ClientRxCoverage.Enabled = keys.On("clientRxCoverage", "enabled")
