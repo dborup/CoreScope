@@ -829,6 +829,16 @@
     return R.resolve(sec && typeof sec === 'object' ? sec : {});
   }
 
+  /** Stores a viewer's legend window value. The default is a cleared
+   *  override (no stale dot or badge); a bad value is refused (false). */
+  function setLiveScopeSetting(key, val) {
+    var R = _liveScopeRule();
+    if (!R || !isValidLiveScopeSetting(key, val)) return false;
+    if (val === R.DEFAULTS[key]) clearOverride('liveScope', key);
+    else setOverride('liveScope', key, val);
+    return true;
+  }
+
   // ── #968 M2 — Live kiosk: the screen's text size and edge margin ──
   // kiosk.scale and kiosk.safeInsetVmin, per browser. The keys, steps and
   // bounds are the kiosk's own rule (public/live-kiosk.js,
@@ -4162,12 +4172,7 @@
         var R = _liveScopeRule();
         if (!R) return;
         var v = /^[0-9]{1,3}$/.test(inp.value) ? Number(inp.value) : undefined;
-        if (v === undefined || !isValidLiveScopeSetting(key, v)) {
-          inp.value = String(liveScopeSettings(_getEffective())[key]);
-          return;
-        }
-        if (v === R.DEFAULTS[key]) clearOverride('liveScope', key);
-        else setOverride('liveScope', key, v);
+        if (v === undefined || !setLiveScopeSetting(key, v)) inp.value = String(liveScopeSettings(_getEffective())[key]);
       });
     });
 
@@ -4811,8 +4816,8 @@
         ['new-node', 'back-online', 'record-link', 'busiest'].forEach(function (k) { rs.removeProperty('--mc-moment-' + k); });
         // #882 M2 — the colourblind preset's scope palette, both modes.
         ['light', 'dark'].forEach(function (mode) {
-          ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', 'none', 'unknown', 'other'].forEach(function (sx) {
-            rs.removeProperty('--mc-scope-' + mode + '-' + sx);
+          SCOPE_COLOR_KEYS.forEach(function (k) {
+            rs.removeProperty(THEME_CSS_MAP[k].replace('--scope-', '--mc-scope-' + mode + '-'));
           });
         });
         ['light', 'dark'].forEach(function (mode) {
@@ -4985,6 +4990,7 @@
     renderTheme: _renderTheme,
     isValidLiveScopeSetting: isValidLiveScopeSetting,
     liveScopeSettings: liveScopeSettings,
+    setLiveScopeSetting: setLiveScopeSetting,
     buildLiveScopeSettings: _buildLiveScopeSettings
   };
 })();

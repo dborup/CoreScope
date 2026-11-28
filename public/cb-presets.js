@@ -62,16 +62,9 @@
       momentAccents: { newNode: '#009E73', backOnline: '#2E86C1', recordLink: '#B8578A', busiest: '#D55E00' },
       // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
       // on the light and the dark card (test-880-m3-follow-customizer.js).
-      followAccents: { relay: '#D55E00', observer: '#2E86C1' },
-      // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
-      // one list per base-map mode: the stylesheet palette (Okabe-Ito based), so this preset changes nothing.
-      // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
-      scopePalette: {
-        light: ['#0072b2', '#009e73', '#b35c00', '#7e3fa0', '#a8780b', '#00838f', '#b0306f', '#4b5eaa', '#5e8b2f', '#8b4513', '#c026d3', '#6d6d00',
-          '#a1a1aa', '#57534e', '#111827'],
-        dark:  ['#3d8bfd', '#3fd7a5', '#f0a03c', '#c49be0', '#e6c34a', '#4dd0e1', '#f06292', '#8c9eff', '#a5d66b', '#d7a07a', '#e879f9', '#dce775',
-          '#6b7280', '#c4b5a5', '#f8fafc']
-      }
+      followAccents: { relay: '#D55E00', observer: '#2E86C1' }
+      // #882 M2 — no scopePalette: the Live scope colours are the stylesheet's
+      // (style.css --scope-*, Okabe-Ito based), so this preset changes nothing.
     },
     {
       id: 'deut',
@@ -252,12 +245,15 @@
       followAccents: { relay: '#8f8f8f', observer: '#6f6f6f' },
       // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
       // one list per base-map mode: a luminance ramp, darkest first on light tiles, lightest first on dark.
-      // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
+      // Luminance is the only cue, so the ramp is 14 even steps from black (white) to just above
+      // 3:1 on the tile: slots 1-12, then unknown and other, each step >= 1.13:1 from the next.
+      // "No scope" (most traffic) sits below 3:1, as in the stylesheet's light palette, and
+      // >= 1.79:1 from every slot. Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
       scopePalette: {
-        light: ['#000000', '#1a1a1a', '#2b2b2b', '#3a3a3a', '#474747', '#525252', '#5c5c5c', '#666666', '#6e6e6e', '#767676', '#7e7e7e', '#858585',
-          '#a1a1aa', '#57534e', '#111827'],
-        dark:  ['#ffffff', '#f0f0f0', '#e0e0e0', '#d1d1d1', '#c2c2c2', '#b3b3b3', '#a6a6a6', '#999999', '#8c8c8c', '#808080', '#757575', '#6b6b6b',
-          '#6b7280', '#c4b5a5', '#f8fafc']
+        light: ['#000000', '#151515', '#222222', '#2c2c2c', '#363636', '#3f3f3f', '#484848', '#505050', '#595959', '#626262', '#6b6b6b', '#757575',
+          '#a2a2a2', '#7f7f7f', '#898989'],
+        dark:  ['#ffffff', '#f0f0f0', '#e1e1e1', '#d3d3d3', '#c6c6c6', '#b9b9b9', '#adadad', '#a2a2a2', '#979797', '#8d8d8d', '#828282', '#797979',
+          '#525252', '#6f6f6f', '#666666']
       }
     }
   ];

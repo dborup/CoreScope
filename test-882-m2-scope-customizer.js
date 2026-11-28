@@ -146,6 +146,30 @@ test('applyCSS: a value equal to the stylesheet default (a preset pick) leaves -
   assert.strictEqual(c.rootStyle._props['--scope-1'], undefined, 'a cleared pick stays inline');
 });
 
+test('applyCSS, dark mode: a preset pick is compared with the dark stylesheet defaults and stays off <html>', () => {
+  const d = load({ theme: 'dark' });
+  d.api.init({});
+  const p = d.api.PRESETS.ocean;
+  d.api.writeOverrides({ theme: Object.assign({}, p.theme), themeDark: Object.assign({}, p.themeDark) });
+  d.api.applyCSS(d.api.computeEffective({}, d.api.readOverrides()), d.api.readOverrides());
+  SCOPE_KEYS.forEach((k) => assert.strictEqual(d.rootStyle._props[VAR(k)], undefined, k + ' stamped inline in dark mode: a colourblind preset could not win'));
+  const D = cssDefaults('dark');
+  assert.notStrictEqual(D.scope1[0], cssDefaults('light').scope1[0], 'the modes must differ for this test to mean anything');
+  d.api.writeOverrides({ themeDark: { scope1: cssDefaults('light').scope1[0] } });
+  d.api.applyCSS(d.api.computeEffective({}, d.api.readOverrides()), d.api.readOverrides());
+  assert.strictEqual(d.rootStyle._props['--scope-1'], cssDefaults('light').scope1[0], 'the light default is a real pick in dark mode');
+});
+
+test('applyCSS: the default comparison ignores case (an imported #0072B2 is still the default)', () => {
+  const c = load();
+  c.api.init({});
+  const up = {};
+  SCOPE_KEYS.forEach((k) => { up[k] = cssDefaults('light')[k][0].toUpperCase(); });
+  c.api.writeOverrides({ theme: up });
+  c.api.applyCSS(c.api.computeEffective({}, c.api.readOverrides()), c.api.readOverrides());
+  SCOPE_KEYS.forEach((k) => assert.strictEqual(c.rootStyle._props[VAR(k)], undefined, k + ' ' + up[k] + ' stamped inline'));
+});
+
 // ── 3. Colourblind presets ──────────────────────────────────────────────────
 
 function loadPresets() {
@@ -159,9 +183,9 @@ function loadPresets() {
 }
 const CB_IDS = ['default', 'deut', 'prot', 'trit', 'achromat'];
 
-test('cb-presets: every preset sets a light and a dark value for all 15 scope colours; clearPreset removes them', () => {
+test('cb-presets: every tuned preset sets a light and a dark value for all 15 scope colours; clearPreset removes them', () => {
   const { MCP, props } = loadPresets();
-  CB_IDS.forEach((id) => {
+  CB_IDS.filter((id) => id !== 'default').forEach((id) => {
     assert.ok(MCP.applyPreset(id, { skipPersist: true }), id);
     ['light', 'dark'].forEach((mode) => SCOPE_KEYS.forEach((k) => {
       const v = props['--mc-scope-' + mode + '-' + SUFFIX(k)];
@@ -172,14 +196,12 @@ test('cb-presets: every preset sets a light and a dark value for all 15 scope co
   eq(Object.keys(props).filter((k) => /scope/.test(k)), []);
 });
 
-test('cb-presets: the Default (Wong) preset is the stylesheet palette', () => {
+test('cb-presets: the Default (Wong) preset carries no scope palette, so the stylesheet decides; it clears a tuned one', () => {
   const { MCP, props } = loadPresets();
+  assert.strictEqual(MCP.list.find((p) => p.id === 'default').scopePalette, undefined, 'a second copy of the style.css palette');
+  MCP.applyPreset('achromat', { skipPersist: true });
   MCP.applyPreset('default', { skipPersist: true });
-  const L = cssDefaults('light'), D = cssDefaults('dark');
-  SCOPE_KEYS.forEach((k) => {
-    assert.strictEqual(props['--mc-scope-light-' + SUFFIX(k)].toLowerCase(), L[k][0], 'light ' + k);
-    assert.strictEqual(props['--mc-scope-dark-' + SUFFIX(k)].toLowerCase(), D[k][0], 'dark ' + k);
-  });
+  eq(Object.keys(props).filter((k) => /scope/.test(k)), []);
 });
 
 test('cb-presets: tuned palettes have 12 distinct slots, each >= 3:1 on the map tile of its mode (WCAG 1.4.11)', () => {
@@ -195,6 +217,24 @@ test('cb-presets: tuned palettes have 12 distinct slots, each >= 3:1 on the map 
       const n = props['--mc-scope-' + mode + '-none'], u = props['--mc-scope-' + mode + '-unknown'];
       assert.notStrictEqual(n.toLowerCase(), u.toLowerCase(), id + ' ' + mode + ' none = unknown');
     });
+  });
+});
+
+// Luminance is the achromat palette's only cue: no scope, unknown and other
+// must not draw like a named slot (review of #999, finding 3).
+test('cb-presets: achromat keeps none / unknown / other >= 1.13:1 in luminance from every slot and from each other', () => {
+  const { MCP, props } = loadPresets();
+  const C = MCP.wcag.contrast;
+  MCP.applyPreset('achromat', { skipPersist: true });
+  ['light', 'dark'].forEach((mode) => {
+    const col = (k) => props['--mc-scope-' + mode + '-' + SUFFIX(k)];
+    const slots = SCOPE_KEYS.slice(0, 12).map(col);
+    const neutrals = ['scopeNone', 'scopeUnknown', 'scopeOther'];
+    neutrals.forEach((k) => slots.forEach((sl, i) => assert.ok(C(col(k), sl) >= 1.13,
+      mode + ' ' + k + ' ' + col(k) + ' vs slot ' + (i + 1) + ' ' + sl + ' = ' + C(col(k), sl).toFixed(2))));
+    for (let a = 0; a < 3; a++) for (let b = a + 1; b < 3; b++) {
+      assert.ok(C(col(neutrals[a]), col(neutrals[b])) >= 1.13, mode + ' ' + neutrals[a] + ' vs ' + neutrals[b]);
+    }
   });
 });
 
@@ -325,6 +365,22 @@ test('export / import round trip: palette and window', () => {
   assert.strictEqual(b.rootStyle._props['--scope-1'], '#102030');
   assert.strictEqual(b.rootStyle._props['--scope-unknown'], '#405060');
   assert.ok(b.api.validateShape({ theme: { scope2: 'red;}' } }).valid === false, 'a bad colour is accepted on import');
+});
+
+test('setLiveScopeSetting: the default is a cleared override, a bad value is refused', () => {
+  const c = load();
+  c.api.init({});
+  assert.strictEqual(c.api.setLiveScopeSetting('windowMinutes', 5), true);
+  assert.strictEqual(c.api.setLiveScopeSetting('legendRows', 3), true);
+  eq(c.api.readOverrides().liveScope, { windowMinutes: 5, legendRows: 3 });
+  assert.strictEqual(c.api.setLiveScopeSetting('windowMinutes', 15), true);
+  assert.strictEqual(c.api.setLiveScopeSetting('legendRows', 12), true);
+  assert.strictEqual(c.api.countOverrides('liveScope'), 0, 'a default typed back left an override (stale dot and badge)');
+  eq(c.api.readOverrides().liveScope || null, null);
+  assert.strictEqual(c.api.setLiveScopeSetting('legendRows', 40), false);
+  assert.strictEqual(c.api.setLiveScopeSetting('nope', 1), false);
+  assert.strictEqual(c.api.countOverrides('liveScope'), 0);
+  assert.strictEqual(load({ noRule: true }).api.setLiveScopeSetting('legendRows', 3), false, 'accepted without the module');
 });
 
 test('persistence: the section is stored per browser in cs-theme-overrides', () => {
