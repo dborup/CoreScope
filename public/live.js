@@ -5932,7 +5932,14 @@
   // Wait before the one fetch (LiveFollow.settleMs): what is left of the
   // propagation window, so late observations reach the DB first.
   function followSettleMs(tsMs) {
-    return window.LiveFollow.settleMs(tsMs, window.PROPAGATION_BUFFER_MS, Date.now());
+    const LF = window.LiveFollow;
+    return LF.settleMs(tsMs, LF.settleBufferMs(followSettings(), window.PROPAGATION_BUFFER_MS), Date.now());
+  }
+
+  // #880 M3 — the viewer's replay settings (customizer Display > Live Map),
+  // read when a follow starts or loads; LiveFollow.SETTINGS validates them.
+  function followSettings() {
+    return window.SITE_CONFIG && window.SITE_CONFIG.follow;
   }
 
   function prefersReducedMotion() {
@@ -6116,7 +6123,8 @@
       typeName: function(id) { return labels ? labels.enumNameById(id) : null; },
     });
     st.reduced = prefersReducedMotion();
-    st.sched = LF.buildFollowSchedule(st.model, { reducedMotion: st.reduced });
+    st.sched = LF.buildFollowSchedule(st.model,
+      Object.assign(LF.replayOptions(followSettings()), { reducedMotion: st.reduced }));
     st.typeEl.textContent = st.model.typeName + ' · ' + st.hash.slice(0, 8) + '…';
     computeFollowRings(st);
     fitFollowBounds(st);

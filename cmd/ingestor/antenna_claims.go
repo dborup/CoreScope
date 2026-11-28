@@ -68,12 +68,20 @@ type pendingClaim struct {
 	clearOnly bool
 }
 
+// autoApproval is which proven, unflagged claims are approved without an
+// administrator: proven covers claims that set no station details
+// (autoApproveProven), details the claims that do (autoApproveDetails with
+// detailsEnabled, #1007). The two are independent.
+type autoApproval struct {
+	proven, details bool
+}
+
 type antennaClaimRunner struct {
-	store       *Store
-	queue       *channelregistry.Queue
-	limits      antennaclaim.Limits
-	autoApprove bool
-	now         func() time.Time
+	store  *Store
+	queue  *channelregistry.Queue
+	limits antennaclaim.Limits
+	auto   autoApproval
+	now    func() time.Time
 
 	mu sync.Mutex
 	// pending maps a public key to its pending claims: at most
@@ -84,13 +92,16 @@ type antennaClaimRunner struct {
 }
 
 func newAntennaClaimRunner(store *Store, cfg *antennaclaim.Config) *antennaClaimRunner {
+	if cfg != nil && cfg.AutoApproveDetails && !cfg.DetailsRequested() {
+		log.Printf("[antenna-claims] WARNING: antennaClaims.autoApproveDetails is set but has no effect without antennaClaims.detailsEnabled")
+	}
 	return &antennaClaimRunner{
-		store:       store,
-		queue:       channelregistry.NewQueue(antennaclaim.QueueDir(store.path)),
-		limits:      cfg.Limits(),
-		autoApprove: cfg.AutoApprove(),
-		now:         time.Now,
-		pending:     map[string][]pendingClaim{},
+		store:   store,
+		queue:   channelregistry.NewQueue(antennaclaim.QueueDir(store.path)),
+		limits:  cfg.Limits(),
+		auto:    autoApproval{proven: cfg.AutoApprove(), details: cfg.AutoApproveDetailsOn()},
+		now:     time.Now,
+		pending: map[string][]pendingClaim{},
 	}
 }
 
@@ -145,7 +156,7 @@ func (r *antennaClaimRunner) observeAdvert(p *Payload, hash string, isNew bool) 
 	if !ok {
 		return
 	}
-	status, err := r.store.proveAntennaClaim(context.Background(), pc.id, hash, p.Lat, p.Lon, r.autoApprove, r.now().UnixMilli())
+	status, err := r.store.proveAntennaClaim(context.Background(), pc.id, hash, p.Lat, p.Lon, r.auto, r.now().UnixMilli())
 	if err != nil {
 		// The row is still pending: put the code back so a re-sent advert
 		// proves it without waiting for the next reload.
@@ -174,12 +185,15 @@ func (r *antennaClaimRunner) restore(pubkey string, pc pendingClaim) {
 
 // proveAntennaClaim records the proof of a pending claim. A clear-only claim
 // takes effect at once (the owner withdraws their own data, owner decision
-// 4); a claim that sets details always waits for an administrator (#898 N3:
-// contactPublic is free text that must not go public unreviewed); any other
-// claim is approved automatically only with autoApprove and no review flag,
-// otherwise it waits as proven. Returns the new status, or "" when the claim
-// was no longer pending or had expired (a racing match, a reject).
-func (s *Store) proveAntennaClaim(ctx context.Context, id, hash string, lat, lon *float64, autoApprove bool, nowMs int64) (string, error) {
+// 4). A flagged claim (needs_review) always waits for an administrator: one
+// approval decides the whole claim. A claim that sets details is approved
+// automatically only with auto.details (#1007; by default it waits, #898 N3:
+// contactPublic is free text that must not go public unreviewed), any other
+// claim only with auto.proven; otherwise it waits as proven. The policy is
+// applied at proof time only: a claim proven before a switch was turned on
+// stays proven. Returns the new status, or "" when the claim was no longer
+// pending or had expired (a racing match, a reject).
+func (s *Store) proveAntennaClaim(ctx context.Context, id, hash string, lat, lon *float64, auto autoApproval, nowMs int64) (string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -204,8 +218,8 @@ func (s *Store) proveAntennaClaim(ctx context.Context, id, hash string, lat, lon
 	switch {
 	case clearOnly:
 		status, approvedBy = antennaclaim.StatusApproved, sql.NullString{String: antennaclaim.ApprovedByOwner, Valid: true}
-	case setsDetails:
-	case autoApprove && !needsReview:
+	case needsReview:
+	case setsDetails && auto.details, !setsDetails && auto.proven:
 		status, approvedBy = antennaclaim.StatusApproved, sql.NullString{String: antennaclaim.ApprovedByAuto, Valid: true}
 	}
 	if status == antennaclaim.StatusApproved {

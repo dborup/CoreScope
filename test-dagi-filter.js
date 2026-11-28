@@ -580,6 +580,76 @@ test('phone: a sheet with no autofocus in the search, not placed as a popover; t
   assert.strictEqual(one(c, 'dagi-backdrop').hidden, true);
 });
 
+test('beside (#740 M3b): inside a scrolling panel the desktop picker is fixed to its left, level with the trigger, inside the viewport', async () => {
+  const s = load();
+  s.win.innerHeight = 900;
+  const anchor = s.doc.body.appendChild(s.doc.createElement('div'));
+  anchor.getBoundingClientRect = () => ({ left: 1156, top: 64, right: 1396, bottom: 871, width: 240, height: 807 });
+  const c = anchor.appendChild(s.doc.createElement('div'));
+  await s.DF.init(c, { beside: anchor });
+  await flush();
+  one(c, 'dagi-trigger').getBoundingClientRect = () => ({ left: 1172, top: 460, right: 1278, bottom: 494, width: 106, height: 34 });
+  s.dispatch(one(c, 'dagi-trigger'), 'click');
+  const panel = one(c, 'dagi-panel');
+  panel.getBoundingClientRect = () => ({ left: 0, top: 0, right: 360, bottom: 480, width: 360, height: 480 });
+  s.win.listeners.filter((l) => l.t === 'resize').forEach((l) => l.fn({}));
+  s.clock.flush();
+  assert.ok(panel.classList.contains('dagi-panel-beside'), 'not marked as a beside popover');
+  assert.strictEqual(s.placed.length, 0, 'placed under the trigger, where the panel clips it');
+  assert.strictEqual(panel.style.left, (1156 - 360 - 8) + 'px');
+  assert.strictEqual(panel.style.top, (900 - 8 - 480) + 'px', 'not kept inside the viewport');
+  one(c, 'dagi-trigger').getBoundingClientRect = () => ({ left: 1172, top: 200, right: 1278, bottom: 234, width: 106, height: 34 });
+  s.win.listeners.filter((l) => l.t === 'resize').forEach((l) => l.fn({}));
+  s.clock.flush();
+  assert.strictEqual(panel.style.top, '200px', 'not level with the trigger');
+  // The phone sheet ignores it: no inline position.
+  s.media.sheet = true;
+  s.win.listeners.filter((l) => l.t === 'resize').forEach((l) => l.fn({}));
+  s.clock.flush();
+  assert.strictEqual(panel.style.left, '');
+  assert.strictEqual(panel.style.top, '');
+  // Without the option, nothing changes: a plain popover.
+  const t = load();
+  const d = await mount(t);
+  t.dispatch(one(d, 'dagi-trigger'), 'click');
+  assert.ok(!one(d, 'dagi-panel').classList.contains('dagi-panel-beside'));
+  assert.strictEqual(t.placed.length, 1);
+});
+
+test('beside (#740 M3b follow-up): the popover follows its trigger when the panel scrolls, and stops listening once closed', async () => {
+  const s = load();
+  s.win.innerHeight = 600;
+  const anchor = s.doc.body.appendChild(s.doc.createElement('div'));
+  anchor.getBoundingClientRect = () => ({ left: 1156, top: 64, right: 1396, bottom: 571, width: 240, height: 507 });
+  const c = anchor.appendChild(s.doc.createElement('div'));
+  await s.DF.init(c, { beside: anchor });
+  await flush();
+  const trigger = one(c, 'dagi-trigger');
+  trigger.getBoundingClientRect = () => ({ left: 1172, top: 460, right: 1278, bottom: 494, width: 106, height: 34 });
+  s.dispatch(trigger, 'click');
+  const panel = one(c, 'dagi-panel');
+  panel.getBoundingClientRect = () => ({ left: 0, top: 0, right: 360, bottom: 300, width: 360, height: 300 });
+  s.win.listeners.filter((l) => l.t === 'resize').forEach((l) => l.fn({}));
+  s.clock.flush();
+  assert.strictEqual(panel.style.top, (600 - 8 - 300) + 'px');
+  const scrolls = () => anchor.listeners.filter((l) => l.t === 'scroll');
+  assert.strictEqual(scrolls().length, 1, 'no scroll listener on the scrolling panel');
+  // The panel scrolls: the trigger moves up 200 px, the popover with it.
+  trigger.getBoundingClientRect = () => ({ left: 1172, top: 260, right: 1278, bottom: 294, width: 106, height: 34 });
+  scrolls().forEach((l) => l.fn({ target: anchor }));
+  s.clock.flush();
+  assert.strictEqual(panel.style.top, '260px', 'the popover stayed where it was');
+  assert.strictEqual(panel.style.left, (1156 - 360 - 8) + 'px');
+  s.dispatch(one(c, 'dagi-close'), 'click');
+  assert.strictEqual(panel.hidden, true);
+  assert.strictEqual(scrolls().length, 0, 'a closed popover still listens to the panel');
+  // Without beside, nothing listens for a scroll.
+  const t = load();
+  const d = await mount(t);
+  t.dispatch(one(d, 'dagi-trigger'), 'click');
+  assert.strictEqual(t.doc.body.all().reduce((n, e) => n + e.listeners.filter((l) => l.t === 'scroll').length, 0), 0);
+});
+
 test('search box: debounced, matching rows shown, tabs hidden, "N more" and "no match"', async () => {
   const s = load();
   const c = await mount(s);

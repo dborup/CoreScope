@@ -2127,6 +2127,37 @@ console.log('\n=== packets.js: time-window normalisation (#559) ===');
   });
 }
 
+console.log('\n=== packets.js: the DAGI param (#740 M3b) ===');
+{
+  const ctx = loadPacketsSandbox();
+  const api = ctx._packetsTestAPI;
+  const base = { filters: {}, regionParam: '', windowMin: 15, groupByHash: true, limit: 50 };
+  test('buildPacketsParams sends the checked DAGI query beside area', () => {
+    const p = api.buildPacketsParams(Object.assign({}, base, { areaParam: 'SJC', dagiQuery: '&kommune=0751' }));
+    assert.strictEqual(p.get('kommune'), '0751');
+    assert.strictEqual(p.get('area'), 'SJC');
+  });
+  test('buildPacketsParams: no DAGI query, no DAGI param', () => {
+    const p = api.buildPacketsParams(Object.assign({}, base, { dagiQuery: '' }));
+    for (const k of ['kommune', 'landsdel', 'dkregion', 'postnr']) assert.strictEqual(p.get(k), null, k);
+  });
+  test('buildPacketsParams: a pinned hash sends no DAGI param either', () => {
+    const p = api.buildPacketsParams(Object.assign({}, base, { filters: { hash: 'abc' }, dagiQuery: '&postnr=8000' }));
+    assert.strictEqual(p.get('postnr'), null);
+  });
+  test('buildPacketsQuery keeps the DAGI link param (also one still waiting for its check)', () => {
+    ctx.window.DagiFilter = { hashParam: () => 'dkregion=1082' };
+    try {
+      const q = api.buildPacketsQuery(15, 'SJC', true).replace(/^\?/, '').split('&');
+      assert.ok(q.includes('dkregion=1082'), q.join('&'));
+      assert.ok(q.includes('region=SJC'), q.join('&'));
+      ctx.window.DagiFilter = { hashParam: () => '' };
+      assert.strictEqual(api.buildPacketsQuery(15, '', true), '');
+    } finally { delete ctx.window.DagiFilter; }
+    assert.strictEqual(api.buildPacketsQuery(15, '', true), '', 'no DagiFilter loaded');
+  });
+}
+
 testChannelDestinations().then(() => {
   console.log(`\n${'='.repeat(40)}`);
   console.log(`packets.js tests: ${passed} passed, ${failed} failed, ${knownBugs} known bug(s) still failing`);

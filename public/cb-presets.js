@@ -21,6 +21,7 @@
   var STORAGE_KEY = 'meshcore-cb-preset';
   var DATA_ATTR   = 'data-cb-preset';
   var MOMENT_KINDS = ['newNode', 'backOnline', 'recordLink', 'busiest'];
+  var FOLLOW_KINDS = ['relay', 'observer'];
   // newNode -> --mc-moment-new-node
   function _momentVar(k) { return '--mc-moment-' + k.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
 
@@ -56,7 +57,10 @@
       routeRamp: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
-      momentAccents: { newNode: '#009E73', backOnline: '#2E86C1', recordLink: '#B8578A', busiest: '#D55E00' }
+      momentAccents: { newNode: '#009E73', backOnline: '#2E86C1', recordLink: '#B8578A', busiest: '#D55E00' },
+      // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
+      // on the light and the dark card (test-880-m3-follow-customizer.js).
+      followAccents: { relay: '#D55E00', observer: '#2E86C1' }
     },
     {
       id: 'deut',
@@ -85,7 +89,10 @@
       routeRamp: ['#0d0887', '#7e03a8', '#cc4778', '#f89540', '#f0f921'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
-      momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' }
+      momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' },
+      // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
+      // on the light and the dark card (test-880-m3-follow-customizer.js).
+      followAccents: { relay: '#FE6100', observer: '#648FFF' }
     },
     {
       id: 'prot',
@@ -112,7 +119,10 @@
       routeRamp: ['#0d0887', '#7e03a8', '#cc4778', '#f89540', '#f0f921'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
-      momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' }
+      momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' },
+      // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
+      // on the light and the dark card (test-880-m3-follow-customizer.js).
+      followAccents: { relay: '#FE6100', observer: '#648FFF' }
     },
     {
       id: 'trit',
@@ -147,7 +157,10 @@
       routeRamp: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
-      momentAccents: { newNode: '#2A8F4C', backOnline: '#C04F7F', recordLink: '#B45AA6', busiest: '#CC6677' }
+      momentAccents: { newNode: '#2A8F4C', backOnline: '#C04F7F', recordLink: '#B45AA6', busiest: '#CC6677' },
+      // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
+      // on the light and the dark card (test-880-m3-follow-customizer.js).
+      followAccents: { relay: '#CC6677', observer: '#2A8F4C' }
     },
     {
       id: 'achromat',
@@ -195,7 +208,10 @@
       routeRamp: ['#222222', '#555555', '#888888', '#bbbbbb', '#eeeeee'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
-      momentAccents: { newNode: '#777777', backOnline: '#858585', recordLink: '#6f6f6f', busiest: '#8f8f8f' }
+      momentAccents: { newNode: '#777777', backOnline: '#858585', recordLink: '#6f6f6f', busiest: '#8f8f8f' },
+      // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
+      // on the light and the dark card (test-880-m3-follow-customizer.js).
+      followAccents: { relay: '#8f8f8f', observer: '#6f6f6f' }
     }
   ];
 
@@ -303,6 +319,13 @@
         if (ma[k]) style.setProperty(_momentVar(k), ma[k]);
         else style.removeProperty(_momentVar(k));
       });
+      // #880 M3 — Live "Follow a packet" relay and observer dots; style.css
+      // reads them through --follow-* so a customizer colour still wins.
+      var fa = p.followAccents || {};
+      FOLLOW_KINDS.forEach(function (k) {
+        if (fa[k]) style.setProperty('--mc-follow-' + k, fa[k]);
+        else style.removeProperty('--mc-follow-' + k);
+      });
       // #1407 — ROLE_COLORS / ROLE_STYLE are now live getters in roles.js
       // that read --mc-role-* directly, so no explicit sync is needed. The
       // pre-#1407 code path kept them in sync as a workaround for the static
@@ -354,6 +377,7 @@
         for (var hj = 1; hj <= 5; hj++) style.removeProperty('--mc-heat-' + mode + '-' + hj);
       });
       MOMENT_KINDS.forEach(function (k) { style.removeProperty(_momentVar(k)); });
+      FOLLOW_KINDS.forEach(function (k) { style.removeProperty('--mc-follow-' + k); });
     }
     if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') {
       try { window.dispatchEvent(new window.CustomEvent('cb-preset-changed', { detail: { id: null } })); } catch (e) {}

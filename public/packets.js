@@ -825,6 +825,10 @@
   // #990: the Area selection's member set, so live packets follow the server's
   // ?area= rule (scope-member-filter.js). Created on the first selected area.
   let areaMembers = null;
+  // #740 M3b: the same for the DAGI selection, created on the first sent one,
+  // and the server's count of nodes no DAGI filter can include.
+  let dagiMembers = null;
+  let dagiHidden = 0;
   let packetsPaused = false;
   let pauseBuffer = [];
   let observers = [];
@@ -912,6 +916,7 @@
   // change on a later page reloads packets and rewrites that page's URL.
   var _regionChangeHandler = null;
   var _areaChangeHandler = null;
+  var _dagiChangeHandler = null;
 
   var DEFAULT_TIME_WINDOW = 15;
 
@@ -919,6 +924,9 @@
     var parts = [];
     if (timeWindowMin !== DEFAULT_TIME_WINDOW) parts.push('timeWindow=' + timeWindowMin);
     if (regionParam) parts.push('region=' + encodeURIComponent(regionParam));
+    // #740 M3b: the DAGI link param (also one still waiting for its check).
+    var dagi = window.DagiFilter ? window.DagiFilter.hashParam() : '';
+    if (dagi) parts.push(dagi);
     if (!skipHash && filters.hash) parts.push('hash=' + encodeURIComponent(filters.hash));
     if (filters.node) parts.push('node=' + encodeURIComponent(filters.node));
     if (filters.observer) parts.push('observer=' + encodeURIComponent(filters.observer));
@@ -1327,8 +1335,42 @@
     areaMembers.setScope(key);
   }
 
-  function passesAreaFilter(p) {
-    return !areaMembers || areaMembers.accepts(p);
+  // #740 M3b: the DAGI selection's member set, keyed on the query the list
+  // was fetched with (DagiFilter.queryString()): '' until /api/config/dagi has
+  // checked the code, so an unknown or unchecked code is never asked for, and
+  // an empty set is a real empty area. That matches nothing, as on the server
+  // (dagiMembershipSnapshot.matching). The rule is the server's: the ADVERT
+  // sender is a member; geoFilter=0, as for Area.
+  function syncDagiMembers() {
+    const key = window.DagiFilter ? DagiFilter.queryString() : '';
+    if (!dagiMembers) {
+      if (!key) return;
+      dagiMembers = ScopeMemberFilter.create({
+        fetchMembers: q => fetchAllNodes(q + '&geoFilter=0').then(r => r.nodes.map(n => n.public_key)),
+        keyOf: p => ScopeMemberFilter.advertSender(getParsedDecoded(p)),
+        emptyMatchesAll: false,
+      });
+    }
+    dagiMembers.setScope(key);
+  }
+
+  // Area and DAGI combine as on the server: the sender must be in both.
+  function passesMemberFilters(p) {
+    return (!areaMembers || areaMembers.accepts(p)) && (!dagiMembers || dagiMembers.accepts(p));
+  }
+
+  // #740 M3b: with a DAGI filter, only ADVERTs can match (only they name
+  // their sender), and nodes with no position are in no area. A pinned hash
+  // bypasses the filter (buildPacketsParams), so there is nothing to say.
+  function renderDagiNotice() {
+    const el = document.getElementById('packetsDagiNotice');
+    if (!el) return;
+    const on = !filters.hash && !!(window.DagiFilter && DagiFilter.queryString());
+    const hidden = on ? DagiFilter.hiddenNotice(dagiHidden) : '';
+    const text = on ? 'Danish-area filter: only adverts are shown, because other packets do not name their sender.' +
+      (hidden ? ' ' + hidden : '') : '';
+    if (el.textContent !== text) el.textContent = text;
+    el.hidden = !text;
   }
 
   // Incremental path (WS/poll): resolve only remaining heuristic hops.
@@ -1670,7 +1712,7 @@
           const obs = observerMap.get(p.observer_id);
           if (!obs || !selectedRegions.includes(obs.iata)) return false;
         }
-        if (!passesAreaFilter(p)) return false;
+        if (!passesMemberFilters(p)) return false;
         if (filters.node && !(p.decoded_json || '').includes(filters.node)) return false;
         return true;
       });
@@ -1681,7 +1723,7 @@
         // The channel or area may change while hop initialization is in
         // flight. Do not let stale updates occupy the new bounded matching page.
         const accepted = filters.hash ? filtered
-          : filterChannelPackets(filtered, filters.channel).filter(passesAreaFilter);
+          : filterChannelPackets(filtered, filters.channel).filter(passesMemberFilters);
         if (!accepted.length) return;
         if (groupByHash) {
           // Update existing groups or create new ones
@@ -1848,7 +1890,11 @@
     document.removeEventListener('keydown', _pktEsc);
     if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; }
     if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; }
+    if (_dagiChangeHandler) { DagiFilter.offChange(_dagiChangeHandler); _dagiChangeHandler = null; }
+    if (window.DagiFilter) DagiFilter.release(document.getElementById('packetsDagiFilter'));
     areaMembers = null;
+    dagiMembers = null;
+    dagiHidden = 0;
     removeAllByopOverlays();
     packets = [];
     hashIndex = new Map();    selectedId = null;
@@ -1888,7 +1934,7 @@
   // suppresses ALL other filters (region, time window, observer, node,
   // channel). The user is asking for THAT packet regardless of saved
   // selections.
-  function buildPacketsParams({ filters, hideControl = false, regionParam, areaParam, windowMin, groupByHash, limit }) {
+  function buildPacketsParams({ filters, hideControl = false, regionParam, areaParam, dagiQuery, windowMin, groupByHash, limit }) {
     const params = new URLSearchParams();
     if (filters.hash) {
       params.set('hash', filters.hash);
@@ -1907,6 +1953,8 @@
     params.set('limit', String(limit));
     if (regionParam) params.set('region', regionParam);
     if (areaParam) params.set('area', areaParam);
+    // #740 M3b: DagiFilter.queryString(), "&kommune=0751" once checked.
+    if (dagiQuery) new URLSearchParams(dagiQuery).forEach((v, k) => params.set(k, v));
     if (filters.node) params.set('node', filters.node);
     if (filters.observer) params.set('observer', filters.observer);
     if (filters.channel) params.set('channel', filters.channel);
@@ -1938,11 +1986,19 @@
       // init sets it, it still holds 15, and a window from a link that is not
       // one of its options reads as '' (#559).
       const windowMin = savedTimeWindowMin;
+      // #740 M3b: a DAGI code is sent only once /api/config/dagi has checked
+      // it (at once with no selection).
+      if (window.DagiFilter) {
+        await DagiFilter.ready();
+        if (generation !== packetLoadGeneration) return;
+      }
+      syncDagiMembers();
       const params = buildPacketsParams({
         filters,
         hideControl,
         regionParam: RegionFilter.getRegionParam(),
         areaParam: AreaFilter.getAreaParam(),
+        dagiQuery: window.DagiFilter ? DagiFilter.queryString() : '',
         windowMin,
         groupByHash,
         limit: PACKET_LIMIT,
@@ -1954,6 +2010,7 @@
       hashIndex = new Map();
       for (const p of packets) { if (p.hash) hashIndex.set(p.hash, p); }
       totalCount = data.total || packets.length;
+      dagiHidden = data.dagi ? Number(data.dagi.unpositionedHidden) || 0 : 0;
 
       // When ungrouped, flatten observations inline (single API call, no N+1)
       if (!requestGrouped) {
@@ -2031,6 +2088,7 @@
 
       sortPacketsArray();
       renderLeft();
+      renderDagiNotice();
     } catch (e) {
       if (generation !== packetLoadGeneration) return;
       console.error('Failed to load packets:', e);
@@ -2112,6 +2170,7 @@
           </div>
           <div id="packetsRegionFilter" class="region-filter-container" style="display:inline-block;vertical-align:middle"></div>
           <div id="packetsAreaFilter" style="display:none;vertical-align:middle"></div>
+          <div id="packetsDagiFilter" class="dagi-filter-container" style="display:none;vertical-align:middle"></div>
           <div class="multi-select-wrap" id="typeFilterWrap">
             <button class="multi-select-trigger" id="typeTrigger" title="Filter by packet type">All Types ▾</button>
             <div class="multi-select-menu" id="typeMenu"></div>
@@ -2138,6 +2197,7 @@
           <button class="btn btn-icon${showFullNames ? ' active' : ''}" id="fullNamesToggle" title="Show node names in full in the Observer and Path columns instead of shortening them" aria-pressed="${showFullNames}">Full Names</button>
         </div>
       </div>
+      <div id="packetsDagiNotice" class="dagi-notice" role="status" hidden></div>
       <div class="path-symbols-legend-wrapper">${(window.HopDisplay && HopDisplay.renderPathSymbolsLegend) ? HopDisplay.renderPathSymbolsLegend() : ''}</div>
       <div class="table-fluid-wrap"><table class="data-table${showFullNames ? ' pkt-full-names' : ''}" id="pktTable">
         <thead><tr>
@@ -2155,6 +2215,12 @@
     // ?region= is already the selection (RegionFilter.syncFromUrl, #531).
     _regionChangeHandler = RegionFilter.onChange(function() { updatePacketsUrl(); loadPackets(); });
     _areaChangeHandler = AreaFilter.onChange(function() { updatePacketsUrl(); loadPackets(); });
+    // #740 M3b: a link's DAGI param is already the selection (the router's
+    // DagiFilter.syncFromUrl); a pick or a clear reloads the list.
+    if (window.DagiFilter) {
+      DagiFilter.init(document.getElementById('packetsDagiFilter'));
+      _dagiChangeHandler = DagiFilter.onChange(function() { updatePacketsUrl(); loadPackets(); });
+    }
 
     // --- Packet Filter Language ---
     (function() {
@@ -4935,6 +5001,8 @@
       _setPackets: function(p) { packets = p; },
       _packetHashes: function() { return packets.map(p => p.hash); },
       _areaMembersReady: function() { return !areaMembers || areaMembers.ready(); },
+      _dagiMembersReady: function() { return !dagiMembers || dagiMembers.ready(); },
+      _passesMemberFilters: passesMemberFilters,
       _setFilter: function(k, v) { filters[k] = v; },
       _setFullNames: function(on, saved) { showFullNames = !!on; savedFullNames = saved === undefined ? !!on : !!saved; },
       _setObservers: function(list) { observers = list; observerMap = new Map(list.map(o => [o.id, o])); },

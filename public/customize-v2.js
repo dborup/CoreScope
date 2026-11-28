@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk', 'follow'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk', 'follow'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -75,6 +75,10 @@
     momentBusiest: '--moment-busiest',
     // #883 M2 — the Live kiosk big-number tiles: the fill and the numbers.
     kioskTileBg: '--kiosk-tile-bg', kioskNumber: '--kiosk-number',
+    // #880 M3 — Live "Follow a packet": the rings, relays, observers and
+    // the unreliable-clock flag.
+    followRing: '--follow-ring', followRelay: '--follow-relay',
+    followObserver: '--follow-observer', followFlag: '--follow-flag',
     font: '--font', mono: '--mono'
   };
 
@@ -115,10 +119,14 @@
   var MOMENTS_COLOR_KEYS = ['momentCardBg', 'momentNewNode', 'momentBackOnline', 'momentRecordLink', 'momentBusiest'];
   // #883 M2 — likewise outside preset detection: no preset defines them.
   var KIOSK_COLOR_KEYS = ['kioskTileBg', 'kioskNumber'];
+  // #880 M3 — likewise: the relay and observer colours follow the
+  // colourblind preset (cb-presets.js followAccents), not the theme preset.
+  var FOLLOW_COLOR_KEYS = ['followRing', 'followRelay', 'followObserver', 'followFlag'];
 
   var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {
     return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1 && MASTS_COLOR_KEYS.indexOf(k) === -1 &&
-      HEAT_COLOR_KEYS.indexOf(k) === -1 && MOMENTS_COLOR_KEYS.indexOf(k) === -1 && KIOSK_COLOR_KEYS.indexOf(k) === -1;
+      HEAT_COLOR_KEYS.indexOf(k) === -1 && MOMENTS_COLOR_KEYS.indexOf(k) === -1 && KIOSK_COLOR_KEYS.indexOf(k) === -1 &&
+      FOLLOW_COLOR_KEYS.indexOf(k) === -1;
   });
 
   // ── Brand logo swap helper (PR #1137) ──
@@ -388,6 +396,7 @@
     momentCardBg: 'Card Fill', momentNewNode: 'New Node', momentBackOnline: 'Back Online',
     momentRecordLink: 'Record Link', momentBusiest: 'Busiest Repeater',
     kioskTileBg: 'Tile Fill', kioskNumber: 'Numbers',
+    followRing: 'Rings and Card', followRelay: 'Relays', followObserver: 'Observers', followFlag: 'Clock Flag',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -428,6 +437,10 @@
     momentBusiest: 'Live: the icon and stripe of a busiest-repeater moment',
     kioskTileBg: 'Live kiosk (TV mode): the background of the big-number tiles',
     kioskNumber: 'Live kiosk (TV mode): the big numbers in the tiles',
+    followRing: 'Live, Follow a packet: the hop rings, the origin and the follow card accent',
+    followRelay: 'Live, Follow a packet: a relay that retransmitted the packet',
+    followObserver: 'Live, Follow a packet: an observer that heard the packet',
+    followFlag: 'Live, Follow a packet: the flag on an observer with an unreliable clock',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
@@ -683,6 +696,54 @@
   function _saveMomentsSetting(key, v) {
     if (v === momentsSettings(_getServer())[key]) clearOverride('moments', key);
     else setOverride('moments', key, v);
+  }
+
+  // ── #880 M3 — Live "Follow a packet": the viewer's replay settings ──
+  // follow.speed, follow.targetSeconds and follow.settleSeconds, per
+  // browser. The keys, defaults and bounds are the rule in
+  // public/live-follow.js (LiveFollow.SETTINGS), which live.js reads back
+  // from the effective config when a follow loads, so the customizer stores
+  // exactly what the replay uses. That file loads after this one, hence the
+  // lazy lookup; without it no value is accepted. settleSeconds null is the
+  // server's liveMap.propagationBufferMs.
+  function _followRule() {
+    var R = window.LiveFollow && window.LiveFollow.SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function isValidFollowSetting(key, val) {
+    var R = _followRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective Follow settings (this section over the defaults), or
+   *  null without the rule. */
+  function followSettings(effectiveConfig) {
+    var R = _followRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.follow;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
+  /** The server's settle window in whole seconds (what an empty
+   *  settleSeconds means). */
+  function _serverSettleSeconds() {
+    var ms = Number(window.PROPAGATION_BUFFER_MS);
+    return isFinite(ms) && ms >= 0 ? Math.round(ms / 100) / 10 : 5;
+  }
+
+  /** Stores a viewer's Follow value. null, or the value in effect without
+   *  an override (the built-in default; for settleSeconds the server's
+   *  window), is a cleared override. A bad value is refused (false). */
+  function setFollowSetting(key, val) {
+    var R = _followRule();
+    if (!R) return false;
+    if (val === null && key === 'settleSeconds') { clearOverride('follow', key); return true; }
+    if (!isValidFollowSetting(key, val)) return false;
+    var def = key === 'settleSeconds' ? _serverSettleSeconds() : R.DEFAULTS[key];
+    if (val === def) clearOverride('follow', key);
+    else setOverride('follow', key, val);
+    return true;
   }
 
   // ── #968 M2 — Live kiosk: the screen's text size and edge margin ──
@@ -1059,6 +1120,16 @@
           else console.warn('[customizer-v2] Invalid Moments setting rejected:', 'moments.' + mok, moIn[mok]);
         }
         if (Object.keys(moOut).length) clean[key] = moOut;
+      } else if (key === 'follow' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #880 M3 — the Follow replay settings, each by the module's rule.
+        var fIn = delta[key], fOut = {}, fRule = _followRule(), fKeys = fRule ? fRule.KEYS : [];
+        for (var fki = 0; fki < fKeys.length; fki++) {
+          var fk2 = fKeys[fki];
+          if (!_own(fIn, fk2) || fIn[fk2] == null) continue;
+          if (isValidFollowSetting(fk2, fIn[fk2])) fOut[fk2] = fIn[fk2];
+          else console.warn('[customizer-v2] Invalid Follow setting rejected:', 'follow.' + fk2, fIn[fk2]);
+        }
+        if (Object.keys(fOut).length) clean[key] = fOut;
       } else if (key === 'kiosk' && typeof delta[key] === 'object' && delta[key] !== null) {
         // #968 M2 — the kiosk scale and inset, by the kiosk's rule; the
         // operator-only keys (tour, tiles, …) are never the viewer's.
@@ -1710,6 +1781,24 @@
           }
         }
       }
+      // #880 M3 — follow: a speed step and two bounded whole numbers; null
+      // settleSeconds is the documented default (the server's window).
+      if (key === 'follow' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var frule = _followRule();
+        for (var fsk in obj[key]) {
+          if (!_own(obj[key], fsk)) continue;
+          if (frule && frule.KEYS.indexOf(fsk) === -1) {
+            console.warn('[customizer-v2] Unknown follow key in import:', fsk);
+          } else if (obj[key][fsk] === null && frule && frule.DEFAULTS[fsk] === null) {
+            // The documented default written out; writeOverrides skips it.
+          } else if (!isValidFollowSetting(fsk, obj[key][fsk])) {
+            var flim = frule && frule.LIMITS[fsk];
+            errors.push('Invalid Follow setting: follow.' + fsk + ' = "' + obj[key][fsk] + '" \u2014 must be ' +
+              (!frule ? 'unavailable without the Live page' : fsk === 'speed' ? frule.SPEEDS.join(', ')
+                : 'a whole number ' + flim[0] + '-' + flim[1]));
+          }
+        }
+      }
       // #968 M2 — kiosk: a scale step and a bounded inset.
       if (key === 'kiosk' && typeof obj[key] === 'object' && obj[key] !== null) {
         var krule = _kioskRule();
@@ -1971,7 +2060,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + _countOverrides('reach') + _countOverrides('moments') + _countOverrides('kiosk') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + _countOverrides('reach') + _countOverrides('moments') + _countOverrides('kiosk') + _countOverrides('follow') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -2208,6 +2297,11 @@
       var kck = KIOSK_COLOR_KEYS[kci];
       kioskRows += _renderColorRow(kck, section, current[kck] || _cssVarValue(kck), serverCurrent[kck]);
     }
+    var followRows = '';
+    for (var fci = 0; fci < FOLLOW_COLOR_KEYS.length; fci++) {
+      var fck = FOLLOW_COLOR_KEYS[fci];
+      followRows += _renderColorRow(fck, section, current[fck] || _cssVarValue(fck), serverCurrent[fck]);
+    }
 
     return '<div class="cust-panel' + (_activeTab === 'theme' ? ' active' : '') + '" data-panel="theme">' +
       _renderPresets() +
@@ -2220,6 +2314,7 @@
       '<details class="cust-heat-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Heat map (' + HEAT_COLOR_KEYS.length + ' options)</summary>' + heatRows + '</details>' +
       '<details class="cust-moments-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live moments cards (' + MOMENTS_COLOR_KEYS.length + ' options)</summary>' + momentsRows + '</details>' +
       '<details class="cust-kiosk-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live kiosk tiles (' + KIOSK_COLOR_KEYS.length + ' options)</summary>' + kioskRows + '</details>' +
+      '<details class="cust-follow-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live follow a packet (' + FOLLOW_COLOR_KEYS.length + ' options)</summary>' + followRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
   }
@@ -2486,6 +2581,7 @@
       _renderSkraafotoSettings() +
       _renderReachSettings() +
       _renderMomentsSettings() +
+      _renderFollowSettings() +
       _renderKioskSettings() +
     '</div>';
   }
@@ -2781,6 +2877,129 @@
       check('showBackOnline', 'Back online', '') +
       check('showRecordLink', 'Record link', '') +
       check('showBusiest', 'Busiest repeater', '');
+  }
+
+  // ── #880 M3 Live Map: Follow a packet ──
+  // Always offered: any Live page can follow a packet. The panel renders a
+  // placeholder; _bindEvents fills it with createElement/textContent
+  // (_buildFollowSettings) before it wires the override dots, so the dots
+  // here reset like every other. The empty settle field is the server's
+  // window, named in its placeholder and hint.
+  var FOLLOW_SPEED_LABELS = { 0.5: '0.5\u00d7 (slower)', 1: '1\u00d7', 2: '2\u00d7 (faster)' };
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  function _renderFollowSettings() {
+    return _followRule() ? '<div data-cv2-follow-settings></div>' : '';
+  }
+
+  function _followEl(tag, cls, text) {
+    var el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text != null) el.textContent = text;
+    return el;
+  }
+
+  // The DOM twin of _overrideDot(); null when the key is not overridden.
+  function _overrideDotEl(section, key) {
+    if (!_isOverridden(section, key)) return null;
+    var dot = _followEl('span', 'cv2-override-dot');
+    dot.setAttribute('data-reset-s', section);
+    dot.setAttribute('data-reset-k', key);
+    dot.title = 'Reset to server default';
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'ph-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    var use = document.createElementNS(SVG_NS, 'use');
+    use.setAttribute('href', '/icons/phosphor-sprite.svg#ph-circle-fill');
+    svg.appendChild(use);
+    dot.appendChild(svg);
+    return dot;
+  }
+
+  function _followLabel(id, key, text) {
+    var label = _followEl('label', null, text);
+    label.htmlFor = id;
+    var dot = _overrideDotEl('follow', key);
+    if (dot) label.appendChild(dot);
+    return label;
+  }
+
+  // A whole-number field: the label and hint on the left, the input right.
+  function _followNumberRow(key, labelText, hintText, value, placeholder) {
+    var R = _followRule(), lim = R.LIMITS[key], id = 'cv2-follow-' + key;
+    var row = _followEl('div', 'cust-terrain-row');
+    var left = _followEl('div');
+    left.appendChild(_followLabel(id, key, labelText));
+    left.appendChild(_followEl('div', 'cust-hint', hintText));
+    var inp = _followEl('input');
+    inp.type = 'number';
+    inp.id = id;
+    inp.min = String(lim[0]);
+    inp.max = String(lim[1]);
+    inp.step = '1';
+    inp.inputMode = 'numeric';
+    inp.setAttribute('data-cv2-follow', key);
+    inp.value = value == null ? '' : String(value);
+    if (placeholder != null) inp.placeholder = placeholder;
+    row.appendChild(left);
+    row.appendChild(inp);
+    return row;
+  }
+
+  /** Fills the Live Map section into host and wires its fields. A bad
+   *  value is put back; an empty settle field is the server's window. */
+  function _buildFollowSettings(host) {
+    var R = _followRule();
+    if (!R || !host) return;
+    var f = followSettings(_getEffective());
+    var serverSettle = _serverSettleSeconds();
+    host.textContent = '';
+    var title = _followEl('p', 'cust-section-title', 'Live Map');
+    title.style.cssText = 'font-size:14px;margin:16px 0 8px';
+    host.appendChild(title);
+    var intro = _followEl('p', 'cust-hint', 'Follow a packet: how the replay of one packet spreading through the mesh plays on the Live page. ' +
+      'These apply to this browser only, from the next follow.');
+    intro.style.cssText = 'font-size:12px;color:var(--text-muted);margin-bottom:8px';
+    host.appendChild(intro);
+
+    var field = _followEl('div', 'cust-field');
+    field.appendChild(_followLabel('cv2-follow-speed', 'speed', 'Replay speed'));
+    var sel = _followEl('select');
+    sel.id = 'cv2-follow-speed';
+    sel.setAttribute('data-cv2-follow', 'speed');
+    sel.style.cssText = 'width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;' +
+      'background:var(--input-bg);color:var(--text);touch-action:manipulation';
+    R.SPEEDS.forEach(function (v) {
+      var o = _followEl('option', null, FOLLOW_SPEED_LABELS[v] || v + '\u00d7');
+      o.value = String(v);
+      if (v === f.speed) o.selected = true;
+      sel.appendChild(o);
+    });
+    field.appendChild(sel);
+    field.appendChild(_followEl('div', 'cust-hint', 'Divides every hop step of the replay. Default 1\u00d7.'));
+    host.appendChild(field);
+
+    host.appendChild(_followNumberRow('targetSeconds', 'Replay length target (s)',
+      'How long a replay aims to take at 1\u00d7. Each hop step stays between 0.35 s and 1.5 s, so a very short or very deep path takes less or more. Default ' +
+      R.DEFAULTS.targetSeconds + ' s.', f.targetSeconds, null));
+    host.appendChild(_followNumberRow('settleSeconds', 'Settle delay (s)',
+      'How long following a just-heard packet waits for late observations before it loads. Empty: the server\u2019s ' +
+      serverSettle + ' s.', f.settleSeconds, String(serverSettle)));
+
+    var current = function (key) { var now = followSettings(_getEffective()); return now ? now[key] : null; };
+    sel.addEventListener('change', function () {
+      if (!setFollowSetting('speed', Number(sel.value))) sel.value = String(current('speed'));
+    });
+    host.querySelectorAll('input[data-cv2-follow]').forEach(function (inp) {
+      var key = inp.getAttribute('data-cv2-follow');
+      inp.addEventListener('change', function () {
+        var raw = String(inp.value).trim();
+        var v = raw === '' && key === 'settleSeconds' ? null : /^[0-9]{1,2}$/.test(raw) ? Number(raw) : undefined;
+        if (v === undefined || !setFollowSetting(key, v)) {
+          var now = current(key);
+          inp.value = now == null ? '' : String(now);
+        }
+      });
+    });
   }
 
   // ── #968 M2 Live kiosk ──
@@ -3528,6 +3747,10 @@
   }
 
   function _bindEvents(container) {
+    // #880 M3 — the Live Map section is built as DOM; first, so the
+    // override-dot wiring below sees its dots.
+    container.querySelectorAll('[data-cv2-follow-settings]').forEach(_buildFollowSettings);
+
     // Tab switching
     container.querySelectorAll('.cust-tab').forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -4513,6 +4736,15 @@
     kioskSettings: kioskSettings,
     setKioskSetting: setKioskSetting,
     renderKioskSettings: _renderKioskSettings,
+    // #880 M3 — exposed for tests; see test-880-m3-follow-customizer.js. A
+    // getter: public/live-follow.js loads after this file (index.html).
+    FOLLOW_COLOR_KEYS: FOLLOW_COLOR_KEYS,
+    get FOLLOW_SETTING_KEYS() { var R = _followRule(); return R ? R.KEYS.slice() : []; },
+    isValidFollowSetting: isValidFollowSetting,
+    followSettings: followSettings,
+    setFollowSetting: setFollowSetting,
+    renderFollowSettings: _renderFollowSettings,
+    buildFollowSettings: _buildFollowSettings,
     // #968 M3 — exposed for tests; see test-968-m3-customizer-reach.js.
     isValidReachSetting: isValidReachSetting,
     reachInputValue: reachInputValue,

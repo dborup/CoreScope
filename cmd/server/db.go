@@ -3115,6 +3115,14 @@ const EstimateMaxEdgeKm = 30.0
 //
 // Returns ok=false when pubkey has no neighbor with a position at all.
 func (db *DB) nearestPositionedNeighbor(pubkey string, maxEdgeKm float64) (name string, lat, lon float64, contributorCount int, spreadKm float64, ok bool) {
+	return db.nearestVisiblePositionedNeighbor(pubkey, maxEdgeKm, nil)
+}
+
+// nearestVisiblePositionedNeighbor is nearestPositionedNeighbor with the
+// neighbours for which hidden(lowercase pubkey, stored name) is true dropped
+// before the anchor and centroid are chosen, so a hidden identity's position
+// never shapes a visible node's estimate (#1005). A nil hidden keeps all.
+func (db *DB) nearestVisiblePositionedNeighbor(pubkey string, maxEdgeKm float64, hidden func(pubkey, name string) bool) (name string, lat, lon float64, contributorCount int, spreadKm float64, ok bool) {
 	pk := strings.ToLower(strings.TrimSpace(pubkey))
 	if pk == "" {
 		return "", 0, 0, 0, 0, false
@@ -3190,7 +3198,7 @@ func (db *DB) nearestPositionedNeighbor(pubkey string, maxEdgeKm float64) (name 
 	var contributors []weighted
 	for _, c := range candidates {
 		p, found := posByPK[c.pubkey]
-		if !found {
+		if !found || (hidden != nil && hidden(strings.ToLower(c.pubkey), p.name)) {
 			continue
 		}
 		w := c.weight
@@ -4556,8 +4564,10 @@ type areaAnalyticsNode struct {
 // GPS fix (positioned, for computeAreaDensity/computeAreaBridgeNodes) and
 // those without one (unpositioned, for computeAreaPositionGaps to feed
 // through nearestPositionedNeighbor). Same "real fix" convention as
-// GetNodesForScopeAdoption: lat/lon both present and non-zero.
-func (db *DB) GetNodesForAreaAnalytics() (positioned []areaAnalyticsNode, unpositioned []RepeaterRef, err error) {
+// GetNodesForScopeAdoption: lat/lon both present and non-zero. A node for
+// which hidden(lowercase pubkey, stored name) is true is left out of both
+// (#1005); a nil hidden keeps every node.
+func (db *DB) GetNodesForAreaAnalytics(hidden func(pubkey, name string) bool) (positioned []areaAnalyticsNode, unpositioned []RepeaterRef, err error) {
 	rows, err := db.conn.Query("SELECT public_key, name, role, last_seen, lat, lon FROM nodes")
 	if err != nil {
 		return nil, nil, fmt.Errorf("nodes for area analytics query: %w", err)
@@ -4570,11 +4580,14 @@ func (db *DB) GetNodesForAreaAnalytics() (positioned []areaAnalyticsNode, unposi
 		if rows.Scan(&pk, &name, &role, &lastSeen, &lat, &lon) != nil {
 			continue
 		}
+		pkLower := strings.ToLower(pk)
+		if hidden != nil && hidden(pkLower, name.String) {
+			continue
+		}
 		displayName := pk
 		if name.Valid && name.String != "" {
 			displayName = name.String
 		}
-		pkLower := strings.ToLower(pk)
 		if lat.Valid && lon.Valid && lat.Float64 != 0 && lon.Float64 != 0 {
 			positioned = append(positioned, areaAnalyticsNode{
 				PublicKey: pkLower, Name: displayName,
@@ -4730,8 +4743,10 @@ func computeAreaBridgeNodes(nodes []areaAnalyticsNode, areas map[string]AreaEntr
 // anywhere and are counted only in unpositionedNoNeighborFix, not in any
 // area's Approximated total. maxEdgeKm is threaded through to
 // nearestPositionedNeighbor's geo-sanity filter (see its doc comment) --
-// pass Config.NeighborMaxEdgeKm().
-func computeAreaPositionGaps(db *DB, positioned []areaAnalyticsNode, unpositioned []RepeaterRef, areas map[string]AreaEntry, maxEdgeKm float64) (gaps []AreaPositionGap, unpositionedNoNeighborFix int, estimatedNodes []EstimatedAreaNode) {
+// pass Config.NeighborMaxEdgeKm(). hidden is passed to
+// nearestVisiblePositionedNeighbor so hidden neighbours contribute nothing
+// (nil keeps all); the node slices are expected to be pre-filtered.
+func computeAreaPositionGaps(db *DB, positioned []areaAnalyticsNode, unpositioned []RepeaterRef, areas map[string]AreaEntry, maxEdgeKm float64, hidden func(pubkey, name string) bool) (gaps []AreaPositionGap, unpositionedNoNeighborFix int, estimatedNodes []EstimatedAreaNode) {
 	counts := make(map[string]*AreaPositionGap)
 	get := func(key string) *AreaPositionGap {
 		g, exists := counts[key]
@@ -4749,7 +4764,7 @@ func computeAreaPositionGaps(db *DB, positioned []areaAnalyticsNode, unpositione
 		get(key).RealFix++
 	}
 	for _, n := range unpositioned {
-		_, estLat, estLon, contributorCount, spreadKm, ok := db.nearestPositionedNeighbor(n.PublicKey, maxEdgeKm)
+		_, estLat, estLon, contributorCount, spreadKm, ok := db.nearestVisiblePositionedNeighbor(n.PublicKey, maxEdgeKm, hidden)
 		if !ok {
 			unpositionedNoNeighborFix++
 			continue
