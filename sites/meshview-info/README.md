@@ -9,23 +9,20 @@ Lokale kilder til de fire selvstændige sider. Ikke CoreScopes `public/` og ikke
 | hardware.html | /hardware |
 | radio.html | /radio |
 
-## Assets og senere deployment
+## Assets og deployment
 
-HTML bruger `/meshview-info-assets/site.css` og observer bruger desuden
+HTML bruger `/meshview-info-assets/site.css`, og observer bruger desuden
 `/meshview-info-assets/copy-commands.js`. Fonts hentes relativt til CSS-filen.
-En senere, særskilt godkendt deployment skal derfor også kopiere `assets/`
-og tilføje en statisk Caddy-route før CoreScope-fallbacken, eksempelvis:
 
-```caddyfile
-handle_path /meshview-info-assets/* {
-    root * /var/www/meshview-info/assets
-    file_server
-}
-```
+Siderne serveres som statiske filer på de offentlige ruter ovenfor
+(skrivebeskyttet, uden om CoreScopes `public/`). De deployes ikke automatisk:
+en ændring kopieres til serveren manuelt og kun efter ejerens godkendelse.
+Deploy aldrig HTML alene; `assets/` skal med. Kopiér ikke tests eller denne
+README til webroden. Tjek scripts, fonts og CSS med korrekt MIME-type og
+HTTP 200 efter en deploy.
 
-Dette er kun dokumentation; produktionskonfigurationen er ikke ændret.
-Deploy ikke HTML alene. Test scripts, fonts og CSS med korrekt MIME-type og
-HTTP 200 før godkendelse. Kopiér ikke tests eller denne README til webroden.
+Denne mappe er kilden. Siderne på serveren svarede byte for byte til den
+2026-11-28 (bortset fra det script, CDN'et selv indsætter).
 
 ## Test
 
