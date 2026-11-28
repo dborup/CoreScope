@@ -11,6 +11,14 @@
  *     changes later, and is told so through mc-hide-1byte-hops-changed;
  *   - the #1633 boolean key still migrates;
  *   - the customizer marks the server default.
+ * PR #1001 review:
+ *   - F1 a visitor with a stored choice can go back to following the
+ *     default ("Use server default", MC_clear1ByteHopsMode);
+ *   - F2 that, and Reset All, fire mc-hide-1byte-hops-changed;
+ *   - F3 an open customizer follows a client config that lands later
+ *     (mc-1byte-hops-default-changed);
+ *   - F5 a junk early MC_CUSTOMIZER_CFG, and the #1633 key under a
+ *     load-time default.
  */
 'use strict';
 const fs = require('fs');
@@ -44,6 +52,7 @@ function sandbox(store, pre) {
   if (pre) pre(ctx);
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx, { filename: 'hop-filter.js' });
+  ctx.__events = events;
   ctx.__changes = () => events.filter(e => e.type === 'mc-hide-1byte-hops-changed').map(e => e.detail.mode);
   return ctx;
 }
@@ -182,20 +191,170 @@ test('roles.js passes customizer.oneByteHopsDefault from /api/config/client to h
 
 // ── The customizer marks the server default ─────────────────────────────
 test('the customizer select labels the server default and selects the effective mode', () => {
-  const src = fs.readFileSync(path.join(__dirname, 'public', 'customize-v2.js'), 'utf8');
-  const m = src.match(/function _renderHide1ByteHopsToggle\(\) \{[\s\S]*?\n  \}\n/);
-  assert(m, '_renderHide1ByteHopsToggle not found');
   for (const [d, stored] of [['hide', null], ['show', 'mark'], ['mark', null]]) {
-    const w = sandbox(stored ? { [MODE_KEY]: stored } : {});
-    w.MC_set1ByteHopsDefault(d);
-    const html = vm.runInContext('(' + m[0].trim() + ')()', w);
-    const opts = [...html.matchAll(/<option value="(\w+)"( selected)?>([^<]*)<\/option>/g)];
-    assert(opts.length === 3, 'options: ' + html);
-    const marked = opts.filter(o => /\(server default\)/.test(o[3])).map(o => o[1]);
-    assert(JSON.stringify(marked) === JSON.stringify([d]), `default ${d}: marked ${JSON.stringify(marked)}`);
-    const sel = opts.filter(o => o[2]).map(o => o[1]);
-    assert(JSON.stringify(sel) === JSON.stringify([stored || d]), `default ${d}, stored ${stored}: selected ${JSON.stringify(sel)}`);
+    const p = customizerPage(stored ? { [MODE_KEY]: stored } : {});
+    p.ctx.window.MC_set1ByteHopsDefault(d);
+    const { html, sel } = p.mount();
+    assert(sel.options.length === 3, 'options: ' + html);
+    const s = p.shown();
+    assert(JSON.stringify(s.defaults) === JSON.stringify([d]), `default ${d}: marked ${JSON.stringify(s.defaults)}`);
+    assert(s.value === (stored || d), `default ${d}, stored ${stored}: selected ${s.value}`);
   }
+});
+
+// ── Review of PR #1001 (F1–F3, F5) ─────────────────────────────────────
+// F1: a visitor who picked a mode has a way back to following the operator
+// default. F2: that way back (and Reset All) tells the open page. F3: an open
+// customizer follows a client config that lands after it rendered.
+const defaultChanges = (w) => w.__events.filter(e => e.type === 'mc-1byte-hops-default-changed').map(e => e.detail.default);
+
+test('F1 MC_get1ByteHopsChoice: the stored pick, or null when the visitor follows the default', () => {
+  const w = sandbox({});
+  w.MC_set1ByteHopsDefault('hide');
+  assert(w.MC_get1ByteHopsChoice() === null, 'no pick: ' + w.MC_get1ByteHopsChoice());
+  w.MC_set1ByteHopsMode('hide');
+  assert(w.MC_get1ByteHopsChoice() === 'hide', 'a pick equal to the default is still a pick: ' + w.MC_get1ByteHopsChoice());
+  assert(sandbox({ [MODE_KEY]: 'bogus' }).MC_get1ByteHopsChoice() === null, 'junk is no pick');
+  const store = { [LEGACY_KEY]: 'true' };
+  assert(sandbox(store).MC_get1ByteHopsChoice() === 'hide' && store[MODE_KEY] === 'hide', 'the #1633 key migrates: ' + JSON.stringify(store));
+});
+
+test('F1 MC_clear1ByteHopsMode: the pick goes, the visitor follows the default again, later changes too', () => {
+  const store = { [MODE_KEY]: 'show', [LEGACY_KEY]: 'true' };
+  const w = sandbox(store);
+  w.MC_set1ByteHopsDefault('hide');
+  assert(w.MC_get1ByteHopsMode() === 'show', 'before: ' + w.MC_get1ByteHopsMode());
+  w.MC_clear1ByteHopsMode();
+  assert(!(MODE_KEY in store) && !(LEGACY_KEY in store), 'keys left: ' + JSON.stringify(store));
+  assert(w.MC_get1ByteHopsMode() === 'hide' && w.MC_get1ByteHopsChoice() === null, 'after: ' + w.MC_get1ByteHopsMode());
+  w.MC_set1ByteHopsDefault('show');
+  assert(w.MC_get1ByteHopsMode() === 'show', 'a later default is followed: ' + w.MC_get1ByteHopsMode());
+});
+
+test('F2 MC_clear1ByteHopsMode fires mc-hide-1byte-hops-changed with the mode now in force', () => {
+  const w = sandbox({ [MODE_KEY]: 'show' });
+  w.MC_set1ByteHopsDefault('hide');
+  w.MC_clear1ByteHopsMode();
+  assert(JSON.stringify(w.__changes()) === '["hide"]', 'events ' + JSON.stringify(w.__changes()));
+  const e = w.__events.filter(x => x.type === 'mc-hide-1byte-hops-changed').pop();
+  assert(e.detail.value === true, 'detail.value must say hide: ' + JSON.stringify(e.detail));
+});
+
+test('F3 a changed operator default fires mc-1byte-hops-default-changed, also behind a stored pick', () => {
+  const w = sandbox({ [MODE_KEY]: 'show' });
+  w.MC_set1ByteHopsDefault('hide');
+  w.MC_set1ByteHopsDefault('hide');
+  w.MC_set1ByteHopsDefault('junk');
+  assert(JSON.stringify(defaultChanges(w)) === '["hide","mark"]', 'default events ' + JSON.stringify(defaultChanges(w)));
+  assert(w.__changes().length === 0, 'the stored pick hides the mode change: ' + JSON.stringify(w.__changes()));
+  const m = sandbox({});
+  m.MC_set1ByteHopsDefault('mark');
+  assert(defaultChanges(m).length === 0, 'mark → mark fired ' + JSON.stringify(defaultChanges(m)));
+});
+
+test('F5 an early MC_CUSTOMIZER_CFG with a junk default is ignored: mark', () => {
+  for (const junk of ['bogus', 'constructor', '__proto__', 'Hide', 3]) {
+    const w = sandbox({}, (c) => { c.MC_CUSTOMIZER_CFG = { disabledTabs: [], oneByteHopsDefault: junk }; });
+    assert(w.MC_get1ByteHopsDefault() === 'mark', JSON.stringify(junk) + ': default ' + w.MC_get1ByteHopsDefault());
+    assert(w.MC_get1ByteHopsMode() === 'mark', JSON.stringify(junk) + ': mode ' + w.MC_get1ByteHopsMode());
+  }
+});
+
+test('F5 a legacy "true" migrates on the first read under a load-time default (no earlier get)', () => {
+  const store = { [LEGACY_KEY]: 'true' };
+  const w = sandbox(store, (c) => { c.MC_CUSTOMIZER_CFG = { disabledTabs: [], oneByteHopsDefault: 'show' }; });
+  assert(w.MC_get1ByteHopsMode() === 'hide', 'got ' + w.MC_get1ByteHopsMode());
+  assert(store[MODE_KEY] === 'hide' && !(LEGACY_KEY in store), JSON.stringify(store));
+});
+
+// The customizer, run in tests/customizer-sandbox.js with the real
+// hop-filter.js over the same window and localStorage, as on the page.
+function customizerPage(stored) {
+  const { loadCustomizer } = require('./tests/customizer-sandbox');
+  const listeners = {};
+  const fired = [];
+  const els = {};
+  const p = loadCustomizer({
+    setup(ctx) {
+      Object.assign(ctx.localStorage._data, stored || {});
+      ctx.window.addEventListener = (t, fn) => { (listeners[t] = listeners[t] || []).push(fn); };
+      ctx.window.dispatchEvent = (ev) => { fired.push(ev); (listeners[ev.type] || []).forEach(fn => fn(ev)); return true; };
+      ctx.document.getElementById = (id) => els[id] || null;
+    },
+  });
+  vm.runInContext(SRC, p.ctx, { filename: 'hop-filter.js' });
+  p.fired = fired;
+  // A select and reset button built from the rendered markup, standing in
+  // for the open panel's DOM.
+  p.mount = () => {
+    const html = p.api.renderDisplay();
+    const m = html.match(/<select id="cv2-hide-1byte-hops"[^>]*>([\s\S]*?)<\/select>/);
+    assert(m, 'no 1-byte hop select in the Display tab');
+    const sel = { value: null, options: [] };
+    for (const o of m[1].matchAll(/<option value="(\w+)"( selected)?>([^<]*)<\/option>/g)) {
+      sel.options.push({ value: o[1], textContent: o[3] });
+      if (o[2]) sel.value = o[1];
+    }
+    const btn = html.match(/<button[^>]*id="cv2-hide-1byte-hops-reset"[^>]*>/);
+    els['cv2-hide-1byte-hops'] = sel;
+    els['cv2-hide-1byte-hops-reset'] = btn ? { hidden: / hidden[ >]/.test(btn[0]) } : null;
+    return { html, sel, btn: els['cv2-hide-1byte-hops-reset'] };
+  };
+  p.shown = () => {
+    const sel = els['cv2-hide-1byte-hops'];
+    return {
+      value: sel.value,
+      defaults: sel.options.filter(o => /\(server default\)/.test(o.textContent)).map(o => o.value),
+      reset: els['cv2-hide-1byte-hops-reset'] && !els['cv2-hide-1byte-hops-reset'].hidden,
+    };
+  };
+  return p;
+}
+
+test('F1 the customizer offers "Use server default" only while a pick is stored', () => {
+  const fresh = customizerPage({});
+  fresh.ctx.window.MC_set1ByteHopsDefault('hide');
+  const a = fresh.mount();
+  assert(a.btn, 'no reset button rendered: ' + a.html.slice(a.html.indexOf('cv2-hide-1byte-hops'), a.html.indexOf('cv2-hide-1byte-hops') + 600));
+  assert(a.btn.hidden, 'a visitor who follows the default needs no reset');
+  const picked = customizerPage({ [MODE_KEY]: 'show' });
+  picked.ctx.window.MC_set1ByteHopsDefault('hide');
+  const b = picked.mount();
+  assert(b.btn && !b.btn.hidden, 'a stored pick must offer the way back');
+  assert(/data-cv2-hide-1byte-hops-reset[^>]*>[^<]*Use server default</.test(b.html), 'button text');
+});
+
+test('F2 Reset All tells the page that the 1-byte hop mode changed', () => {
+  const p = customizerPage({ [MODE_KEY]: 'show' });
+  p.ctx.window.MC_set1ByteHopsDefault('hide');
+  p.api.resetAll();
+  const modes = p.fired.filter(e => e.type === 'mc-hide-1byte-hops-changed').map(e => e.detail.mode);
+  assert(JSON.stringify(modes) === '["hide"]', 'events ' + JSON.stringify(modes));
+  assert(p.localStorage.getItem(MODE_KEY) === null && p.ctx.window.MC_get1ByteHopsMode() === 'hide', 'mode ' + p.ctx.window.MC_get1ByteHopsMode());
+});
+
+test('F3 an open customizer follows a client config that lands after it rendered', () => {
+  // A visitor who follows the default: the selection and the label move.
+  const p = customizerPage({});
+  p.mount();
+  assert(JSON.stringify(p.shown()) === '{"value":"mark","defaults":["mark"],"reset":false}', 'before ' + JSON.stringify(p.shown()));
+  p.ctx.window.MC_set1ByteHopsDefault('hide');
+  assert(JSON.stringify(p.shown()) === '{"value":"hide","defaults":["hide"],"reset":false}', 'after ' + JSON.stringify(p.shown()));
+  // A stored pick: the selection stays, the label still moves.
+  const s = customizerPage({ [MODE_KEY]: 'show' });
+  s.mount();
+  s.ctx.window.MC_set1ByteHopsDefault('hide');
+  assert(JSON.stringify(s.shown()) === '{"value":"show","defaults":["hide"],"reset":true}', 'stored ' + JSON.stringify(s.shown()));
+});
+
+test('F1 the reset button and a pick keep the open select in step', () => {
+  const p = customizerPage({});
+  p.ctx.window.MC_set1ByteHopsDefault('hide');
+  p.mount();
+  p.ctx.window.MC_set1ByteHopsMode('show');
+  assert(JSON.stringify(p.shown()) === '{"value":"show","defaults":["hide"],"reset":true}', 'after a pick ' + JSON.stringify(p.shown()));
+  p.ctx.window.MC_clear1ByteHopsMode();
+  assert(JSON.stringify(p.shown()) === '{"value":"hide","defaults":["hide"],"reset":false}', 'after the reset ' + JSON.stringify(p.shown()));
 });
 
 console.log(`\n#912 M2: ${passed} passed, ${failed} failed`);

@@ -206,7 +206,7 @@ Three Display settings take a default for every browser from `config.json`, serv
   }
   ```
 
-  `show` draws 1-byte hops without markings, `mark` (the built-in) marks the uncertain ones on the map route, and `hide` leaves 1-byte hops out of the route view, the Live feed and the node path panel. Nothing stored changes. Any other value logs one warning and takes `mark`. The customizer labels the operator's mode "(server default)". A viewer's pick is always stored in their browser, so it keeps winning when the operator later changes the default, until Reset All; a viewer who never picked follows the current default.
+  `show` draws 1-byte hops without markings, `mark` (the built-in) marks the uncertain ones on the map route, and `hide` leaves 1-byte hops out of the route view, the Live feed and the node path panel. Nothing stored changes. Any other value logs one warning and takes `mark`. The customizer labels the operator's mode "(server default)". A viewer's pick is always stored in their browser, so it keeps winning when the operator later changes the default. While a pick is stored, **↺ Use server default** under the setting removes it (Reset All removes it too), and the open page follows the default at once; a viewer who never picked follows the current default. Before #912 M2, choosing Mark stored nothing, so a viewer who explicitly picked Mark then cannot be told apart from one who never picked: they now follow your default.
 
 A viewer's own value in the customizer wins over the operator's, and the operator's wins over the built-in. For Moments on/off, a `?moments=` link and the viewer's Live checkbox win over both. Keys are case-sensitive: a different spelling (`AllowCustomFormat`) is ignored with a warning in the server log.
 

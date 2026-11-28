@@ -23,7 +23,8 @@
   // default (customizer.oneByteHopsDefault on /api/config/client), else mark.
   // Every explicit choice is stored, so a pick equal to today's default still
   // wins when the operator changes it; a visitor who never chose has no key
-  // and follows the operator. The #1633 boolean key migrates once: "true"
+  // and follows the operator; clear1ByteHopsMode() takes a visitor back to
+  // that (PR #1001 review). The #1633 boolean key migrates once: "true"
   // becomes mode "hide"; anything else is dropped.
   var MODE_KEY = 'meshcore-1byte-hops-mode';
   var LEGACY_KEY = 'meshcore-hide-1byte-hops';
@@ -43,7 +44,8 @@
 
   function get1ByteHopsDefault() { return operatorDefault || DEFAULT_MODE; }
 
-  function get1ByteHopsMode() {
+  // The visitor's stored choice, or null when they follow the default.
+  function get1ByteHopsChoice() {
     try {
       var stored = localStorage.getItem(MODE_KEY);
       if (isMode(stored)) return stored;
@@ -59,8 +61,10 @@
         }
       }
     } catch (_e) { /* storage unavailable */ }
-    return get1ByteHopsDefault();
+    return null;
   }
+
+  function get1ByteHopsMode() { return get1ByteHopsChoice() || get1ByteHopsDefault(); }
 
   function fireChanged(mode) {
     if (typeof window !== 'undefined' && typeof window.CustomEvent === 'function') {
@@ -79,13 +83,28 @@
     fireChanged(mode);
   }
 
+  // Forget the choice: the visitor follows the operator default again.
+  function clear1ByteHopsMode() {
+    try {
+      localStorage.removeItem(MODE_KEY);
+      localStorage.removeItem(LEGACY_KEY);
+    } catch (_e) { /* private mode */ }
+    fireChanged(get1ByteHopsMode());
+  }
+
   // #912 M2 — set the operator default (anything but a mode clears it). A
-  // visitor who follows the default is told when their mode changes.
+  // visitor who follows the default is told when their mode changes; the
+  // customizer, which labels the default, is told when the default changes.
   function set1ByteHopsDefault(mode) {
     var before = get1ByteHopsMode();
+    var beforeDefault = get1ByteHopsDefault();
     operatorDefault = isMode(mode) ? mode : null;
     var after = get1ByteHopsMode();
     if (after !== before) fireChanged(after);
+    var dflt = get1ByteHopsDefault();
+    if (dflt !== beforeDefault && typeof window !== 'undefined' && typeof window.CustomEvent === 'function') {
+      window.dispatchEvent(new window.CustomEvent('mc-1byte-hops-default-changed', { detail: { default: dflt } }));
+    }
   }
 
   // #1633 API, kept for its callers: "hide" is mode hide; turning it off
@@ -164,6 +183,8 @@
     window.MC_setHide1ByteHops = setHide1ByteHops;
     window.MC_get1ByteHopsMode = get1ByteHopsMode;
     window.MC_set1ByteHopsMode = set1ByteHopsMode;
+    window.MC_get1ByteHopsChoice = get1ByteHopsChoice;
+    window.MC_clear1ByteHopsMode = clear1ByteHopsMode;
     window.MC_get1ByteHopsDefault = get1ByteHopsDefault;
     window.MC_set1ByteHopsDefault = set1ByteHopsDefault;
     window.MC_isVisibleHop = isVisibleHop;
@@ -178,6 +199,8 @@
       setHide1ByteHops: setHide1ByteHops,
       get1ByteHopsMode: get1ByteHopsMode,
       set1ByteHopsMode: set1ByteHopsMode,
+      get1ByteHopsChoice: get1ByteHopsChoice,
+      clear1ByteHopsMode: clear1ByteHopsMode,
       get1ByteHopsDefault: get1ByteHopsDefault,
       set1ByteHopsDefault: set1ByteHopsDefault,
       isVisibleHop: isVisibleHop,
