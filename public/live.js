@@ -1972,6 +1972,10 @@
               <label class="audio-slider-label">BPM <input type="range" id="audioBpmSlider" min="40" max="300" value="120" class="audio-slider"><span id="audioBpmVal">120</span></label>
               <label class="audio-slider-label">Vol <input type="range" id="audioVolSlider" min="0" max="100" value="30" class="audio-slider"><span id="audioVolVal">30</span></label>
             </div>
+            <!-- #998: after every other control, so none of them moves. -->
+            <div class="live-toggles live-tv-toggles">
+              <button type="button" id="liveTvModeBtn" class="vcr-btn live-tv-btn" aria-haspopup="dialog">TV mode</button>
+            </div>
           </div>
         </div>
         </div><!-- /#liveHeader -->
@@ -2063,6 +2067,8 @@
     // The persisted view toggles are restored and wired before the first
     // await (#88, #125): see wireLiveControls().
     wireLiveControls();
+    const tvBtn = document.getElementById('liveTvModeBtn');
+    if (tvBtn) tvBtn.addEventListener('click', () => openTvMode(tvBtn, generation));
 
     // Fetch configurable map defaults (#115)
     let mapCenter = [37.45, -122.0];
@@ -4424,6 +4430,37 @@
     });
   }
 
+  // #998 — the TV mode dialog (live-tv-mode.js): it builds the kiosk link
+  // from the Area filter's cached areas and the operator preset, and starts
+  // or copies it. No request of its own; destroy() closes it.
+  let tvDialog = null;
+  async function openTvMode(btn, generation) {
+    if (tvDialog || !window.LiveTvMode || !window.LiveKiosk) return;
+    let areas = [];
+    try { areas = await AreaFilter.list(); } catch (_) { /* none configured */ }
+    try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
+    if (tvDialog || generation !== liveGeneration || !document.querySelector('.live-page')) return;
+    tvDialog = window.LiveTvMode.open({
+      doc: document,
+      root: document.body,
+      K: window.LiveKiosk,
+      areas: areas,
+      preset: window.MC_KIOSK_CFG,
+      momentsAvailable: !!window.MC_MOMENTS_CFG,
+      location: location,
+      qrcode: typeof window.qrcode === 'function' ? window.qrcode : null,
+      copy: window.copyToClipboard,
+      navigate: (hash) => { location.hash = hash; },
+      returnFocus: btn,
+      onClose: () => { tvDialog = null; },
+    });
+  }
+
+  function closeTvMode() {
+    if (tvDialog) tvDialog.close();
+    tvDialog = null;
+  }
+
   function setKioskAutoReload(on) {
     if (window.VersionNotice) window.VersionNotice.setAutoReload(on);
   }
@@ -6297,6 +6334,7 @@
 
   function destroy() {
     liveGeneration++;
+    closeTvMode();
     // #1514 S3 — drain onComplete callbacks BEFORE clearing the array. Audio
     // `onHop` hooks rely on these firing exactly once per queued animation;
     // previously destroy() dropped them silently when navigating away with

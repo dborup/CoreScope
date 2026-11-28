@@ -3018,6 +3018,7 @@
     var lim = R.LIMITS.safeInsetVmin;
     return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Live kiosk</p>' +
       '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">For a TV or wall screen running a <code>#/live?kiosk=1</code> link. Set these once in the screen\u2019s own browser, outside kiosk, before opening the kiosk link. They apply to this browser only and win over the server\u2019s kiosk preset.</p>' +
+      '<p class="cust-hint" data-cv2-kiosk-tv style="font-size:12px;color:var(--text-muted);margin-bottom:8px">To build the link, pick the tour and start it or copy it: Live \u2192 settings (the gear) \u2192 <strong>TV mode</strong>.</p>' +
       '<div class="cust-field"><label for="cv2-kiosk-scale">Text and tile size' + _overrideDot('kiosk', 'scale') + '</label>' +
         '<select id="cv2-kiosk-scale" data-cv2-kiosk="scale" style="width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);touch-action:manipulation">' + opts + '</select>' +
         '<div class="cust-hint">Server default: ' + fmt('scale', op.scale) + '. Automatic grows it with the screen, from 1\u00d7 up to 2\u00d7.</div></div>' +
