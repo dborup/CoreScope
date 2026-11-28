@@ -31,8 +31,8 @@
   var MAX_OBSERVATIONS = 200;
   // firmware src/MeshCore.h MAX_PATH_SIZE.
   var MAX_DEPTH = 64;
-  // Replay timing. Hardcoded for now; replay speed and length belong in the
-  // customizer later (AGENTS.md rule 8, #880 M3).
+  // Replay timing. TARGET_MS and the speed are the defaults of the viewer's
+  // settings below (customizer Display > Live Map, #880 M3).
   var TARGET_MS = 6000;
   var MIN_STEP_MS = 350;
   var MAX_STEP_MS = 1500;
@@ -41,6 +41,54 @@
   var LATE_SEC = 60;
   var CAPTION = 'Times as reported by observers (1 s resolution, not clock-corrected).';
   var KIND_ORDER = { origin: 0, ring: 1, relay: 2, observer: 3, summary: 4 };
+
+  // #880 M3 (AGENTS.md rule 8) — the viewer's replay settings: the
+  // customizer's `follow` section (Display > Live Map), per browser in the
+  // customizer's overrides. One rule for the customizer, live.js and the
+  // tests, so the customizer stores exactly what the replay uses.
+  //   speed          0.5, 1 or 2 (SPEEDS): divides every step;
+  //   targetSeconds  3-15 whole seconds: the replay length aimed for at 1x
+  //                  (each hop step stays inside MIN_STEP_MS..MAX_STEP_MS);
+  //   settleSeconds  0-30 whole seconds, or null: the wait for late
+  //                  observations before the fetch; null is the server's
+  //                  liveMap.propagationBufferMs (window.PROPAGATION_BUFFER_MS).
+  // The defaults are the M1/M2 constants, so an unset section plays exactly
+  // as before.
+  var SETTINGS = {
+    KEYS: ['speed', 'targetSeconds', 'settleSeconds'],
+    DEFAULTS: { speed: 1, targetSeconds: TARGET_MS / 1000, settleSeconds: null },
+    SPEEDS: SPEEDS,
+    LIMITS: { targetSeconds: [3, 15], settleSeconds: [0, 30] },
+    valid: function (key, val) {
+      if (SETTINGS.KEYS.indexOf(key) === -1) return false;
+      if (key === 'speed') return SPEEDS.indexOf(val) >= 0;
+      var lim = SETTINGS.LIMITS[key];
+      return typeof val === 'number' && isFinite(val) && Math.floor(val) === val && val >= lim[0] && val <= lim[1];
+    },
+    // A section over the defaults; a bad or missing value is the default,
+    // so a hand-edited override never breaks the replay.
+    resolve: function (sec) {
+      var out = {};
+      var src = sec && typeof sec === 'object' ? sec : {};
+      for (var i = 0; i < SETTINGS.KEYS.length; i++) {
+        var k = SETTINGS.KEYS[i];
+        out[k] = Object.prototype.hasOwnProperty.call(src, k) && SETTINGS.valid(k, src[k]) ? src[k] : SETTINGS.DEFAULTS[k];
+      }
+      return out;
+    }
+  };
+
+  // Settings section → the buildFollowSchedule options it sets.
+  function replayOptions(sec) {
+    var s = SETTINGS.resolve(sec);
+    return { speed: s.speed, targetMs: s.targetSeconds * 1000 };
+  }
+
+  // Settings section + the server's buffer (ms) → the settle window (ms).
+  function settleBufferMs(sec, serverMs) {
+    var s = SETTINGS.resolve(sec);
+    return s.settleSeconds == null ? serverMs : s.settleSeconds * 1000;
+  }
 
   function parseFollowParam(v) {
     if (typeof v !== 'string') return null;
@@ -281,7 +329,9 @@
   function stepMsFor(depth, opts) {
     opts = opts || {};
     var speed = SPEEDS.indexOf(opts.speed) >= 0 ? opts.speed : 1;
-    var target = num(opts.targetMs) || TARGET_MS;
+    var target = num(opts.targetMs);
+    var tl = SETTINGS.LIMITS.targetSeconds;
+    if (target == null || target < tl[0] * 1000 || target > tl[1] * 1000) target = TARGET_MS;
     var d = Math.max(0, Math.min(MAX_DEPTH, num(depth) || 0));
     var step = Math.min(MAX_STEP_MS, Math.max(MIN_STEP_MS, target / (d + 1)));
     return Math.round(step / speed);
@@ -412,6 +462,9 @@
     TARGET_MS: TARGET_MS,
     LATE_SEC: LATE_SEC,
     CAPTION: CAPTION,
+    SETTINGS: SETTINGS,
+    replayOptions: replayOptions,
+    settleBufferMs: settleBufferMs,
     parseFollowParam: parseFollowParam,
     settleMs: settleMs,
     toEpochSec: toEpochSec,

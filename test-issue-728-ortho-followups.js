@@ -95,6 +95,10 @@ function matrixRule(sel) {
   const re = /(^|\})\s*([^{}]*?)\{([^{}]*)\}/g;
   let m;
   while ((m = re.exec(CSS))) {
+    // The match ends on the rule's '}', which is also the next rule's
+    // leading '}': step back onto it, or every other rule is skipped and a
+    // rule is found only by the parity of the rules before it (#740 M3a).
+    re.lastIndex = m.index + m[0].length - 1;
     const sels = m[2].split(',').map(s => s.trim());
     if (sels.indexOf(sel) >= 0) return { sels, body: m[3] };
   }

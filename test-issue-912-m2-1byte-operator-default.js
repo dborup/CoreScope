@@ -208,15 +208,15 @@ test('the customizer select labels the server default and selects the effective 
 // customizer follows a client config that lands after it rendered.
 const defaultChanges = (w) => w.__events.filter(e => e.type === 'mc-1byte-hops-default-changed').map(e => e.detail.default);
 
-test('F1 MC_get1ByteHopsChoice: the stored pick, or null when the visitor follows the default', () => {
+test('F1 MC_getStored1ByteHopsMode: the stored pick, or null when the visitor follows the default', () => {
   const w = sandbox({});
   w.MC_set1ByteHopsDefault('hide');
-  assert(w.MC_get1ByteHopsChoice() === null, 'no pick: ' + w.MC_get1ByteHopsChoice());
+  assert(w.MC_getStored1ByteHopsMode() === null, 'no pick: ' + w.MC_getStored1ByteHopsMode());
   w.MC_set1ByteHopsMode('hide');
-  assert(w.MC_get1ByteHopsChoice() === 'hide', 'a pick equal to the default is still a pick: ' + w.MC_get1ByteHopsChoice());
-  assert(sandbox({ [MODE_KEY]: 'bogus' }).MC_get1ByteHopsChoice() === null, 'junk is no pick');
+  assert(w.MC_getStored1ByteHopsMode() === 'hide', 'a pick equal to the default is still a pick: ' + w.MC_getStored1ByteHopsMode());
+  assert(sandbox({ [MODE_KEY]: 'bogus' }).MC_getStored1ByteHopsMode() === null, 'junk is no pick');
   const store = { [LEGACY_KEY]: 'true' };
-  assert(sandbox(store).MC_get1ByteHopsChoice() === 'hide' && store[MODE_KEY] === 'hide', 'the #1633 key migrates: ' + JSON.stringify(store));
+  assert(sandbox(store).MC_getStored1ByteHopsMode() === 'hide' && store[MODE_KEY] === 'hide', 'the #1633 key migrates: ' + JSON.stringify(store));
 });
 
 test('F1 MC_clear1ByteHopsMode: the pick goes, the visitor follows the default again, later changes too', () => {
@@ -226,7 +226,7 @@ test('F1 MC_clear1ByteHopsMode: the pick goes, the visitor follows the default a
   assert(w.MC_get1ByteHopsMode() === 'show', 'before: ' + w.MC_get1ByteHopsMode());
   w.MC_clear1ByteHopsMode();
   assert(!(MODE_KEY in store) && !(LEGACY_KEY in store), 'keys left: ' + JSON.stringify(store));
-  assert(w.MC_get1ByteHopsMode() === 'hide' && w.MC_get1ByteHopsChoice() === null, 'after: ' + w.MC_get1ByteHopsMode());
+  assert(w.MC_get1ByteHopsMode() === 'hide' && w.MC_getStored1ByteHopsMode() === null, 'after: ' + w.MC_get1ByteHopsMode());
   w.MC_set1ByteHopsDefault('show');
   assert(w.MC_get1ByteHopsMode() === 'show', 'a later default is followed: ' + w.MC_get1ByteHopsMode());
 });

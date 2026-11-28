@@ -132,6 +132,7 @@ run test-968-customizer-kiosk.js
 run test-958-movable-moments.js
 run test-969-operator-display-defaults.js
 run test-live-follow.js
+run test-880-m3-follow-customizer.js
 run test-map-last-heard-options.js
 run test-issue-124-rx-coverage-viewport.js
 run test-rx-coverage-escape.js
@@ -292,6 +293,8 @@ run test-pull-to-reconnect-1091.js
 run test-issue-1279-p2-code-filter.js
 run test-area-filter.js
 run test-scope-member-filter.js
+run test-dagi-filter.js
+run test-issue-740-m3b-dagi-packets-map.js
 run test-issue-1293-marker-shapes.js
 run test-issue-1356-map-a11y.js
 run test-issue-1360-pill-letter-count.js
@@ -309,6 +312,7 @@ run test-issue-1509-detect-preset.js
 run test-issue-353-path-hash-warn.js
 run test-issue-480-no-scope.js
 run test-live.js
+run test-issue-912-live-1byte-hops.js
 run test-issue-220-live-filter-readiness.js
 run test-coverage-gate.js
 run test-node-reach-coverage.js

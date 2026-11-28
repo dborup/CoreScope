@@ -198,7 +198,8 @@ An administrator can also revoke a previously approved channel (see [Channels](c
 |-------|---------|-------------|
 | `enabled` | `false` | Opens public claims. Only takes effect with a strong `apiKey` (16+ characters, not a placeholder). |
 | `detailsEnabled` | `false` | Also lets owners set station details: antenna type, gain, power, installation and two optional contacts (see [Station details](#station-details) below). Needs `enabled` and a strong `apiKey` too. Off, a request that sets details is refused with 403, but one that only removes details is still accepted by the API (the page offers no *Remove* while the switch is off). Details already stored are kept but not served, and an administrator can still revoke them. |
-| `autoApproveProven` | `false` | Approves a proven height without an administrator, unless it is flagged (see `reviewDeltaM`). Only repeater and room claims with a cached surface estimate can be flagged. |
+| `autoApproveProven` | `false` | Approves a proven height without an administrator, unless it is flagged (see `reviewDeltaM`). Only repeater and room claims with a cached surface estimate can be flagged. Covers claims that set no station details; see `autoApproveDetails` for those. |
+| `autoApproveDetails` | `false` | Approves a proven claim that sets station details without an administrator: all of it, the height, the details and both contacts. A flagged claim still waits. Needs `detailsEnabled` (otherwise it has no effect and the ingestor logs a warning). **The public contact is free text and goes public without review; revoke is the only remedy.** See [Station details](#station-details). |
 | `submissionsPerHour` | `20` | Global limit on new claims per hour. |
 | `maxPending` | `256` | Claims waiting for an advert, over all nodes. A claim over the limit is refused; it never evicts another. |
 | `maxPendingPerNode` | `3` | Claims waiting for an advert, per node. An administrator can reject unproven claims under "Waiting for advert". |
@@ -214,13 +215,18 @@ An administrator can also revoke a previously approved channel (see [Channels](c
 
 A value outside its range falls back to its default. The page reads the last five from `GET /api/antenna-claims/config`, so they need only a server restart.
 
-The switches `enabled`, `detailsEnabled` and `autoApproveProven` are read by their exact spelling, like the other opt-in gates: `DetailsEnabled`, or a top-level `AntennaClaims`, is ignored and logged, even after a canonical `false`. The page learns from the same route whether to show the station form (`detailsEnabled`).
+The switches `enabled`, `detailsEnabled`, `autoApproveProven` and `autoApproveDetails` are read by their exact spelling, like the other opt-in gates: `DetailsEnabled`, `AutoApproveDetails`, or a top-level `AntennaClaims`, is ignored and logged, even after a canonical `false`. The page learns from the same route whether to show the station form (`detailsEnabled`); the route and the admin list also report `autoApproveDetails`.
 
 ### Station details
 
 With `detailsEnabled`, a claim can carry station details next to the height, under one code. Owners follow [Station details](antenna-height-claims.md#station-details). What an operator needs to know:
 
 - **Review.** An administrator approves or rejects the whole claim in the admin queue. A claim that sets details is never approved by `autoApproveProven`, because the public contact is free text. A claim that only removes the height or the details takes effect at once after its advert.
+- **Auto-approval of details (opt-in).** With `autoApproveDetails` (and `detailsEnabled`), a proven claim that sets details is approved at its advert, without an administrator, all fields included. A flagged claim (a height far from the surface estimate, or a gain outside 0–15 dBi) still waits, whole. The admin queue lists these claims as approved by `auto`, and an administrator can revoke them as usual. Claims proven before the switch was turned on stay in the queue. Changing the switch needs an ingestor restart.
+
+  > **Warning:** with `autoApproveDetails` on, the public contact (`contactPublic`) is free text that anyone who controls a node can publish on that node's page without review. Revoking the claim is the only remedy.
+
+  The two switches are independent: `autoApproveProven` covers claims without details, `autoApproveDetails` claims with them. For every unflagged claim to go through without an administrator, set both to `true`. `autoApproveDetails` alone still leaves height-only claims in the queue.
 - **Public.** Antenna type, gain, power, installation and the optional public contact are served to everyone by `GET /api/nodes/{pubkey}/station` and shown on the node page. They are not in node cards, link previews, share images, `/api/nodes` or exports, and path profiles do not use them yet.
 - **Admin only.** The administrator contact is stored in its own table and read only by the admin queue (`GET /api/admin/antenna-claims`), for proven and approved claims. It is in no public response and is never logged.
 - **Deletion.** Both contacts are deleted when the details are removed, replaced, rejected, revoked or expired, and when retention deletes the claim. See the [owner guide](antenna-height-claims.md#when-the-details-are-deleted).

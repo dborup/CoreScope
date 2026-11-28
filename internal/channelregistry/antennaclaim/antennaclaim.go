@@ -60,7 +60,7 @@ func ValidStatus(s string) bool { return oneOf(s, Statuses) }
 
 // Who put a claim in force, as stored in node_antenna_claims.approved_by.
 const (
-	ApprovedByAuto  = "auto"  // autoApproveProven approved a proven, unflagged height
+	ApprovedByAuto  = "auto"  // autoApproveProven or autoApproveDetails approved a proven, unflagged claim
 	ApprovedByAdmin = "admin" // an administrator approved it
 	ApprovedByOwner = "owner" // a proven clear-only claim: the owner withdrew their own data
 )
@@ -405,7 +405,12 @@ type Config struct {
 	DetailsEnabled bool `json:"detailsEnabled,omitempty"`
 	// AutoApproveProven approves a proven, unflagged height without an
 	// administrator (owner decision 3); off by default.
-	AutoApproveProven  bool `json:"autoApproveProven,omitempty"`
+	AutoApproveProven bool `json:"autoApproveProven,omitempty"`
+	// AutoApproveDetails approves a proven, unflagged claim that sets
+	// station details without an administrator, all its parts and both
+	// contacts included (#1007). It only takes effect with DetailsEnabled
+	// and is independent of AutoApproveProven; off by default.
+	AutoApproveDetails bool `json:"autoApproveDetails,omitempty"`
 	SubmissionsPerHour int  `json:"submissionsPerHour,omitempty"`
 	MaxPending         int  `json:"maxPending,omitempty"`
 	MaxPendingPerNode  int  `json:"maxPendingPerNode,omitempty"`
@@ -440,6 +445,13 @@ func (c *Config) DetailsRequested() bool { return c != nil && c.DetailsEnabled }
 // an administrator.
 func (c *Config) AutoApprove() bool { return c != nil && c.AutoApproveProven }
 
+// AutoApproveDetailsOn reports whether proven, unflagged claims that set
+// station details are approved without an administrator (#1007): the switch
+// and detailsEnabled both on.
+func (c *Config) AutoApproveDetailsOn() bool {
+	return c != nil && c.DetailsEnabled && c.AutoApproveDetails
+}
+
 // ApplyGates sets the switches from on, which reports whether the config
 // value at a path of canonical, exact-case keys is the JSON boolean true
 // (configkey.Doc.On). encoding/json would also take `Enabled` or
@@ -453,6 +465,7 @@ func (c *Config) ApplyGates(on func(path ...string) bool) {
 	c.Enabled = &enabled
 	c.AutoApproveProven = on("antennaClaims", "autoApproveProven")
 	c.DetailsEnabled = on("antennaClaims", "detailsEnabled")
+	c.AutoApproveDetails = on("antennaClaims", "autoApproveDetails")
 }
 
 // Limits are the resolved limits.

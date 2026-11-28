@@ -44,8 +44,10 @@
 
   function get1ByteHopsDefault() { return operatorDefault || DEFAULT_MODE; }
 
-  // The visitor's stored choice, or null when they follow the default.
-  function get1ByteHopsChoice() {
+  // The visitor's stored choice, or null when they never chose or went back
+  // to the default (#912 M1/M2). Junk is dropped and the #1633 key migrates
+  // here, so every reader sees the same choice.
+  function getStored1ByteHopsMode() {
     try {
       var stored = localStorage.getItem(MODE_KEY);
       if (isMode(stored)) return stored;
@@ -64,7 +66,7 @@
     return null;
   }
 
-  function get1ByteHopsMode() { return get1ByteHopsChoice() || get1ByteHopsDefault(); }
+  function get1ByteHopsMode() { return getStored1ByteHopsMode() || get1ByteHopsDefault(); }
 
   function fireChanged(mode) {
     if (typeof window !== 'undefined' && typeof window.CustomEvent === 'function') {
@@ -183,7 +185,7 @@
     window.MC_setHide1ByteHops = setHide1ByteHops;
     window.MC_get1ByteHopsMode = get1ByteHopsMode;
     window.MC_set1ByteHopsMode = set1ByteHopsMode;
-    window.MC_get1ByteHopsChoice = get1ByteHopsChoice;
+    window.MC_getStored1ByteHopsMode = getStored1ByteHopsMode;
     window.MC_clear1ByteHopsMode = clear1ByteHopsMode;
     window.MC_get1ByteHopsDefault = get1ByteHopsDefault;
     window.MC_set1ByteHopsDefault = set1ByteHopsDefault;
@@ -199,7 +201,7 @@
       setHide1ByteHops: setHide1ByteHops,
       get1ByteHopsMode: get1ByteHopsMode,
       set1ByteHopsMode: set1ByteHopsMode,
-      get1ByteHopsChoice: get1ByteHopsChoice,
+      getStored1ByteHopsMode: getStored1ByteHopsMode,
       clear1ByteHopsMode: clear1ByteHopsMode,
       get1ByteHopsDefault: get1ByteHopsDefault,
       set1ByteHopsDefault: set1ByteHopsDefault,

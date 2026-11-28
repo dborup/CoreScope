@@ -64,6 +64,12 @@ Each packet type has a color and icon:
 | Trace | 🔍 | Pink |
 | Path | 🛤️ | Teal |
 
+## Follow a packet
+
+**Follow ▶** in a packet's line popup or feed card, **Follow next packet**, or a `#/live?follow=<hash>` link replays how that one packet spread through the mesh: rings per hop, the relays that retransmitted it and the observers that heard it, then a summary. Times are as reported by observers (whole seconds, not clock-corrected).
+
+Customize → Display → **Live Map** sets, for this browser: **Replay speed** (0.5×, 1×, 2×), **Replay length target** (3 to 15 s at 1×) and **Settle delay** (how long a follow of a just-heard packet waits for late observations; empty is the server's value). The colours are in Customize → Theme → *Live follow a packet*.
+
 ## Controls
 
 - **Favorites only** — show only packets from your claimed nodes

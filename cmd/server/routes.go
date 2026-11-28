@@ -197,9 +197,12 @@ type Server struct {
 	// nearestPositionedNeighbor once per unpositioned node, each a couple
 	// of small queries -- cheap individually but adds up when many nodes
 	// lack a real fix (the exact situation this endpoint exists to report on).
+	// The cache is only served while the blacklist and hidden-prefix
+	// generations it was built under are still current (#1005).
 	areaAnalyticsMu       sync.Mutex
 	areaAnalyticsCache    *AreaAnalyticsResponse
 	areaAnalyticsCachedAt time.Time
+	areaAnalyticsGen      visibilityGen
 
 	// Cached /api/analytics/gps-sanity response, same 30s-TTL reasoning as
 	// areaAnalyticsCache -- see handleGPSSanity.
@@ -772,8 +775,11 @@ func (s *Server) handlePingScores(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 	const areaAnalyticsTTL = 30 * time.Second
 
+	// Read before computing: a concurrent change at worst tags the result
+	// with the older generation and forces one more rebuild.
+	gen := currentVisibilityGen(s.cfg)
 	s.areaAnalyticsMu.Lock()
-	if s.areaAnalyticsCache != nil && time.Since(s.areaAnalyticsCachedAt) < areaAnalyticsTTL {
+	if s.areaAnalyticsCache != nil && s.areaAnalyticsGen == gen && time.Since(s.areaAnalyticsCachedAt) < areaAnalyticsTTL {
 		cached := s.areaAnalyticsCache
 		s.areaAnalyticsMu.Unlock()
 		s.writeAreaAnalytics(w, cached)
@@ -786,7 +792,12 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	positioned, unpositioned, err := s.db.GetNodesForAreaAnalytics()
+	// Hidden nodes are dropped from the node rows, so bridge-node edges and
+	// position estimates (which also take hidden) never see them: hidden
+	// relays attribute nothing either.
+	cfg := s.cfg
+	hidden := func(pubkey, name string) bool { return nodeListHidden(cfg, pubkey, name) }
+	positioned, unpositioned, err := s.db.GetNodesForAreaAnalytics(hidden)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -809,15 +820,35 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 		UnpositionedTotal: len(unpositioned),
 	}
 	if s.estimatedPositionsEnabled() {
-		resp.PositionGaps, resp.UnpositionedNoNeighborFix, resp.EstimatedNodes = computeAreaPositionGaps(s.db, positioned, unpositioned, s.cfg.Areas, EstimateMaxEdgeKm)
+		resp.PositionGaps, resp.UnpositionedNoNeighborFix, resp.EstimatedNodes = computeAreaPositionGaps(s.db, positioned, unpositioned, s.cfg.Areas, EstimateMaxEdgeKm, hidden)
 	}
 
 	s.areaAnalyticsMu.Lock()
 	s.areaAnalyticsCache = resp
 	s.areaAnalyticsCachedAt = time.Now()
+	s.areaAnalyticsGen = gen
 	s.areaAnalyticsMu.Unlock()
 
 	s.writeAreaAnalytics(w, resp)
+}
+
+// visibilityGen identifies the hidden-identity config a cached result was
+// built under. The observer blacklist is fixed for the process lifetime
+// (obsBlacklistSet is built once), so it needs no generation.
+type visibilityGen struct {
+	blacklist, hiddenPrefixes uint64
+}
+
+func currentVisibilityGen(cfg *Config) visibilityGen {
+	return visibilityGen{blacklist: cfg.BlacklistGeneration(), hiddenPrefixes: cfg.HiddenNamePrefixesGeneration()}
+}
+
+// nodeListHidden is the identity rule /api/nodes applies to its rows: a node
+// is left out when its key is node-blacklisted or its stored name starts with
+// a hidden prefix. Aggregates that must not reveal more than the node list
+// (the Areas tab, #1005) use the same function so the two cannot drift.
+func nodeListHidden(cfg *Config, pubkey, name string) bool {
+	return cfg.IsBlacklisted(pubkey) || cfg.IsNameHidden(name)
 }
 
 // handleGPSSanity serves computeSuspiciousGPSPositions' cross-check of
@@ -842,7 +873,7 @@ func (s *Server) handleGPSSanity(w http.ResponseWriter, r *http.Request) {
 	}
 	s.gpsSanityMu.Unlock()
 
-	positioned, _, err := s.db.GetNodesForAreaAnalytics()
+	positioned, _, err := s.db.GetNodesForAreaAnalytics(nil)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -1860,34 +1891,24 @@ func (f nodeListPostFilters) apply(nodes []map[string]interface{}) []map[string]
 				continue
 			}
 		}
-		if len(f.cfg.NodeBlacklist) > 0 {
-			if pk, ok := node["public_key"].(string); ok && f.cfg.IsBlacklisted(pk) {
-				continue
-			}
-		}
-		if len(f.cfg.HiddenNamePrefixes) > 0 {
-			name, _ := node["name"].(string)
-			if f.cfg.IsNameHidden(name) {
-				continue
-			}
+		pk, _ := node["public_key"].(string)
+		if name, _ := node["name"].(string); nodeListHidden(f.cfg, pk, name) {
+			continue
 		}
 		if f.areaRequested {
 			if f.areaNodes == nil {
 				continue // area given but couldn't be resolved — matches nothing
 			}
-			pk, _ := node["public_key"].(string)
 			if !f.areaNodes[pk] {
 				continue
 			}
 		}
 		if f.dagiRequested {
-			pk, _ := node["public_key"].(string)
 			if !f.dagiNodes[pk] { // nil (an unknown code) matches nothing, like an unknown area
 				continue
 			}
 		}
 		if f.hasScope != nil || len(f.hashRegions) > 0 {
-			pk, _ := node["public_key"].(string)
 			info := f.relayInfoFor(pk)
 			if f.hasScope != nil && (len(info.TransportedScopes) > 0) != *f.hasScope {
 				continue
