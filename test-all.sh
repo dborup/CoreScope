@@ -132,6 +132,7 @@ run test-968-customizer-kiosk.js
 run test-958-movable-moments.js
 run test-969-operator-display-defaults.js
 run test-live-follow.js
+run test-880-m3-follow-customizer.js
 run test-map-last-heard-options.js
 run test-issue-124-rx-coverage-viewport.js
 run test-rx-coverage-escape.js
