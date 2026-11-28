@@ -408,7 +408,13 @@ test('live.js: it opens LiveTvMode with the cached areas, the preset and the kio
   assert.ok(!/\bapi\(|fetch\(/.test(fn), 'a request of its own');
   const destroy = live.slice(live.indexOf('function destroy()'));
   assert.ok(/closeTvMode\(\)/.test(destroy), 'destroy() leaves the dialog');
-  assert.ok(/getElementById\('liveTvModeBtn'\)/.test(live));
+  // Wired with the other controls, before init()'s first await (#125, #220).
+  const wire = live.slice(live.indexOf('  function wireLiveControls()'), live.indexOf('  function wireFollowNext()'));
+  assert.ok(/wireTvMode\(\);/.test(wire), 'not wired in wireLiveControls()');
+  const tvWire = live.slice(live.indexOf('  function wireTvMode()'), live.indexOf('  function setLiveHashParam('));
+  assert.ok(/getElementById\('liveTvModeBtn'\)/.test(tvWire) && /openTvMode\(btn\)/.test(tvWire), tvWire);
+  const init = live.slice(live.indexOf('  async function init(app)'), live.indexOf("    map = L.map('liveMap'"));
+  assert.ok(!/getElementById\('liveTvModeBtn'\)/.test(init), 'init() reaches for the button itself');
 });
 
 test('index.html loads live-tv-mode.js after live-kiosk.js and before live.js', () => {

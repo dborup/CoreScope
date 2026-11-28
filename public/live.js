@@ -1624,6 +1624,15 @@
     syncScopeControls();
     wireHeardFilter();
     wireFollowNext();
+    wireTvMode();
+  }
+
+  // #998 — the TV mode button in the controls opens the kiosk link dialog.
+  function wireTvMode() {
+    const btn = document.getElementById('liveTvModeBtn');
+    if (!btn || btn.dataset.liveWired === '1') return;
+    btn.dataset.liveWired = '1';
+    btn.addEventListener('click', () => openTvMode(btn));
   }
 
   // #880 — "Follow next packet": arm / cancel. Armed, renderPacketTree
@@ -2067,8 +2076,6 @@
     // The persisted view toggles are restored and wired before the first
     // await (#88, #125): see wireLiveControls().
     wireLiveControls();
-    const tvBtn = document.getElementById('liveTvModeBtn');
-    if (tvBtn) tvBtn.addEventListener('click', () => openTvMode(tvBtn, generation));
 
     // Fetch configurable map defaults (#115)
     let mapCenter = [37.45, -122.0];
@@ -4434,7 +4441,8 @@
   // from the Area filter's cached areas and the operator preset, and starts
   // or copies it. No request of its own; destroy() closes it.
   let tvDialog = null;
-  async function openTvMode(btn, generation) {
+  async function openTvMode(btn) {
+    const generation = liveGeneration;
     if (tvDialog || !window.LiveTvMode || !window.LiveKiosk) return;
     let areas = [];
     try { areas = await AreaFilter.list(); } catch (_) { /* none configured */ }
