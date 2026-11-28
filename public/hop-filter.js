@@ -66,7 +66,11 @@
     return null;
   }
 
-  function get1ByteHopsMode() { return getStored1ByteHopsMode() || get1ByteHopsDefault(); }
+  // The mode in force: the stored choice, else the operator default, else
+  // `fallback` when it is a mode, else mark. Live passes "show" (#912).
+  function get1ByteHopsMode(fallback) {
+    return getStored1ByteHopsMode() || operatorDefault || (isMode(fallback) ? fallback : DEFAULT_MODE);
+  }
 
   function fireChanged(mode) {
     if (typeof window !== 'undefined' && typeof window.CustomEvent === 'function') {

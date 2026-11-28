@@ -19,6 +19,8 @@
  *     (mc-1byte-hops-default-changed);
  *   - F5 a junk early MC_CUSTOMIZER_CFG, and the #1633 key under a
  *     load-time default.
+ * CS-VM1 review: N1 the way back for a pick equal to the default, N2 clear
+ * without an operator default, and the caller's fallback (Live: Show).
  */
 'use strict';
 const fs = require('fs');
@@ -240,6 +242,32 @@ test('F2 MC_clear1ByteHopsMode fires mc-hide-1byte-hops-changed with the mode no
   assert(e.detail.value === true, 'detail.value must say hide: ' + JSON.stringify(e.detail));
 });
 
+test('F2 MC_clear1ByteHopsMode without an operator default fires mark, the mode now in force', () => {
+  // CS-VM1 review N2: the event carries the effective mode, not the raw
+  // (absent) operator default.
+  const store = { [MODE_KEY]: 'hide' };
+  const w = sandbox(store);
+  w.MC_clear1ByteHopsMode();
+  assert(!(MODE_KEY in store), 'key left: ' + JSON.stringify(store));
+  assert(JSON.stringify(w.__changes()) === '["mark"]', 'events ' + JSON.stringify(w.__changes()));
+  assert(w.MC_get1ByteHopsMode() === 'mark', 'mode ' + w.MC_get1ByteHopsMode());
+});
+
+test('MC_get1ByteHopsMode(fallback): the caller\'s fallback only when there is no pick and no operator default', () => {
+  // Live passes "show" (#912 M1/M2); every other caller keeps mark.
+  const w = sandbox({});
+  assert(w.MC_get1ByteHopsMode('show') === 'show', 'no pick, no default: ' + w.MC_get1ByteHopsMode('show'));
+  assert(w.MC_get1ByteHopsMode() === 'mark', 'no fallback: ' + w.MC_get1ByteHopsMode());
+  assert(w.MC_get1ByteHopsMode('constructor') === 'mark', 'a junk fallback is mark');
+  w.MC_set1ByteHopsDefault('mark');
+  assert(w.MC_get1ByteHopsMode('show') === 'mark', 'an operator mark beats the fallback: ' + w.MC_get1ByteHopsMode('show'));
+  w.MC_set1ByteHopsDefault('hide');
+  assert(w.MC_get1ByteHopsMode('show') === 'hide', 'the operator default: ' + w.MC_get1ByteHopsMode('show'));
+  w.MC_set1ByteHopsMode('show');
+  w.MC_set1ByteHopsDefault('mark');
+  assert(w.MC_get1ByteHopsMode('hide') === 'show', 'the pick wins: ' + w.MC_get1ByteHopsMode('hide'));
+});
+
 test('F3 a changed operator default fires mc-1byte-hops-default-changed, also behind a stored pick', () => {
   const w = sandbox({ [MODE_KEY]: 'show' });
   w.MC_set1ByteHopsDefault('hide');
@@ -322,6 +350,12 @@ test('F1 the customizer offers "Use server default" only while a pick is stored'
   const b = picked.mount();
   assert(b.btn && !b.btn.hidden, 'a stored pick must offer the way back');
   assert(/data-cv2-hide-1byte-hops-reset[^>]*>[^<]*Use server default</.test(b.html), 'button text');
+  // A pick equal to the default is still a pick: it would not follow a later
+  // change of the default, so it needs the way back too (CS-VM1 review N1).
+  const same = customizerPage({ [MODE_KEY]: 'hide' });
+  same.ctx.window.MC_set1ByteHopsDefault('hide');
+  const c = same.mount();
+  assert(c.btn && !c.btn.hidden, 'a pick equal to the default must offer the way back');
 });
 
 test('F2 Reset All tells the page that the 1-byte hop mode changed', () => {
